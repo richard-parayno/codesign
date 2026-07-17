@@ -1,1 +1,8 @@
 .devenv/
+.direnv/
+.env
+.svelte-kit/
+build/
+node_modules/
+coverage/
+*.log

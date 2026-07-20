@@ -9,8 +9,14 @@ import {
   type ProjectEnvelopeV2,
   type ProjectSummary,
 } from './migration';
-import { appendProcessEvent, applyOperation } from './operations';
-import { blankDocument, type DesignDocument, type DesignOperation } from './types';
+import { appendProcessEvent, applyOperation, applyOperationBatch } from './operations';
+import {
+  blankDocument,
+  defaultStyle,
+  type DesignDocument,
+  type DesignNode,
+  type DesignOperation,
+} from './types';
 
 export const LEGACY_DOCUMENT_KEY = 'malleable.document.v1';
 export const LEGACY_PROJECT_STORAGE_KEY = 'malleable.projects.v1';
@@ -82,6 +88,24 @@ function normalizedName(name: string) {
   return name.trim().slice(0, 80);
 }
 
+function normalizeNodeStyle(node: DesignNode) {
+  node.style = { ...defaultStyle, ...node.style };
+}
+
+/**
+ * v2 style schemas gained editor-facing fields without changing the storage version.
+ * Validation accepts older v2 payloads through schema defaults, so restoration must
+ * materialize those defaults on every canvas snapshot that can become active later.
+ */
+function normalizeDocumentStyles(source: DesignDocument) {
+  const document = structuredClone(source);
+  Object.values(document.nodes).forEach(normalizeNodeStyle);
+  Object.values(document.revisions).forEach((revision) => {
+    Object.values(revision.snapshot.nodes).forEach(normalizeNodeStyle);
+  });
+  return document;
+}
+
 function stateFromEnvelope(envelope: ProjectEnvelopeV2, warning: string | null = null): History {
   const document =
     envelope.projects.find((project) => project.id === envelope.activeProjectId)?.document ??
@@ -139,9 +163,18 @@ export function createDocumentStore(injectedStorage?: ProjectStorage) {
   }
 
   function activateEnvelope(envelope: ProjectEnvelopeV2, warning: string | null = null) {
-    documents = new Map(envelope.projects.map((project) => [project.id, project.document]));
+    const normalizedEnvelope: ProjectEnvelopeV2 = {
+      ...envelope,
+      projects: envelope.projects.map((project) => ({
+        ...project,
+        document: normalizeDocumentStyles(project.document),
+      })),
+    };
+    documents = new Map(
+      normalizedEnvelope.projects.map((project) => [project.id, project.document]),
+    );
     histories = new Map();
-    const restored = stateFromEnvelope(envelope, warning);
+    const restored = stateFromEnvelope(normalizedEnvelope, warning);
     store.set(restored);
     return restored;
   }
@@ -153,6 +186,17 @@ export function createDocumentStore(injectedStorage?: ProjectStorage) {
         ...state,
         past: [...state.past.slice(-49), state.present],
         present: applyOperation(state.present, operation),
+        future: [],
+      }));
+    },
+    applyBatch(operations: DesignOperation[], transactionId?: string) {
+      if (!operations.length) return;
+      commit((state) => ({
+        ...state,
+        past: [...state.past.slice(-49), state.present],
+        present: applyOperationBatch(state.present, operations, {
+          transactionId: transactionId ?? `editor-${operations[0].id}`,
+        }),
         future: [],
       }));
     },

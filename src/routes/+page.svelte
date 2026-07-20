@@ -12,6 +12,7 @@
     type GenerationRun,
     type ObservationScope,
     type ProcessEvent,
+    type StylePatch,
   } from '$lib/model/types';
   import {
     acceptCandidateChanges,
@@ -36,7 +37,31 @@
     orderedScreenNodes,
     screenLayerRows,
   } from '$lib/model/layers';
+  import {
+    createClipboardPayload,
+    deserializeClipboardPayload,
+    isEligibleClipboardParent,
+    materializeClipboard,
+    serializeClipboardPayload,
+    type CodesignClipboardPayload,
+  } from '$lib/editor/clipboard';
+  import {
+    collectiveSelectionBounds,
+    consistentSpacingGuides,
+    constrainToDominantAxis,
+    FRAME_PRESETS,
+    framePresetById,
+    framePresetSize,
+    marqueeSelectedIds,
+    resizeBounds,
+    snapBounds,
+    type FrameOrientation,
+    type ResizeHandle,
+    type SmartGuide,
+    type SpacingGuide,
+  } from '$lib/editor/geometry';
   import { logAction } from '$lib/debug/action-log';
+  import { componentRegistry } from '$lib/design-system/registry';
   import CodesignPanel, {
     type CandidateView,
     type ObservationScopeView,
@@ -48,6 +73,7 @@
   type EditorMode = 'edit' | 'codesign' | 'preview';
   const DEFAULT_CANVAS_BACKGROUND = '#edf0f3';
   const CANVAS_BACKGROUND_KEY = 'malleable.canvas-background.v1';
+  const FRAME_SIZE_KEY = 'codesign.frame-size.v1';
   let tool: Tool = 'select';
   let selection: string[] = [];
   let error = '';
@@ -62,15 +88,44 @@
   let canvasBackground = DEFAULT_CANVAS_BACKGROUND;
   let contextMenu: { x: number; y: number; nodeId?: string } | null = null;
   let contextMenuElement: HTMLDivElement;
+  let shortcutsOpen = false;
   let draft: Bounds | null = null;
+  let marquee: Bounds | null = null;
+  let transientBounds: Record<string, Bounds> = {};
+  let smartGuides: SmartGuide[] = [];
+  let spacingGuides: SpacingGuide[] = [];
+  let internalClipboard: CodesignClipboardPayload | null = null;
+  let pasteCount = 0;
+  let duplicatePreviewOffset = { x: 0, y: 0 };
+  let spacePressed = false;
+  let editingTextId = '';
+  let editingTextDraft = '';
+  let inlineTextEditor: HTMLTextAreaElement;
+  let framePresetId = 'web-desktop';
+  let frameOrientation: FrameOrientation = 'landscape';
+  let frameSize = { width: 1440, height: 1024 };
+  let commandLabel = 'Ctrl';
+  let layerDrag: {
+    sourceId: string;
+    targetId?: string;
+    position?: 'before' | 'inside' | 'after';
+  } | null = null;
+  let collapsedLayerIds = new Set<string>();
+  let editingLayerId = '';
+  let editingLayerName = '';
+  let layerNameInput: HTMLInputElement;
   let gesture: {
-    mode: 'draw' | 'move' | 'resize' | 'pan';
+    mode: 'draw' | 'move' | 'duplicate' | 'resize' | 'pan' | 'marquee';
     startX: number;
     startY: number;
     lastX: number;
     lastY: number;
     original?: Bounds;
+    originalBounds?: Record<string, Bounds>;
     previewIds?: string[];
+    handle?: ResizeHandle;
+    additive?: boolean;
+    duplicatePayload?: CodesignClipboardPayload;
   } | null = null;
   let connectSource = '';
   let backend: 'local' | 'codex' = 'local';
@@ -98,8 +153,13 @@
   $: currentScreen =
     document.screens.find((screen) => screen.id === document.activeScreenId) ?? document.screens[0];
   $: visibleNodes = currentScreen ? orderedScreenNodes(document, currentScreen.id) : [];
-  $: layerRows = currentScreen ? screenLayerRows(document, currentScreen.id) : [];
+  $: layerRows = currentScreen
+    ? screenLayerRows(document, currentScreen.id, collapsedLayerIds)
+    : [];
   $: selectedNodes = selection.map((id) => document.nodes[id]).filter(Boolean);
+  $: selectionBounds = collectiveSelectionBounds(
+    selectedNodes.map((node) => transientBounds[node.id] ?? node.bounds),
+  );
   $: contextNode = contextMenu?.nodeId ? document.nodes[contextMenu.nodeId] : undefined;
   $: code = generateSvelte(document);
   $: observationScope = makeObservationScope(
@@ -157,10 +217,26 @@
 
   onMount(() => {
     documentStore.restore();
+    commandLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? 'Cmd' : 'Ctrl';
     try {
       const savedBackground = localStorage.getItem(CANVAS_BACKGROUND_KEY);
       if (savedBackground && /^#[0-9a-f]{6}$/i.test(savedBackground))
         canvasBackground = savedBackground;
+      const savedFrameSize = JSON.parse(localStorage.getItem(FRAME_SIZE_KEY) ?? 'null') as {
+        width?: number;
+        height?: number;
+        presetId?: string;
+        orientation?: FrameOrientation;
+      } | null;
+      if (
+        savedFrameSize &&
+        Number.isFinite(savedFrameSize.width) &&
+        Number.isFinite(savedFrameSize.height)
+      ) {
+        frameSize = { width: savedFrameSize.width!, height: savedFrameSize.height! };
+        framePresetId = savedFrameSize.presetId ?? 'custom';
+        frameOrientation = savedFrameSize.orientation ?? 'landscape';
+      }
     } catch {
       // The editor still works when browser storage is unavailable.
     }
@@ -175,8 +251,24 @@
       });
     const keydown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
-      if (target.matches('input, select, textarea')) return;
+      if (target.matches('input, select, textarea, [contenteditable="true"]')) return;
       const key = event.key.toLowerCase();
+      const command = event.metaKey || event.ctrlKey;
+      if (key === '/' && !command && !event.altKey) {
+        event.preventDefault();
+        shortcutsOpen ? closeShortcuts('keyboard') : openShortcuts('keyboard');
+        return;
+      }
+      if (shortcutsOpen) {
+        event.preventDefault();
+        if (key === 'escape') closeShortcuts('keyboard');
+        return;
+      }
+      if (event.code === 'Space') {
+        event.preventDefault();
+        spacePressed = true;
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && key === 'z') {
         event.preventDefault();
         event.shiftKey ? redo('keyboard') : undo('keyboard');
@@ -187,6 +279,44 @@
         redo('keyboard');
         return;
       }
+      if (command && key === 'c') {
+        event.preventDefault();
+        void copySelection(false);
+        return;
+      }
+      if (command && key === 'x') {
+        event.preventDefault();
+        void copySelection(true);
+        return;
+      }
+      if (command && key === 'v') {
+        event.preventDefault();
+        void pasteSelection();
+        return;
+      }
+      if (command && key === 'd') {
+        event.preventDefault();
+        duplicateSelection();
+        return;
+      }
+      if (command && key === 'g') {
+        event.preventDefault();
+        event.shiftKey ? ungroupSelection() : groupSelection();
+        return;
+      }
+      if (command && (event.key === ']' || event.key === '[')) {
+        event.preventDefault();
+        reorderSelection(
+          event.key === ']'
+            ? event.shiftKey
+              ? 'front'
+              : 'forward'
+            : event.shiftKey
+              ? 'back'
+              : 'backward',
+        );
+        return;
+      }
       if (event.key === 'Delete' || event.key === 'Backspace') {
         if (selection.length)
           apply({ id: uid('op'), type: 'delete', actor: 'user', targetIds: selection });
@@ -194,11 +324,18 @@
         return;
       }
       if (key === 'escape') {
-        setEditorMode('edit');
-        contextMenu = null;
-        draft = null;
-        gesture = null;
+        if (gesture || draft || marquee || Object.keys(transientBounds).length) {
+          gesture = null;
+          draft = null;
+          marquee = null;
+          transientBounds = {};
+          smartGuides = [];
+        } else if (contextMenu) contextMenu = null;
+        else if (tool !== 'select') tool = 'select';
+        else if (selection.length) selection = [];
+        else setEditorMode('edit');
         logAction('editor.escape', { revision: document.revision });
+        return;
       }
       const shortcuts: Record<string, Tool> = {
         v: 'select',
@@ -221,15 +358,20 @@
         });
       }
     };
+    const keyup = (event: KeyboardEvent) => {
+      if (event.code === 'Space') spacePressed = false;
+    };
     const dismissContextMenu = (event: PointerEvent) => {
       if (contextMenu && event.target instanceof Element && !event.target.closest('.context-menu'))
         contextMenu = null;
     };
     window.addEventListener('keydown', keydown);
+    window.addEventListener('keyup', keyup);
     window.addEventListener('pointerdown', dismissContextMenu);
     return () => {
       if (viewportLogTimer) clearTimeout(viewportLogTimer);
       window.removeEventListener('keydown', keydown);
+      window.removeEventListener('keyup', keyup);
       window.removeEventListener('pointerdown', dismissContextMenu);
     };
   });
@@ -245,6 +387,7 @@
     if (control.closest('.outline')) return 'sidebar';
     if (control.closest('.canvas-toolbar')) return 'canvas-toolbar';
     if (control.closest('.context-menu')) return 'context-menu';
+    if (control.closest('.shortcuts-dialog')) return 'shortcuts-overlay';
     if (control.closest('.context-bar')) return 'selection-toolbar';
     if (control.closest('.codesign-panel')) return 'codesign';
     if (control.closest('.bottom-panel')) return 'bottom-panel';
@@ -264,6 +407,15 @@
     if (tool === nextTool) return;
     tool = nextTool;
     logAction('tool.changed', { tool: nextTool, source });
+  }
+  function openShortcuts(source: 'keyboard' | 'toolbar') {
+    contextMenu = null;
+    shortcutsOpen = true;
+    logAction('shortcuts.opened', { source });
+  }
+  function closeShortcuts(source: 'keyboard' | 'button' | 'backdrop') {
+    shortcutsOpen = false;
+    logAction('shortcuts.closed', { source });
   }
   function setEditorMode(nextMode: EditorMode) {
     if (editorMode === nextMode) return;
@@ -301,6 +453,9 @@
   }
   function clearProjectTransientState() {
     selection = [];
+    collapsedLayerIds = new Set();
+    editingLayerId = '';
+    editingLayerName = '';
     contextMenu = null;
     draft = null;
     gesture = null;
@@ -446,6 +601,150 @@
       });
     }
   }
+  function applyBatch(operations: DesignOperation[], label: string) {
+    if (!operations.length) return;
+    const baseRevision = document.revision;
+    try {
+      documentStore.applyBatch(operations, `${label}-${uid('transaction')}`);
+      error = '';
+      notice = `${label.replaceAll('-', ' ')} applied`;
+      logAction('operation.batch-applied', {
+        label,
+        operationTypes: operations.map((operation) => operation.type),
+        operationCount: operations.length,
+        baseRevision,
+        nextRevision: baseRevision + 1,
+      });
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : `${label} could not be applied`;
+      logAction('operation.failed', { type: label, actor: 'user', baseRevision, message: error });
+    }
+  }
+  function duplicateIdMap(payload: CodesignClipboardPayload) {
+    return Object.fromEntries(Object.keys(payload.nodes).map((id) => [id, uid('node')]));
+  }
+  function duplicateSelection(offset = { x: 16, y: 16 }, sourceIds = selection) {
+    if (!sourceIds.length) return [];
+    const payload = createClipboardPayload(document, sourceIds);
+    const idMap = duplicateIdMap(payload);
+    apply({
+      id: uid('op'),
+      type: 'duplicate',
+      actor: 'user',
+      targetIds: payload.rootIds,
+      idMap,
+      dx: offset.x,
+      dy: offset.y,
+    });
+    selection = payload.rootIds.map((id) => idMap[id]);
+    pasteCount = 0;
+    logAction('clipboard.duplicated', { sourceIds: payload.rootIds, createdIds: selection });
+    return selection;
+  }
+  async function copySelection(cut = false) {
+    if (!selection.length) return;
+    const payload = createClipboardPayload(document, selection);
+    internalClipboard = payload;
+    pasteCount = 0;
+    const serialized = serializeClipboardPayload(payload);
+    try {
+      await navigator.clipboard.writeText(serialized);
+    } catch {
+      // The in-memory payload still supports paste when clipboard permission is unavailable.
+    }
+    logAction(cut ? 'clipboard.cut' : 'clipboard.copied', {
+      rootIds: payload.rootIds,
+      nodeCount: Object.keys(payload.nodes).length,
+    });
+    if (cut) {
+      apply({ id: uid('op'), type: 'delete', actor: 'user', targetIds: payload.rootIds });
+      selection = [];
+    }
+  }
+  async function pasteSelection() {
+    let payload = internalClipboard;
+    try {
+      const serialized = await navigator.clipboard.readText();
+      if (serialized) payload = deserializeClipboardPayload(serialized);
+    } catch {
+      // Fall back to Codesign's session clipboard.
+    }
+    if (!payload) {
+      notice = 'Copy a Codesign layer before pasting.';
+      return;
+    }
+    internalClipboard = payload;
+    pasteCount += 1;
+    const destinationParent =
+      selectedNodes.length === 1 && ['frame', 'group'].includes(selectedNodes[0].kind)
+        ? selectedNodes[0].id
+        : undefined;
+    const destinationParentByRootId = destinationParent
+      ? undefined
+      : Object.fromEntries(
+          payload.rootIds.flatMap((rootId) => {
+            const sourceParentId = payload.sourceParentByRootId[rootId];
+            return sourceParentId &&
+              isEligibleClipboardParent(document, sourceParentId, document.activeScreenId)
+              ? [[rootId, sourceParentId]]
+              : [];
+          }),
+        );
+    const materialized = materializeClipboard(payload, {
+      destination: document,
+      destinationScreenId: document.activeScreenId,
+      destinationParentId: destinationParent,
+      destinationParentByRootId,
+      offset: { x: 16 * pasteCount, y: 16 * pasteCount },
+      idFactory: (kind) => uid(kind === 'operation' ? 'op' : kind),
+    });
+    applyBatch(materialized.operations, 'paste');
+    selection = materialized.createdRootIds;
+    logAction('clipboard.pasted', {
+      createdIds: selection,
+      destinationParentId: destinationParent ?? null,
+      projectId: activeProjectId,
+    });
+  }
+  function groupSelection() {
+    if (selection.length < 2) return;
+    const groupId = uid('group');
+    const first = selectedNodes[0];
+    apply({
+      id: uid('op'),
+      type: 'group',
+      actor: 'user',
+      targetIds: selection,
+      group: {
+        id: groupId,
+        name: 'Group',
+        kind: 'group',
+        screenId: document.activeScreenId,
+        parentId: first?.parentId,
+        childIds: [],
+        bounds: selectionBounds ?? { x: 0, y: 0, width: 1, height: 1 },
+        style: { ...defaultStyle, fill: 'transparent' },
+        provenance: { actor: 'user', operationId: '' },
+      },
+    });
+    selection = [groupId];
+  }
+  function ungroupSelection() {
+    const groups = selectedNodes.filter((node) => node.kind === 'group');
+    if (!groups.length) return;
+    const childIds = groups.flatMap((group) => group.childIds);
+    apply({
+      id: uid('op'),
+      type: 'ungroup',
+      actor: 'user',
+      targetIds: groups.map((group) => group.id),
+    });
+    selection = childIds;
+  }
+  function reorderSelection(direction: 'forward' | 'backward' | 'front' | 'back') {
+    if (!selection.length) return;
+    apply({ id: uid('op'), type: 'reorder', actor: 'user', targetIds: selection, direction });
+  }
   function point(event: PointerEvent) {
     const rect = (event.currentTarget as SVGElement).closest('svg')!.getBoundingClientRect();
     return {
@@ -569,6 +868,12 @@
       promote: 'Resolve to component',
       style: 'Refine appearance',
       generalize: 'Apply shared style',
+      'update-node': 'Edit element properties',
+      reparent: 'Move in layer hierarchy',
+      group: 'Group layers',
+      ungroup: 'Ungroup layers',
+      reorder: 'Change layer order',
+      duplicate: 'Duplicate selection',
       'duplicate-screen': 'Duplicate screen',
       'create-branch': 'Create branch',
     };
@@ -700,19 +1005,215 @@
     gesture = { mode: 'draw', startX: p.x, startY: p.y, lastX: p.x, lastY: p.y };
     draft = { x: p.x, y: p.y, width: 1, height: 1 };
   }
+  function persistFrameSize() {
+    try {
+      localStorage.setItem(
+        FRAME_SIZE_KEY,
+        JSON.stringify({ ...frameSize, presetId: framePresetId, orientation: frameOrientation }),
+      );
+    } catch {
+      // Keep the frame preset in memory when storage is unavailable.
+    }
+  }
+  function chooseFramePreset(presetId: string) {
+    framePresetId = presetId;
+    const preset = framePresetById(presetId);
+    if (preset) frameSize = framePresetSize(preset, frameOrientation);
+    persistFrameSize();
+  }
+  function swapFramePresetOrientation() {
+    frameOrientation = frameOrientation === 'landscape' ? 'portrait' : 'landscape';
+    const preset = framePresetById(framePresetId);
+    if (preset) frameSize = framePresetSize(preset, frameOrientation);
+    else frameSize = { width: frameSize.height, height: frameSize.width };
+    persistFrameSize();
+  }
+  function placePresetFrame() {
+    const canvas = window.document.querySelector<SVGSVGElement>('svg.canvas');
+    if (!canvas) return;
+    const viewport = canvas.getBoundingClientRect();
+    const bounds = {
+      x: (viewport.width / 2 - pan.x) / zoom - frameSize.width / 2,
+      y: (viewport.height / 2 - pan.y) / zoom - frameSize.height / 2,
+      width: frameSize.width,
+      height: frameSize.height,
+    };
+    const parentFrame = containingFrameForBounds(visibleNodes, bounds);
+    const nodeId = uid('node');
+    const operationId = uid('op');
+    apply({
+      id: operationId,
+      type: 'create',
+      actor: 'user',
+      node: {
+        id: nodeId,
+        name: framePresetById(framePresetId)?.name ?? 'Custom frame',
+        kind: 'frame',
+        screenId: document.activeScreenId,
+        parentId: parentFrame?.id,
+        childIds: [],
+        bounds,
+        style: { ...defaultStyle, fill: '#f7f8fa' },
+        provenance: { actor: 'user', operationId },
+      },
+    });
+    selection = [nodeId];
+    tool = 'select';
+    persistFrameSize();
+  }
+  function gestureDelta(event: PointerEvent) {
+    if (!gesture) return { x: 0, y: 0 };
+    const p = point(event);
+    const delta = { x: p.x - gesture.startX, y: p.y - gesture.startY };
+    return event.shiftKey ? constrainToDominantAxis(delta) : delta;
+  }
+  function selectionRootIds(ids = selection) {
+    if (!ids.length) return [];
+    return createClipboardPayload(document, ids).rootIds;
+  }
+  function snapTargetsFor(rootIds: string[]) {
+    const excluded = new Set(descendantNodeIds(document, rootIds));
+    const parentIds = new Set(
+      rootIds.map((id) => document.nodes[id]?.parentId).filter((id): id is string => Boolean(id)),
+    );
+    return visibleNodes
+      .filter((node) => !excluded.has(node.id))
+      .map((node) => ({
+        id: node.id,
+        bounds: node.bounds,
+        kind: parentIds.has(node.id) ? ('parent' as const) : ('sibling' as const),
+      }));
+  }
+  function snappedMoveDelta(rawDelta: { x: number; y: number }, rootIds: string[]) {
+    if (!gesture?.original) return rawDelta;
+    const moving = {
+      ...gesture.original,
+      x: gesture.original.x + rawDelta.x,
+      y: gesture.original.y + rawDelta.y,
+    };
+    const snapped = snapBounds(moving, snapTargetsFor(rootIds), { threshold: 6 / zoom });
+    smartGuides = snapped.guides;
+    spacingGuides = consistentSpacingGuides(
+      snapped.bounds,
+      snapTargetsFor(rootIds).map((target) => ({ id: target.id, bounds: target.bounds })),
+      5 / zoom,
+    );
+    return { x: rawDelta.x + snapped.delta.x, y: rawDelta.y + snapped.delta.y };
+  }
+  function resizeSelectionPreview(nextBounds: Bounds) {
+    if (!gesture?.original || !gesture.originalBounds) return;
+    const original = gesture.original;
+    const scaleX = original.width ? nextBounds.width / original.width : 1;
+    const scaleY = original.height ? nextBounds.height / original.height : 1;
+    transientBounds = Object.fromEntries(
+      Object.entries(gesture.originalBounds).map(([id, bounds]) => [
+        id,
+        {
+          x: nextBounds.x + (bounds.x - original.x) * scaleX,
+          y: nextBounds.y + (bounds.y - original.y) * scaleY,
+          width: Math.max(8, bounds.width * scaleX),
+          height: Math.max(8, bounds.height * scaleY),
+        },
+      ]),
+    );
+  }
+  function frameUnderPoint(p: { x: number; y: number }, excludedIds: string[]) {
+    const excluded = new Set(excludedIds);
+    return containingFrameForBounds(
+      visibleNodes.filter((node) => !excluded.has(node.id)),
+      { x: p.x, y: p.y, width: 0.01, height: 0.01 },
+    );
+  }
+  function resetGesturePreview() {
+    transientBounds = {};
+    smartGuides = [];
+    spacingGuides = [];
+    duplicatePreviewOffset = { x: 0, y: 0 };
+  }
+  const resizeHandles: ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+  function resizeHandlePoint(bounds: Bounds, handle: ResizeHandle) {
+    return {
+      x: handle.includes('w')
+        ? bounds.x
+        : handle.includes('e')
+          ? bounds.x + bounds.width
+          : bounds.x + bounds.width / 2,
+      y: handle.includes('n')
+        ? bounds.y
+        : handle.includes('s')
+          ? bounds.y + bounds.height
+          : bounds.y + bounds.height / 2,
+    };
+  }
+  async function startTextEditing(event: MouseEvent, node: DesignNode) {
+    if (node.kind !== 'text' || preview) return;
+    event.preventDefault();
+    event.stopPropagation();
+    editingTextId = node.id;
+    editingTextDraft = node.text ?? '';
+    selection = [node.id];
+    await tick();
+    inlineTextEditor?.focus();
+    inlineTextEditor?.select();
+  }
+  function finishTextEditing(commit: boolean) {
+    const nodeId = editingTextId;
+    const text = editingTextDraft;
+    editingTextId = '';
+    editingTextDraft = '';
+    if (commit && nodeId && document.nodes[nodeId]?.text !== text)
+      apply({
+        id: uid('op'),
+        type: 'update-node',
+        actor: 'user',
+        targetIds: [nodeId],
+        patch: { text },
+      });
+  }
+  function clippingFrameId(node: DesignNode) {
+    let parent = node.parentId ? document.nodes[node.parentId] : undefined;
+    const seen = new Set<string>();
+    while (parent && !seen.has(parent.id)) {
+      seen.add(parent.id);
+      if (parent.kind === 'frame' && parent.clipContent) return parent.id;
+      parent = parent.parentId ? document.nodes[parent.parentId] : undefined;
+    }
+  }
+  function textPosition(node: DesignNode, bounds: Bounds) {
+    if (node.style.textAlign === 'center')
+      return { x: bounds.x + bounds.width / 2, anchor: 'middle' as const };
+    if (node.style.textAlign === 'right')
+      return { x: bounds.x + bounds.width - contentInset(node), anchor: 'end' as const };
+    return { x: bounds.x + contentInset(node), anchor: 'start' as const };
+  }
   function canvasDown(event: PointerEvent) {
     contextMenu = null;
     if (preview) return;
-    if (event.button === 1) {
+    if (event.button === 1 || (event.button === 0 && spacePressed)) {
       const p = { x: event.clientX, y: event.clientY };
       gesture = { mode: 'pan', startX: p.x, startY: p.y, lastX: p.x, lastY: p.y };
       return;
     }
     if (event.button !== 0) return;
     if (event.target !== event.currentTarget) return;
-    if (selection.length) logAction('selection.cleared', { source: 'canvas' });
-    selection = [];
-    if (tool === 'frame' || tool === 'rectangle' || tool === 'text') startDraw(event);
+    if (tool === 'frame' || tool === 'rectangle' || tool === 'text') {
+      if (selection.length) logAction('selection.cleared', { source: 'canvas' });
+      selection = [];
+      startDraw(event);
+      return;
+    }
+    if (tool === 'select') {
+      const p = point(event);
+      gesture = {
+        mode: 'marquee',
+        startX: p.x,
+        startY: p.y,
+        lastX: p.x,
+        lastY: p.y,
+        additive: event.shiftKey,
+      };
+      marquee = { x: p.x, y: p.y, width: 1, height: 1 };
+    }
   }
   function canvasMove(event: PointerEvent) {
     if (!gesture) return;
@@ -730,20 +1231,41 @@
         width: Math.max(1, Math.abs(p.x - gesture.startX)),
         height: Math.max(1, Math.abs(p.y - gesture.startY)),
       };
-    if (gesture.mode === 'move') {
-      const dx = p.x - gesture.lastX,
-        dy = p.y - gesture.lastY;
-      for (const id of gesture.previewIds ?? selection) {
-        const element = window.document.getElementById(`node-${id}`);
-        if (element) element.setAttribute('transform', `translate(${dx} ${dy})`);
-      }
-    }
-    if (gesture.mode === 'resize' && gesture.original)
-      draft = {
-        ...gesture.original,
-        width: Math.max(20, gesture.original.width + p.x - gesture.startX),
-        height: Math.max(20, gesture.original.height + p.y - gesture.startY),
+    if (gesture.mode === 'marquee') {
+      marquee = {
+        x: Math.min(gesture.startX, p.x),
+        y: Math.min(gesture.startY, p.y),
+        width: Math.abs(p.x - gesture.startX),
+        height: Math.abs(p.y - gesture.startY),
       };
+    }
+    if (gesture.mode === 'move' || gesture.mode === 'duplicate') {
+      const roots = selectionRootIds();
+      const delta = snappedMoveDelta(gestureDelta(event), roots);
+      if (gesture.mode === 'duplicate') duplicatePreviewOffset = delta;
+      else if (gesture.originalBounds)
+        transientBounds = Object.fromEntries(
+          Object.entries(gesture.originalBounds).map(([id, bounds]) => [
+            id,
+            { ...bounds, x: bounds.x + delta.x, y: bounds.y + delta.y },
+          ]),
+        );
+    }
+    if (gesture.mode === 'resize' && gesture.original && gesture.handle) {
+      let next = resizeBounds(gesture.original, gesture.handle, gestureDelta(event), {
+        lockAspectRatio: event.shiftKey,
+        fromCenter: event.altKey,
+        minWidth: 8,
+        minHeight: 8,
+      });
+      const snapped = snapBounds(next, snapTargetsFor(selectionRootIds()), {
+        threshold: 6 / zoom,
+      });
+      next = snapped.bounds;
+      smartGuides = snapped.guides;
+      draft = next;
+      resizeSelectionPreview(next);
+    }
   }
   function canvasUp(event: PointerEvent) {
     if (!gesture) return;
@@ -776,30 +1298,100 @@
         parentId: parentFrame?.id ?? null,
         screenId: node.screenId,
       });
+      if (node.kind === 'frame') {
+        frameSize = { width: node.bounds.width, height: node.bounds.height };
+        try {
+          localStorage.setItem(
+            FRAME_SIZE_KEY,
+            JSON.stringify({ ...frameSize, presetId: 'custom', orientation: frameOrientation }),
+          );
+        } catch {
+          // Keep the last-used frame size in memory.
+        }
+      }
       tool = 'select';
+    } else if (gesture.mode === 'marquee') {
+      const picked = marquee
+        ? marqueeSelectedIds(visibleNodes, marquee, event.altKey ? 'contain' : 'intersect')
+        : [];
+      selection = gesture.additive ? [...new Set([...selection, ...picked])] : picked;
+      logAction('selection.marquee', { nodeIds: selection, additive: Boolean(gesture.additive) });
     } else if (gesture.mode === 'move' && p) {
-      const dx = p.x - gesture.lastX,
-        dy = p.y - gesture.lastY;
-      for (const id of gesture.previewIds ?? selection)
-        window.document.getElementById(`node-${id}`)?.removeAttribute('transform');
+      const roots = selectionRootIds();
+      const reference = roots[0];
+      const original = reference ? gesture.originalBounds?.[reference] : undefined;
+      const moved = reference ? transientBounds[reference] : undefined;
+      const dx = original && moved ? moved.x - original.x : 0;
+      const dy = original && moved ? moved.y - original.y : 0;
+      const operations: DesignOperation[] = [];
       if (dx || dy)
-        apply({ id: uid('op'), type: 'move', actor: 'user', targetIds: selection, dx, dy });
-    } else if (gesture.mode === 'resize' && draft && selection[0])
-      apply({
+        operations.push({ id: uid('op'), type: 'move', actor: 'user', targetIds: roots, dx, dy });
+      const excluded = descendantNodeIds(document, roots);
+      const parent = frameUnderPoint(p, excluded);
+      const currentParents = new Set(roots.map((id) => document.nodes[id]?.parentId));
+      if (currentParents.size !== 1 || !currentParents.has(parent?.id))
+        operations.push({
+          id: uid('op'),
+          type: 'reparent',
+          actor: 'user',
+          targetIds: roots,
+          parentId: parent?.id,
+        });
+      applyBatch(operations, 'move-selection');
+    } else if (gesture.mode === 'duplicate' && gesture.duplicatePayload && p) {
+      const payload = gesture.duplicatePayload;
+      const idMap = duplicateIdMap(payload);
+      const duplicate: DesignOperation = {
         id: uid('op'),
-        type: 'resize',
+        type: 'duplicate',
         actor: 'user',
-        targetId: selection[0],
-        bounds: draft,
-      });
+        targetIds: payload.rootIds,
+        idMap,
+        dx: duplicatePreviewOffset.x,
+        dy: duplicatePreviewOffset.y,
+      };
+      const createdRoots = payload.rootIds.map((id) => idMap[id]);
+      const excluded = descendantNodeIds(document, payload.rootIds);
+      const parent = frameUnderPoint(p, excluded);
+      const operations: DesignOperation[] = [duplicate];
+      const currentParents = new Set(payload.rootIds.map((id) => document.nodes[id]?.parentId));
+      if (currentParents.size !== 1 || !currentParents.has(parent?.id))
+        operations.push({
+          id: uid('op'),
+          type: 'reparent',
+          actor: 'user',
+          targetIds: createdRoots,
+          parentId: parent?.id,
+        });
+      applyBatch(operations, 'duplicate-drag');
+      selection = createdRoots;
+    } else if (gesture.mode === 'resize' && Object.keys(transientBounds).length) {
+      applyBatch(
+        Object.entries(transientBounds).map(([targetId, bounds]) => ({
+          id: uid('op'),
+          type: 'resize' as const,
+          actor: 'user' as const,
+          targetId,
+          bounds,
+        })),
+        'resize-selection',
+      );
+    }
     gesture = null;
     draft = null;
+    marquee = null;
+    resetGesturePreview();
     if (completedGesture === 'pan') scheduleViewportLog('middle-drag');
   }
   function nodeDown(event: PointerEvent, node: DesignNode) {
     event.stopPropagation();
     contextMenu = null;
     if (event.button !== 0) return;
+    if (spacePressed) {
+      const p = { x: event.clientX, y: event.clientY };
+      gesture = { mode: 'pan', startX: p.x, startY: p.y, lastX: p.x, lastY: p.y };
+      return;
+    }
     if (preview) {
       const transition = document.transitions.find((item) => item.sourceNodeId === node.id);
       if (transition) navigateToScreen(transition.targetScreenId, undefined, 'preview-transition');
@@ -820,33 +1412,49 @@
         ? selection.filter((id) => id !== node.id)
         : [...selection, node.id]
       : [node.id];
+    if (!selection.length) return;
     logAction('selection.changed', {
       source: 'canvas',
       nodeIds: selection,
       additive: event.shiftKey,
     });
     const p = point(event);
+    const previewIds = descendantNodeIds(document, selectionRootIds());
+    const originalBounds = Object.fromEntries(
+      previewIds.map((id) => [id, structuredClone(document.nodes[id].bounds)]),
+    );
+    const selectedBounds = collectiveSelectionBounds(
+      selectionRootIds().map((id) => document.nodes[id]),
+    );
     gesture = {
-      mode: 'move',
+      mode: event.altKey ? 'duplicate' : 'move',
       startX: p.x,
       startY: p.y,
       lastX: p.x,
       lastY: p.y,
-      previewIds: descendantNodeIds(document, selection),
+      original: selectedBounds ?? undefined,
+      originalBounds,
+      previewIds,
+      duplicatePayload: event.altKey ? createClipboardPayload(document, selection) : undefined,
     };
   }
-  function resizeDown(event: PointerEvent, node: DesignNode) {
+  function resizeDown(event: PointerEvent, handle: ResizeHandle) {
     event.stopPropagation();
     const p = point(event);
+    if (!selectionBounds) return;
     gesture = {
       mode: 'resize',
       startX: p.x,
       startY: p.y,
       lastX: p.x,
       lastY: p.y,
-      original: { ...node.bounds },
+      original: { ...selectionBounds },
+      originalBounds: Object.fromEntries(
+        selectedNodes.map((node) => [node.id, structuredClone(node.bounds)]),
+      ),
+      handle,
     };
-    draft = { ...node.bounds };
+    draft = { ...selectionBounds };
   }
   function resizeKeydown(event: KeyboardEvent, node: DesignNode) {
     const delta = event.shiftKey ? 10 : 1;
@@ -900,7 +1508,7 @@
     event.stopPropagation();
     if (node && !selection.includes(node.id)) selection = [node.id];
     const width = 236;
-    const height = preview ? 110 : node ? 244 : 196;
+    const height = preview ? 110 : node ? 560 : 300;
     contextMenu = {
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
       y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
@@ -937,6 +1545,119 @@
     contextMenu = null;
     apply({ id: uid('op'), type: 'delete', actor: 'user', targetIds });
     selection = [];
+  }
+  function duplicateFromContext() {
+    contextMenu = null;
+    duplicateSelection();
+  }
+  function groupFromContext() {
+    contextMenu = null;
+    selectedNodes.some((node) => node.kind === 'group') ? ungroupSelection() : groupSelection();
+  }
+  function reorderFromContext(direction: 'forward' | 'backward' | 'front' | 'back') {
+    contextMenu = null;
+    reorderSelection(direction);
+  }
+  function toggleFrameClip(node: DesignNode) {
+    contextMenu = null;
+    apply({
+      id: uid('op'),
+      type: 'update-node',
+      actor: 'user',
+      targetIds: [node.id],
+      patch: { clipContent: !node.clipContent },
+    });
+  }
+  function layerCanCollapse(node: DesignNode) {
+    return (node.kind === 'frame' || node.kind === 'group') && node.childIds.length > 0;
+  }
+  function toggleLayerCollapse(event: MouseEvent, node: DesignNode) {
+    event.stopPropagation();
+    const next = new Set(collapsedLayerIds);
+    const collapsing = !next.has(node.id);
+    if (collapsing) next.add(node.id);
+    else next.delete(node.id);
+    collapsedLayerIds = next;
+    logAction(collapsing ? 'layer.collapsed' : 'layer.expanded', {
+      nodeId: node.id,
+      kind: node.kind,
+      childCount: node.childIds.length,
+    });
+  }
+  async function startLayerRename(event: MouseEvent, node: DesignNode) {
+    event.stopPropagation();
+    selection = [node.id];
+    editingLayerId = node.id;
+    editingLayerName = node.name;
+    logAction('layer.rename-opened', { nodeId: node.id, name: node.name });
+    await tick();
+    layerNameInput?.focus();
+    layerNameInput?.select();
+  }
+  function finishLayerRename(commit: boolean) {
+    const nodeId = editingLayerId;
+    const previousName = document.nodes[nodeId]?.name;
+    const name = editingLayerName.trim();
+    editingLayerId = '';
+    editingLayerName = '';
+    if (!commit || !nodeId) return;
+    if (!name) {
+      error = 'Layer names cannot be empty';
+      logAction('layer.rename-rejected', { nodeId, reason: 'empty-name' });
+      return;
+    }
+    if (name === previousName) return;
+    apply({
+      id: uid('op'),
+      type: 'update-node',
+      actor: 'user',
+      targetIds: [nodeId],
+      patch: { name },
+    });
+    logAction('layer.renamed', { nodeId, fromName: previousName ?? '', name });
+  }
+  function layerDragStart(event: DragEvent, nodeId: string) {
+    layerDrag = { sourceId: nodeId };
+    event.dataTransfer?.setData('text/plain', nodeId);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  }
+  function layerDragOver(event: DragEvent, target: DesignNode) {
+    if (!layerDrag || layerDrag.sourceId === target.id) return;
+    event.preventDefault();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const ratio = (event.clientY - rect.top) / Math.max(1, rect.height);
+    const position =
+      (target.kind === 'frame' || target.kind === 'group') && ratio > 0.28 && ratio < 0.72
+        ? 'inside'
+        : ratio < 0.5
+          ? 'before'
+          : 'after';
+    layerDrag = { ...layerDrag, targetId: target.id, position };
+  }
+  function layerDrop(event: DragEvent, target: DesignNode) {
+    event.preventDefault();
+    if (!layerDrag || layerDrag.sourceId === target.id) {
+      layerDrag = null;
+      return;
+    }
+    const sourceId = layerDrag.sourceId;
+    const position = layerDrag.position ?? 'after';
+    let parentId = position === 'inside' ? target.id : target.parentId;
+    const stack = parentId
+      ? (document.nodes[parentId]?.childIds ?? [])
+      : (currentScreen?.rootIds ?? []);
+    let index = position === 'inside' ? stack.length : stack.indexOf(target.id);
+    if (position === 'after') index += 1;
+    layerDrag = null;
+    apply({
+      id: uid('op'),
+      type: 'reparent',
+      actor: 'user',
+      targetIds: [sourceId],
+      parentId,
+      index: Math.max(0, index),
+    });
+    selection = [sourceId];
   }
 
   async function generateCandidates(action: CodesignAction, rerollCandidateId?: string) {
@@ -1198,15 +1919,119 @@
     connectSource = '';
     tool = 'select';
   }
-  function changeStyle(patch: Partial<DesignNode['style']>) {
-    if (selection.length)
+  function changeStyle(patch: StylePatch) {
+    const targetIds = selectedNodes.filter((node) => !node.componentBinding).map((node) => node.id);
+    if (targetIds.length)
       apply({
         id: uid('op'),
         type: 'style',
         actor: 'user',
-        targetIds: selection.slice(0, 1),
+        targetIds,
         patch,
       });
+  }
+  function enableStroke() {
+    changeStyle({ stroke: '#20242b', strokeWidth: 1 });
+  }
+  function setStrokeColor(stroke: string) {
+    const targets = selectedNodes.filter((node) => !node.componentBinding);
+    applyBatch(
+      targets.map((node) => ({
+        id: uid('op'),
+        type: 'style' as const,
+        actor: 'user' as const,
+        targetIds: [node.id],
+        patch: {
+          stroke,
+          ...(node.style.strokeWidth === undefined ? { strokeWidth: 1 } : {}),
+        },
+      })),
+      'stroke-color',
+    );
+  }
+  function setStrokeWidth(strokeWidth: number) {
+    if (!Number.isFinite(strokeWidth) || strokeWidth < 0) return;
+    const targets = selectedNodes.filter((node) => !node.componentBinding);
+    applyBatch(
+      targets.map((node) => ({
+        id: uid('op'),
+        type: 'style' as const,
+        actor: 'user' as const,
+        targetIds: [node.id],
+        patch: {
+          strokeWidth,
+          ...(node.style.stroke === undefined ? { stroke: '#20242b' } : {}),
+        },
+      })),
+      'stroke-width',
+    );
+  }
+  function removeStroke() {
+    changeStyle({ stroke: null, strokeWidth: null });
+  }
+  function mixedStyleValue<K extends keyof DesignNode['style']>(key: K) {
+    const values = selectedNodes.map((node) => node.style[key]);
+    return values.every((value) => value === values[0]) ? values[0] : null;
+  }
+  function changeSelectionGeometry(field: keyof Bounds, value: number) {
+    if (!selectionBounds || !Number.isFinite(value)) return;
+    const roots = selectionRootIds();
+    if (field === 'x' || field === 'y') {
+      apply({
+        id: uid('op'),
+        type: 'move',
+        actor: 'user',
+        targetIds: roots,
+        dx: field === 'x' ? value - selectionBounds.x : 0,
+        dy: field === 'y' ? value - selectionBounds.y : 0,
+      });
+      return;
+    }
+    const next = { ...selectionBounds, [field]: Math.max(8, value) };
+    const scaleX = next.width / selectionBounds.width;
+    const scaleY = next.height / selectionBounds.height;
+    applyBatch(
+      selectedNodes.map((node) => ({
+        id: uid('op'),
+        type: 'resize' as const,
+        actor: 'user' as const,
+        targetId: node.id,
+        bounds: {
+          x: next.x + (node.bounds.x - selectionBounds.x) * scaleX,
+          y: next.y + (node.bounds.y - selectionBounds.y) * scaleY,
+          width: Math.max(8, node.bounds.width * scaleX),
+          height: Math.max(8, node.bounds.height * scaleY),
+        },
+      })),
+      'property-resize',
+    );
+  }
+  function updateSelectedText(text: string) {
+    const targetIds = selectedNodes.filter((node) => node.kind === 'text').map((node) => node.id);
+    if (targetIds.length)
+      apply({ id: uid('op'), type: 'update-node', actor: 'user', targetIds, patch: { text } });
+  }
+  function setSelectedFrameClipping(clipContent: boolean) {
+    const targetIds = selectedNodes.filter((node) => node.kind === 'frame').map((node) => node.id);
+    if (targetIds.length)
+      apply({
+        id: uid('op'),
+        type: 'update-node',
+        actor: 'user',
+        targetIds,
+        patch: { clipContent },
+      });
+  }
+  function updateComponentOverride(node: DesignNode, key: string, value: unknown) {
+    if (!node.componentBinding) return;
+    apply({
+      id: uid('op'),
+      type: 'promote',
+      actor: 'user',
+      targetIds: [node.id],
+      componentId: node.componentBinding.componentId,
+      props: { ...node.componentBinding.props, [key]: value },
+    });
   }
   function generalize() {
     const source = selectedNodes[0];
@@ -1321,6 +2146,57 @@
           ><kbd>{item.key}</kbd></button
         >{/each}
     </nav>
+    {#if tool === 'frame'}
+      <section class="frame-presets" aria-label="Frame presets">
+        <div class="section-title">
+          <span>Frame size</span><small>{frameSize.width}×{frameSize.height}</small>
+        </div>
+        <label
+          >Preset<select
+            value={framePresetId}
+            onchange={(event) => chooseFramePreset(event.currentTarget.value)}
+          >
+            {#each FRAME_PRESETS as preset}
+              <option value={preset.id}>{preset.name} · {preset.width}×{preset.height}</option>
+            {/each}
+            <option value="custom">Custom size</option>
+          </select></label
+        >
+        <div class="preset-size-grid">
+          <label
+            >Width<input
+              type="number"
+              min="8"
+              value={frameSize.width}
+              onchange={(event) => {
+                framePresetId = 'custom';
+                frameSize = { ...frameSize, width: Math.max(8, Number(event.currentTarget.value)) };
+                persistFrameSize();
+              }}
+            /></label
+          ><label
+            >Height<input
+              type="number"
+              min="8"
+              value={frameSize.height}
+              onchange={(event) => {
+                framePresetId = 'custom';
+                frameSize = {
+                  ...frameSize,
+                  height: Math.max(8, Number(event.currentTarget.value)),
+                };
+                persistFrameSize();
+              }}
+            /></label
+          >
+        </div>
+        <div class="preset-actions">
+          <button onclick={swapFramePresetOrientation}>Swap orientation</button>
+          <button class="primary" onclick={placePresetFrame}>Place frame</button>
+        </div>
+        <p>Drag for a custom frame, or place this preset at the canvas center.</p>
+      </section>
+    {/if}
     <section class="outline">
       <div class="section-title">
         <span>Screens</span><button title="Duplicate screen" onclick={duplicateScreen}
@@ -1345,29 +2221,80 @@
       <div class="section-title layers-title">
         <span>Layers</span><small>{visibleNodes.length}</small>
       </div>
-      <div class="layers">
-        {#each layerRows as row (row.node.id)}<button
+      <div class="layers" role="list" aria-label="Layers">
+        {#each layerRows as row (row.node.id)}<div
+            class="layer-row"
+            role="listitem"
             class:selected={selection.includes(row.node.id)}
             class:child-layer={row.depth > 0}
+            class:drop-before={layerDrag?.targetId === row.node.id &&
+              layerDrag.position === 'before'}
+            class:drop-inside={layerDrag?.targetId === row.node.id &&
+              layerDrag.position === 'inside'}
+            class:drop-after={layerDrag?.targetId === row.node.id && layerDrag.position === 'after'}
             style={`--layer-indent:${5 + row.depth * 14}px`}
-            onclick={(event) => {
-              selection = event.shiftKey
-                ? [...new Set([...selection, row.node.id])]
-                : [row.node.id];
-              logAction('selection.changed', {
-                source: 'layers',
-                nodeIds: selection,
-                additive: event.shiftKey,
-              });
-            }}
-            ><span class="layer-kind"
-              >{row.node.componentBinding
-                ? 'Component'
-                : row.node.kind === 'rectangle'
-                  ? 'Shape'
-                  : row.node.kind}</span
-            ><span class="layer-name">{row.node.name}</span></button
-          >{/each}
+            draggable={editingLayerId !== row.node.id}
+            ondragstart={(event) => layerDragStart(event, row.node.id)}
+            ondragover={(event) => layerDragOver(event, row.node)}
+            ondrop={(event) => layerDrop(event, row.node)}
+            ondragend={() => (layerDrag = null)}
+          >
+            {#if layerCanCollapse(row.node)}<button
+                class="layer-action layer-collapse"
+                aria-expanded={!collapsedLayerIds.has(row.node.id)}
+                onclick={(event) => toggleLayerCollapse(event, row.node)}
+                >{collapsedLayerIds.has(row.node.id) ? 'Expand' : 'Collapse'}</button
+              >{/if}{#if editingLayerId === row.node.id}<div class="layer-select">
+                <span class="layer-kind"
+                  >{row.node.componentBinding
+                    ? 'Component'
+                    : row.node.kind === 'rectangle'
+                      ? 'Shape'
+                      : row.node.kind}</span
+                ><input
+                  class="layer-name-input"
+                  bind:this={layerNameInput}
+                  bind:value={editingLayerName}
+                  maxlength="120"
+                  aria-label={`Rename ${row.node.name}`}
+                  onclick={(event) => event.stopPropagation()}
+                  onblur={() => finishLayerRename(true)}
+                  onkeydown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      finishLayerRename(true);
+                    } else if (event.key === 'Escape') {
+                      event.preventDefault();
+                      finishLayerRename(false);
+                    }
+                  }}
+                />
+              </div>{:else}<button
+                class="layer-select"
+                aria-pressed={selection.includes(row.node.id)}
+                onclick={(event) => {
+                  selection = event.shiftKey
+                    ? [...new Set([...selection, row.node.id])]
+                    : [row.node.id];
+                  logAction('selection.changed', {
+                    source: 'layers',
+                    nodeIds: selection,
+                    additive: event.shiftKey,
+                  });
+                }}
+                ondblclick={(event) => startLayerRename(event, row.node)}
+                ><span class="layer-kind"
+                  >{row.node.componentBinding
+                    ? 'Component'
+                    : row.node.kind === 'rectangle'
+                      ? 'Shape'
+                      : row.node.kind}</span
+                ><span class="layer-name">{row.node.name}</span></button
+              ><button
+                class="layer-action layer-rename"
+                onclick={(event) => startLayerRename(event, row.node)}>Rename</button
+              >{/if}
+          </div>{/each}
       </div>
       <button class="branch-action" onclick={branch}
         ><span aria-hidden="true">◇</span>Branch current screen</button
@@ -1383,6 +2310,8 @@
         >Reset zoom <span class="zoom-value">{Math.round(zoom * 100)}%</span></button
       ><button onclick={() => setZoom(zoom + 0.1, 'zoom-in-button')}
         ><span aria-hidden="true">＋</span>Zoom in</button
+      ><button class="shortcuts-button" onclick={() => openShortcuts('toolbar')}
+        >Keyboard shortcuts <kbd>/</kbd></button
       ><label class="canvas-color-control"
         ><span>Canvas color</span><input
           type="color"
@@ -1402,7 +2331,9 @@
         ? 'Click a connected object to navigate · Esc to exit'
         : editorMode === 'codesign'
           ? 'Solid outline: can change · Dashed outline: can reference · Candidate ghosts never block the canvas'
-          : `${tool[0].toUpperCase() + tool.slice(1)} tool · Scroll to pan · Pinch to zoom · Right-click for actions`}
+          : tool === 'frame'
+            ? `${framePresetById(framePresetId)?.name ?? 'Custom frame'} · ${frameSize.width}×${frameSize.height} · Drag custom or place preset`
+            : `${tool[0].toUpperCase() + tool.slice(1)} tool · Scroll to pan · Pinch to zoom · Right-click for actions`}
     </div>
     <svg
       class="canvas"
@@ -1415,11 +2346,26 @@
       onpointercancel={() => {
         gesture = null;
         draft = null;
+        marquee = null;
+        resetGesturePreview();
       }}
       onwheel={wheel}
       oncontextmenu={(event) => openContextMenu(event)}
     >
       <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
+        <defs>
+          {#each visibleNodes.filter((node) => node.kind === 'frame' && node.clipContent) as frame}
+            <clipPath id={`clip-${frame.id}`}>
+              <rect
+                x={transientBounds[frame.id]?.x ?? frame.bounds.x}
+                y={transientBounds[frame.id]?.y ?? frame.bounds.y}
+                width={transientBounds[frame.id]?.width ?? frame.bounds.width}
+                height={transientBounds[frame.id]?.height ?? frame.bounds.height}
+                rx={frame.style.radius}
+              />
+            </clipPath>
+          {/each}
+        </defs>
         {#each document.transitions.filter((item) => document.nodes[item.sourceNodeId]?.screenId === document.activeScreenId) as transition}<path
             class="transition"
             d={`M ${document.nodes[transition.sourceNodeId].bounds.x + document.nodes[transition.sourceNodeId].bounds.width} ${document.nodes[transition.sourceNodeId].bounds.y + document.nodes[transition.sourceNodeId].bounds.height / 2} l 46 0`}
@@ -1433,6 +2379,8 @@
               7}>→ state</text
           >{/each}
         {#each renderedNodes as node (node.id)}
+          {@const bounds = transientBounds[node.id] ?? node.bounds}
+          {@const textLayout = textPosition(node, bounds)}
           <g
             id={`node-${node.id}`}
             class:selected={selection.includes(node.id)}
@@ -1442,103 +2390,200 @@
             role="button"
             tabindex="0"
             aria-label={node.name}
+            style={`opacity:${node.style.opacity};${clippingFrameId(node) ? `clip-path:url(#clip-${clippingFrameId(node)})` : ''}`}
             onpointerdown={(event) => nodeDown(event, node)}
+            ondblclick={(event) => startTextEditing(event, node)}
             oncontextmenu={(event) => openContextMenu(event, node)}
           >
             {#if editorMode === 'codesign' && observationScope.nodeIds.includes(node.id)}
               <rect
                 class:mutation-boundary={selection.includes(node.id)}
                 class:observation-boundary={!selection.includes(node.id)}
-                x={node.bounds.x - 6 / zoom}
-                y={node.bounds.y - 6 / zoom}
-                width={node.bounds.width + 12 / zoom}
-                height={node.bounds.height + 12 / zoom}
+                x={bounds.x - 6 / zoom}
+                y={bounds.y - 6 / zoom}
+                width={bounds.width + 12 / zoom}
+                height={bounds.height + 12 / zoom}
                 rx={Math.max(node.style.radius, 3)}
               />
             {/if}
             {#if editorMode === 'codesign' && highlightedChangeId && document.atomicChanges[highlightedChangeId]?.trace.evidenceNodeIds.includes(node.id)}
               <rect
                 class="evidence-highlight"
-                x={node.bounds.x - 10 / zoom}
-                y={node.bounds.y - 10 / zoom}
-                width={node.bounds.width + 20 / zoom}
-                height={node.bounds.height + 20 / zoom}
+                x={bounds.x - 10 / zoom}
+                y={bounds.y - 10 / zoom}
+                width={bounds.width + 20 / zoom}
+                height={bounds.height + 20 / zoom}
                 rx={Math.max(node.style.radius, 3)}
               />
             {/if}
             <rect
               class="node"
-              x={node.bounds.x}
-              y={node.bounds.y}
-              width={node.bounds.width}
-              height={node.bounds.height}
+              x={bounds.x}
+              y={bounds.y}
+              width={bounds.width}
+              height={bounds.height}
               rx={node.style.radius}
               fill={node.style.fill}
               stroke={node.style.stroke}
+              stroke-width={node.style.strokeWidth}
             />
             {#if node.componentBinding || selection.includes(node.id)}<rect
                 class="content-area"
-                x={node.bounds.x + contentInset(node)}
-                y={node.bounds.y + contentInset(node)}
-                width={Math.max(0, node.bounds.width - contentInset(node) * 2)}
-                height={Math.max(0, node.bounds.height - contentInset(node) * 2)}
+                x={bounds.x + contentInset(node)}
+                y={bounds.y + contentInset(node)}
+                width={Math.max(0, bounds.width - contentInset(node) * 2)}
+                height={Math.max(0, bounds.height - contentInset(node) * 2)}
                 rx={Math.max(0, node.style.radius - 2)}
               />{/if}
             {#if node.componentBinding}<rect
                 class="component-accent"
-                x={node.bounds.x}
-                y={node.bounds.y}
+                x={bounds.x}
+                y={bounds.y}
                 width="4"
-                height={node.bounds.height}
+                height={bounds.height}
                 rx="2"
               /><text
                 class="component-name"
-                x={node.bounds.x + contentInset(node)}
-                y={node.bounds.y + Math.min(contentInset(node) + 11, node.bounds.height - 8)}
+                x={bounds.x + contentInset(node)}
+                y={bounds.y + Math.min(contentInset(node) + 11, bounds.height - 8)}
                 >{node.componentBinding.componentId} · {node.style.density ?? 'comfortable'}</text
               >{/if}
-            {#if node.text || node.semantics}<text
+            {#if (node.text || node.semantics) && editingTextId !== node.id}<text
                 class="node-label"
-                x={node.bounds.x + contentInset(node)}
-                y={node.bounds.y +
+                x={textLayout.x}
+                text-anchor={textLayout.anchor}
+                y={bounds.y +
                   Math.min(
                     contentInset(node) + (node.componentBinding ? 28 : node.style.fontSize),
-                    node.bounds.height - 7,
+                    bounds.height - 7,
                   )}
-                style={`font-size:${node.style.fontSize}px;fill:${node.style.textColor}`}
+                style={`font-size:${node.style.fontSize}px;font-weight:${node.style.fontWeight};fill:${node.style.textColor}`}
                 >{node.text ?? node.semantics?.role}</text
               >{/if}
+            {#if editingTextId === node.id}
+              <foreignObject x={bounds.x} y={bounds.y} width={bounds.width} height={bounds.height}>
+                <textarea
+                  bind:this={inlineTextEditor}
+                  class="inline-text-editor"
+                  aria-label={`Edit ${node.name} text`}
+                  value={editingTextDraft}
+                  style={`font-size:${node.style.fontSize}px;font-weight:${node.style.fontWeight};line-height:${node.style.lineHeight};text-align:${node.style.textAlign};color:${node.style.textColor}`}
+                  oninput={(event) => (editingTextDraft = event.currentTarget.value)}
+                  onblur={() => finishTextEditing(true)}
+                  onkeydown={(event) => {
+                    event.stopPropagation();
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      finishTextEditing(false);
+                    }
+                    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                      event.preventDefault();
+                      finishTextEditing(true);
+                    }
+                  }}></textarea>
+              </foreignObject>
+            {/if}
             {#if node.repeaterId}<g class="repeat-badge"
                 ><rect
-                  x={node.bounds.x + node.bounds.width - 62}
-                  y={node.bounds.y + 7}
+                  x={bounds.x + bounds.width - 62}
+                  y={bounds.y + 7}
                   width="54"
                   height="18"
                   rx="3"
-                /><text x={node.bounds.x + node.bounds.width - 55} y={node.bounds.y + 20}
-                  >REPEAT</text
-                ></g
+                /><text x={bounds.x + bounds.width - 55} y={bounds.y + 20}>REPEAT</text></g
               >{/if}
-            {#if selection.includes(node.id) && !preview}<rect
-                class="selection-box"
-                x={node.bounds.x - 2 / zoom}
-                y={node.bounds.y - 2 / zoom}
-                width={node.bounds.width + 4 / zoom}
-                height={node.bounds.height + 4 / zoom}
-              /><rect
-                class="handle"
-                role="button"
-                tabindex="0"
-                aria-label={`Resize ${node.name}`}
-                x={node.bounds.x + node.bounds.width - 5 / zoom}
-                y={node.bounds.y + node.bounds.height - 5 / zoom}
-                width={10 / zoom}
-                height={10 / zoom}
-                onpointerdown={(event) => resizeDown(event, node)}
-                onkeydown={(event) => resizeKeydown(event, node)}
-              />{/if}
           </g>
         {/each}
+        {#if selectionBounds && !preview && editingTextId === ''}
+          <g class="collective-selection">
+            <rect
+              class="selection-box"
+              x={selectionBounds.x - 2 / zoom}
+              y={selectionBounds.y - 2 / zoom}
+              width={selectionBounds.width + 4 / zoom}
+              height={selectionBounds.height + 4 / zoom}
+            />
+            {#each resizeHandles as handle}
+              {@const handlePoint = resizeHandlePoint(selectionBounds, handle)}
+              <rect
+                class={`handle handle-${handle}`}
+                role="button"
+                tabindex="0"
+                aria-label={`Resize selection from ${handle}`}
+                x={handlePoint.x - 5 / zoom}
+                y={handlePoint.y - 5 / zoom}
+                width={10 / zoom}
+                height={10 / zoom}
+                onpointerdown={(event) => resizeDown(event, handle)}
+                onkeydown={(event) => selectedNodes[0] && resizeKeydown(event, selectedNodes[0])}
+              />
+            {/each}
+          </g>
+        {/if}
+        {#if gesture?.mode === 'duplicate' && gesture.duplicatePayload}
+          <g class="duplicate-preview" aria-hidden="true">
+            {#each Object.values(gesture.duplicatePayload.nodes) as node}
+              <rect
+                x={node.bounds.x + duplicatePreviewOffset.x}
+                y={node.bounds.y + duplicatePreviewOffset.y}
+                width={node.bounds.width}
+                height={node.bounds.height}
+                rx={node.style.radius}
+                fill={node.style.fill}
+                stroke={node.style.stroke}
+                stroke-width={node.style.strokeWidth}
+              />
+            {/each}
+          </g>
+        {/if}
+        {#each smartGuides as guide}
+          {#if guide.axis === 'x'}
+            <line
+              class="smart-guide"
+              x1={guide.position}
+              x2={guide.position}
+              y1="-4000"
+              y2="4000"
+            />
+          {:else}
+            <line
+              class="smart-guide"
+              x1="-4000"
+              x2="4000"
+              y1={guide.position}
+              y2={guide.position}
+            />
+          {/if}
+        {/each}
+        {#if selectionBounds}
+          {#each spacingGuides as guide}
+            {#if guide.axis === 'x'}
+              <g class="spacing-guide">
+                <line
+                  x1={guide.positions[0]}
+                  x2={guide.positions[3]}
+                  y1={selectionBounds.y - 12 / zoom}
+                  y2={selectionBounds.y - 12 / zoom}
+                /><text
+                  x={(guide.positions[0] + guide.positions[3]) / 2}
+                  y={selectionBounds.y - 16 / zoom}>{Math.round(guide.gap)}px</text
+                >
+              </g>
+            {:else}
+              <g class="spacing-guide">
+                <line
+                  x1={selectionBounds.x - 12 / zoom}
+                  x2={selectionBounds.x - 12 / zoom}
+                  y1={guide.positions[0]}
+                  y2={guide.positions[3]}
+                /><text
+                  x={selectionBounds.x - 16 / zoom}
+                  y={(guide.positions[0] + guide.positions[3]) / 2}>{Math.round(guide.gap)}px</text
+                >
+              </g>
+            {/if}
+          {/each}
+        {/if}
         {#if editorMode === 'codesign' && ghostSnapshot}
           <g
             class:source-comparison={compareSourceActive}
@@ -1576,13 +2621,24 @@
             {/each}
           </g>
         {/if}
+        {#if marquee}<rect
+            class="marquee"
+            x={marquee.x}
+            y={marquee.y}
+            width={marquee.width}
+            height={marquee.height}
+          />{/if}
         {#if draft}<rect
             class="draft"
             x={draft.x}
             y={draft.y}
             width={draft.width}
             height={draft.height}
-          />{/if}
+          /><text class="draft-size" x={draft.x} y={draft.y - 8 / zoom}
+            >{tool === 'frame' ? 'Custom frame · ' : ''}{Math.round(draft.width)}×{Math.round(
+              draft.height,
+            )}</text
+          >{/if}
       </g>
     </svg>
     {#if selection.length && !preview}<div class="context-bar">
@@ -1615,12 +2671,65 @@
               setEditorMode('edit');
               contextMenu = null;
             }}>Exit preview to edit</button
-          >{:else if contextNode}<button role="menuitem" onclick={promoteFromContext}
-            >Open in Co-design</button
-          ><button role="menuitem" onclick={startConnectionFromContext}>Start connection</button
+          >{:else if contextNode}<button
+            role="menuitem"
+            onclick={() => {
+              contextMenu = null;
+              void copySelection(true);
+            }}><span>Cut</span><kbd>{commandLabel}+X</kbd></button
+          ><button
+            role="menuitem"
+            onclick={() => {
+              contextMenu = null;
+              void copySelection(false);
+            }}><span>Copy</span><kbd>{commandLabel}+C</kbd></button
+          ><button
+            role="menuitem"
+            onclick={() => {
+              contextMenu = null;
+              void pasteSelection();
+            }}><span>Paste</span><kbd>{commandLabel}+V</kbd></button
+          ><button role="menuitem" onclick={duplicateFromContext}
+            ><span>Duplicate</span><kbd>{commandLabel}+D</kbd></button
+          >{#if selection.length > 1 || selectedNodes.some((node) => node.kind === 'group')}<button
+              role="menuitem"
+              onclick={groupFromContext}
+              ><span
+                >{selectedNodes.some((node) => node.kind === 'group') ? 'Ungroup' : 'Group'}</span
+              ><kbd
+                >{commandLabel}+{selectedNodes.some((node) => node.kind === 'group')
+                  ? 'Shift+G'
+                  : 'G'}</kbd
+              ></button
+            >{/if}
+          <div class="menu-separator"></div>
+          <button role="menuitem" onclick={() => reorderFromContext('forward')}
+            ><span>Bring forward</span><kbd>{commandLabel}+]</kbd></button
+          ><button role="menuitem" onclick={() => reorderFromContext('backward')}
+            ><span>Send backward</span><kbd>{commandLabel}+[</kbd></button
+          ><button role="menuitem" onclick={() => reorderFromContext('front')}
+            ><span>Bring to front</span><kbd>{commandLabel}+Shift+]</kbd></button
+          ><button role="menuitem" onclick={() => reorderFromContext('back')}
+            ><span>Send to back</span><kbd>{commandLabel}+Shift+[</kbd></button
+          >{#if contextNode.kind === 'frame'}<button
+              role="menuitem"
+              onclick={() => toggleFrameClip(contextNode)}
+              >{contextNode.clipContent ? 'Disable Clip content' : 'Enable Clip content'}</button
+            >{/if}
+          <div class="menu-separator"></div>
+          <button role="menuitem" onclick={promoteFromContext}>Open in Co-design</button><button
+            role="menuitem"
+            onclick={startConnectionFromContext}>Start connection</button
           ><button class="danger" role="menuitem" onclick={deleteFromContext}
-            >Delete {selection.length > 1 ? 'selection' : 'element'}</button
+            ><span>Delete {selection.length > 1 ? 'selection' : 'element'}</span><kbd>Delete</kbd
+            ></button
           >{:else}<button
+            role="menuitem"
+            onclick={() => {
+              contextMenu = null;
+              void pasteSelection();
+            }}><span>Paste</span><kbd>{commandLabel}+V</kbd></button
+          ><button
             role="menuitem"
             onclick={() => {
               resetViewport('context-menu');
@@ -1640,6 +2749,154 @@
             }}>Branch current screen</button
           >{/if}
       </div>{/if}
+
+    {#if shortcutsOpen}
+      <div
+        class="shortcuts-backdrop"
+        role="presentation"
+        onclick={(event) => {
+          if (event.target === event.currentTarget) closeShortcuts('backdrop');
+        }}
+      >
+        <div
+          class="shortcuts-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="shortcuts-title"
+        >
+          <header>
+            <div>
+              <span class="eyebrow">Editor reference</span>
+              <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+            </div>
+            <button aria-label="Close keyboard shortcuts" onclick={() => closeShortcuts('button')}
+              >Close <kbd>Esc</kbd></button
+            >
+          </header>
+          <div class="shortcut-groups">
+            <section>
+              <h3>Tools</h3>
+              <dl>
+                <div>
+                  <dt>Select</dt>
+                  <dd><kbd>V</kbd></dd>
+                </div>
+                <div>
+                  <dt>Frame</dt>
+                  <dd><kbd>F</kbd></dd>
+                </div>
+                <div>
+                  <dt>Rectangle</dt>
+                  <dd><kbd>R</kbd></dd>
+                </div>
+                <div>
+                  <dt>Text</dt>
+                  <dd><kbd>T</kbd></dd>
+                </div>
+                <div>
+                  <dt>Connect</dt>
+                  <dd><kbd>C</kbd></dd>
+                </div>
+              </dl>
+            </section>
+            <section>
+              <h3>Edit</h3>
+              <dl>
+                <div>
+                  <dt>Undo</dt>
+                  <dd><kbd>{commandLabel}+Z</kbd></dd>
+                </div>
+                <div>
+                  <dt>Redo</dt>
+                  <dd><kbd>{commandLabel}+Shift+Z</kbd></dd>
+                </div>
+                <div>
+                  <dt>Copy</dt>
+                  <dd><kbd>{commandLabel}+C</kbd></dd>
+                </div>
+                <div>
+                  <dt>Cut</dt>
+                  <dd><kbd>{commandLabel}+X</kbd></dd>
+                </div>
+                <div>
+                  <dt>Paste</dt>
+                  <dd><kbd>{commandLabel}+V</kbd></dd>
+                </div>
+                <div>
+                  <dt>Duplicate</dt>
+                  <dd><kbd>{commandLabel}+D</kbd></dd>
+                </div>
+                <div>
+                  <dt>Delete</dt>
+                  <dd><kbd>Delete</kbd></dd>
+                </div>
+              </dl>
+            </section>
+            <section>
+              <h3>Arrange</h3>
+              <dl>
+                <div>
+                  <dt>Group</dt>
+                  <dd><kbd>{commandLabel}+G</kbd></dd>
+                </div>
+                <div>
+                  <dt>Ungroup</dt>
+                  <dd><kbd>{commandLabel}+Shift+G</kbd></dd>
+                </div>
+                <div>
+                  <dt>Bring forward</dt>
+                  <dd><kbd>{commandLabel}+]</kbd></dd>
+                </div>
+                <div>
+                  <dt>Send backward</dt>
+                  <dd><kbd>{commandLabel}+[</kbd></dd>
+                </div>
+                <div>
+                  <dt>Bring to front</dt>
+                  <dd><kbd>{commandLabel}+Shift+]</kbd></dd>
+                </div>
+                <div>
+                  <dt>Send to back</dt>
+                  <dd><kbd>{commandLabel}+Shift+[</kbd></dd>
+                </div>
+              </dl>
+            </section>
+            <section>
+              <h3>Canvas and selection</h3>
+              <dl>
+                <div>
+                  <dt>Nudge 1 px</dt>
+                  <dd><kbd>Arrow keys</kbd></dd>
+                </div>
+                <div>
+                  <dt>Nudge 10 px</dt>
+                  <dd><kbd>Shift+Arrow</kbd></dd>
+                </div>
+                <div>
+                  <dt>Pan</dt>
+                  <dd><kbd>Scroll</kbd> or <kbd>Space+Drag</kbd></dd>
+                </div>
+                <div>
+                  <dt>Zoom</dt>
+                  <dd><kbd>Pinch</kbd></dd>
+                </div>
+                <div>
+                  <dt>Context actions</dt>
+                  <dd><kbd>Right-click</kbd></dd>
+                </div>
+                <div>
+                  <dt>Edit text</dt>
+                  <dd><kbd>Double-click</kbd></dd>
+                </div>
+              </dl>
+            </section>
+          </div>
+          <footer>
+            <span>Press <kbd>/</kbd> anywhere outside a text field to toggle this reference.</span>
+          </footer>
+        </div>
+      </div>
+    {/if}
 
     <section class:open={bottomOpen} class="bottom-panel">
       <div class="bottom-tabs">
@@ -1742,70 +2999,210 @@
       {@const node = selectedNodes[0]}
       <div class="selection-summary">
         <span class="kind-icon" aria-hidden="true">{node.componentBinding ? '◆' : '□'}</span>
-        <div><strong>{node.name}</strong><small>{node.kind} · {node.id.slice(-8)}</small></div>
+        <div>
+          <strong>{selectedNodes.length > 1 ? `${selectedNodes.length} layers` : node.name}</strong
+          ><small
+            >{selectedNodes.length > 1
+              ? 'Collective selection'
+              : `${node.kind} · ${node.id.slice(-8)}`}</small
+          >
+        </div>
       </div>
       <section>
-        <h3>Geometry</h3>
+        <h3>Geometry {gesture ? '· Live' : ''}</h3>
         <div class="field-grid">
           {#each ['x', 'y', 'width', 'height'] as field}<label
               >{field[0].toUpperCase()}<input
                 type="number"
-                value={Math.round(node.bounds[field as keyof Bounds])}
+                value={Math.round(selectionBounds?.[field as keyof Bounds] ?? 0)}
                 onchange={(event) =>
-                  apply({
-                    id: uid('op'),
-                    type: 'resize',
-                    actor: 'user',
-                    targetId: node.id,
-                    bounds: { ...node.bounds, [field]: Number(event.currentTarget.value) },
-                  })}
+                  changeSelectionGeometry(field as keyof Bounds, Number(event.currentTarget.value))}
               /></label
             >{/each}
         </div>
       </section>
       <section>
         <h3>Appearance</h3>
-        <label
-          >Density<select
-            value={node.style.density}
-            onchange={(event) =>
-              changeStyle({
-                density: event.currentTarget.value as 'compact' | 'comfortable',
-                padding: event.currentTarget.value === 'compact' ? 8 : 16,
-              })}
-            ><option value="compact">Compact</option><option value="comfortable">Comfortable</option
-            ></select
-          ></label
-        ><label
-          ><span class="control-label"
-            ><span>Corner radius</span><output>{node.style.radius}px</output></span
-          ><input
-            type="range"
-            aria-label="Corner radius"
-            min="0"
-            max="12"
-            step="4"
-            value={node.style.radius}
-            oninput={(event) => changeStyle({ radius: Number(event.currentTarget.value) })}
-          /></label
-        ><label
-          ><span class="control-label"
-            ><span>Padding</span><output>{node.style.padding}px</output></span
-          ><input
-            type="range"
-            aria-label="Padding"
-            min="4"
-            max="24"
-            step="4"
-            value={node.style.padding}
-            oninput={(event) => changeStyle({ padding: Number(event.currentTarget.value) })}
-          /></label
-        >{#if node.componentBinding}<button class="wide" onclick={generalize}
+        {#if selectedNodes.some((item) => item.componentBinding)}
+          <p class="muted">
+            Component instances keep registry-controlled appearance. Use permitted overrides below
+            instead of raw fill or typography values.
+          </p>
+          {#if node.componentBinding}
+            {@const contract = componentRegistry[node.componentBinding.componentId]}
+            {#each Object.entries(contract?.allowedProps ?? {}) as [key, values]}
+              <label
+                >{key}<select
+                  value={String(node.componentBinding.props[key] ?? '')}
+                  onchange={(event) => {
+                    const selected = values.find(
+                      (value) => String(value) === event.currentTarget.value,
+                    );
+                    updateComponentOverride(node, key, selected);
+                  }}
+                  >{#each values as value}<option value={String(value)}>{String(value)}</option
+                    >{/each}</select
+                ></label
+              >
+            {/each}
+          {/if}
+        {:else}
+          <div class="field-grid">
+            <label
+              >Fill<input
+                type="color"
+                value={(mixedStyleValue('fill') as string | null) ?? node.style.fill}
+                onchange={(event) => changeStyle({ fill: event.currentTarget.value })}
+              /></label
+            >
+            <div class="stroke-property">
+              <span class="property-label">Stroke</span>
+              {#if selectedNodes.some((item) => item.style.stroke !== undefined || item.style.strokeWidth !== undefined)}
+                <div class="stroke-fields">
+                  <label
+                    >Color<input
+                      type="color"
+                      aria-label="Stroke color"
+                      value={typeof mixedStyleValue('stroke') === 'string'
+                        ? String(mixedStyleValue('stroke'))
+                        : '#20242b'}
+                      onchange={(event) => setStrokeColor(event.currentTarget.value)}
+                    /></label
+                  ><label
+                    >Width<input
+                      type="number"
+                      aria-label="Stroke width"
+                      min="0"
+                      step="0.5"
+                      placeholder={mixedStyleValue('strokeWidth') == null ? 'Mixed' : undefined}
+                      value={typeof mixedStyleValue('strokeWidth') === 'number'
+                        ? Number(mixedStyleValue('strokeWidth'))
+                        : ''}
+                      onchange={(event) => setStrokeWidth(Number(event.currentTarget.value))}
+                    /></label
+                  >
+                </div>
+                <button class="property-action danger-subtle" onclick={removeStroke}
+                  >Remove stroke</button
+                >
+              {:else}
+                <span class="property-empty">No stroke</span>
+                <button class="property-action" onclick={enableStroke}>Add stroke</button>
+              {/if}
+            </div>
+            <label
+              >Opacity %<input
+                type="number"
+                min="0"
+                max="100"
+                placeholder={mixedStyleValue('opacity') === null ? 'Mixed' : undefined}
+                value={mixedStyleValue('opacity') === null
+                  ? ''
+                  : Math.round(Number(mixedStyleValue('opacity')) * 100)}
+                onchange={(event) =>
+                  changeStyle({
+                    opacity: Math.min(1, Math.max(0, Number(event.currentTarget.value) / 100)),
+                  })}
+              /></label
+            ><label
+              >Corner radius<input
+                type="number"
+                min="0"
+                placeholder={mixedStyleValue('radius') === null ? 'Mixed' : undefined}
+                value={(mixedStyleValue('radius') as number | null) ?? ''}
+                onchange={(event) => changeStyle({ radius: Number(event.currentTarget.value) })}
+              /></label
+            ><label
+              >Padding<input
+                type="number"
+                min="0"
+                placeholder={mixedStyleValue('padding') === null ? 'Mixed' : undefined}
+                value={(mixedStyleValue('padding') as number | null) ?? ''}
+                onchange={(event) => changeStyle({ padding: Number(event.currentTarget.value) })}
+              /></label
+            >
+          </div>
+        {/if}
+        {#if node.componentBinding}<button class="wide" onclick={generalize}
             >Apply style to {node.repeaterId
               ? 'repeater siblings'
               : 'same component on screen'}</button
           >{/if}
       </section>
+      {#if selectedNodes.every((item) => item.kind === 'text')}
+        <section>
+          <h3>Text</h3>
+          <label
+            >Content<textarea
+              rows="3"
+              value={selectedNodes.every((item) => item.text === node.text) ? node.text : ''}
+              placeholder={selectedNodes.every((item) => item.text === node.text)
+                ? 'Text content'
+                : 'Mixed'}
+              onchange={(event) => updateSelectedText(event.currentTarget.value)}></textarea></label
+          >
+          <div class="field-grid">
+            <label
+              >Text color<input
+                type="color"
+                value={(mixedStyleValue('textColor') as string | null) ?? node.style.textColor}
+                onchange={(event) => changeStyle({ textColor: event.currentTarget.value })}
+              /></label
+            ><label
+              >Font size<input
+                type="number"
+                min="1"
+                value={(mixedStyleValue('fontSize') as number | null) ?? ''}
+                placeholder={mixedStyleValue('fontSize') === null ? 'Mixed' : undefined}
+                onchange={(event) => changeStyle({ fontSize: Number(event.currentTarget.value) })}
+              /></label
+            ><label
+              >Weight<input
+                type="number"
+                min="100"
+                max="900"
+                step="100"
+                value={(mixedStyleValue('fontWeight') as number | null) ?? ''}
+                placeholder={mixedStyleValue('fontWeight') === null ? 'Mixed' : undefined}
+                onchange={(event) => changeStyle({ fontWeight: Number(event.currentTarget.value) })}
+              /></label
+            ><label
+              >Line height<input
+                type="number"
+                min="0.5"
+                step="0.1"
+                value={(mixedStyleValue('lineHeight') as number | null) ?? ''}
+                placeholder={mixedStyleValue('lineHeight') === null ? 'Mixed' : undefined}
+                onchange={(event) => changeStyle({ lineHeight: Number(event.currentTarget.value) })}
+              /></label
+            >
+          </div>
+          <label
+            >Alignment<select
+              value={(mixedStyleValue('textAlign') as string | null) ?? ''}
+              onchange={(event) =>
+                changeStyle({
+                  textAlign: event.currentTarget.value as 'left' | 'center' | 'right',
+                })}
+              ><option value="" disabled>Mixed</option><option value="left">Left</option><option
+                value="center">Center</option
+              ><option value="right">Right</option></select
+            ></label
+          >
+        </section>
+      {/if}
+      {#if selectedNodes.every((item) => item.kind === 'frame')}
+        <section>
+          <h3>Frame</h3>
+          <label class="checkbox-row"
+            ><input
+              type="checkbox"
+              checked={selectedNodes.every((item) => item.clipContent)}
+              onchange={(event) => setSelectedFrameClipping(event.currentTarget.checked)}
+            /><span>Clip content outside frame bounds</span></label
+          >
+        </section>
+      {/if}
       <section>
         <h3>Fidelity and origin</h3>
         <dl>
@@ -1870,7 +3267,8 @@
   }
   :global(button),
   :global(input),
-  :global(select) {
+  :global(select),
+  :global(textarea) {
     font: inherit;
   }
   :global(button) {
@@ -2069,6 +3467,61 @@
     border-color: #a9b9cb;
     color: #174b78;
   }
+  .frame-presets {
+    display: grid;
+    gap: 7px;
+    padding: 6px 8px 10px;
+    border-bottom: 1px solid #d6dae0;
+    background: #f1f4f7;
+  }
+  .frame-presets .section-title {
+    min-height: 24px;
+    padding: 0;
+  }
+  .frame-presets label {
+    display: grid;
+    gap: 3px;
+    color: #6f7781;
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .frame-presets select,
+  .frame-presets input {
+    width: 100%;
+    height: 29px;
+    box-sizing: border-box;
+    border: 1px solid #bcc4cc;
+    border-radius: 3px;
+    background: white;
+    padding: 0 6px;
+    color: #303842;
+  }
+  .preset-size-grid,
+  .preset-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px;
+  }
+  .preset-actions button {
+    min-height: 30px;
+    border: 1px solid #b9c2cb;
+    border-radius: 3px;
+    background: white;
+    color: #3e4853;
+    cursor: pointer;
+  }
+  .preset-actions button.primary {
+    border-color: #276b9f;
+    background: #276b9f;
+    color: white;
+  }
+  .frame-presets p {
+    margin: 0;
+    color: #717983;
+    font-size: 9px;
+    line-height: 1.4;
+  }
   .outline {
     flex: 1;
     min-width: 0;
@@ -2148,21 +3601,46 @@
     display: flex;
     flex-direction: column;
   }
-  .layers button {
+  .layer-row {
     min-height: 34px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 5px 0 var(--layer-indent, 5px);
+    color: #676e78;
+  }
+  .layer-row.child-layer {
+    border-left: 1px solid #d7dce2;
+  }
+  .layer-select,
+  .layer-action {
     border: 0;
     background: transparent;
-    border-radius: 3px;
-    text-align: left;
+    cursor: pointer;
+  }
+  .layer-select {
+    min-width: 0;
+    min-height: 32px;
+    flex: 1;
     display: flex;
     align-items: center;
     gap: 7px;
-    padding: 0 5px 0 var(--layer-indent, 5px);
-    color: #676e78;
-    cursor: pointer;
+    padding: 0;
+    color: inherit;
+    text-align: left;
   }
-  .layers button.child-layer {
-    border-left: 1px solid #d7dce2;
+  .layer-action {
+    flex: none;
+    border-radius: 3px;
+    padding: 4px;
+    color: #5e6873;
+    font-size: 9px;
+  }
+  .layer-action:hover,
+  .layer-action:focus-visible {
+    background: #d7e0e8;
+    color: #174b78;
   }
   .layers .layer-kind {
     flex: none;
@@ -2180,9 +3658,31 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .layers button.selected {
+  .layer-name-input {
+    min-width: 0;
+    width: 100%;
+    height: 24px;
+    border: 1px solid #2672ad;
+    border-radius: 3px;
+    padding: 2px 5px;
+    background: white;
+    color: #202832;
+    font: inherit;
+  }
+  .layer-row.selected {
     background: #e3e9ef;
     color: #1e4d76;
+  }
+  .layer-row.drop-before {
+    box-shadow: inset 0 2px #2672ad;
+  }
+  .layer-row.drop-after {
+    box-shadow: inset 0 -2px #2672ad;
+  }
+  .layer-row.drop-inside {
+    outline: 2px solid #2672ad;
+    outline-offset: -2px;
+    background: #e7f1fa;
   }
   .branch-action {
     width: 100%;
@@ -2249,6 +3749,12 @@
   .canvas-toolbar button > span {
     padding: 0;
   }
+  .canvas-toolbar .shortcuts-button {
+    gap: 7px;
+    border-left: 1px solid #d4d8dd;
+    border-radius: 0;
+    margin-left: 2px;
+  }
   .canvas-toolbar .zoom-value {
     color: #727a84;
     font-variant-numeric: tabular-nums;
@@ -2311,14 +3817,12 @@
   }
   .node {
     vector-effect: non-scaling-stroke;
-    stroke-width: 1;
   }
   .selected .node {
     filter: brightness(1.01);
   }
   .promoted .node {
     fill: #fff;
-    stroke: #9ca7b4;
   }
   .component-accent {
     fill: #397eb8;
@@ -2405,11 +3909,77 @@
     vector-effect: non-scaling-stroke;
     cursor: nwse-resize;
   }
+  .handle-n,
+  .handle-s {
+    cursor: ns-resize;
+  }
+  .handle-e,
+  .handle-w {
+    cursor: ew-resize;
+  }
+  .handle-ne,
+  .handle-sw {
+    cursor: nesw-resize;
+  }
+  .duplicate-preview {
+    opacity: 0.58;
+    pointer-events: none;
+  }
+  .duplicate-preview rect {
+    stroke-dasharray: 5 3;
+    vector-effect: non-scaling-stroke;
+  }
+  .smart-guide {
+    stroke: #d73a91;
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+  }
+  .spacing-guide {
+    pointer-events: none;
+  }
+  .spacing-guide line {
+    stroke: #d73a91;
+    stroke-width: 1;
+    stroke-dasharray: 2 2;
+    vector-effect: non-scaling-stroke;
+  }
+  .spacing-guide text {
+    fill: #b02773;
+    font-size: 9px;
+    font-weight: 700;
+    text-anchor: middle;
+  }
+  .marquee {
+    fill: #2672ad18;
+    stroke: #2672ad;
+    stroke-width: 1;
+    stroke-dasharray: 4 3;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+  }
+  .inline-text-editor {
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    resize: none;
+    border: 1px solid #2672ad;
+    outline: 0;
+    padding: 4px;
+    background: #ffffffee;
+    font-family: inherit;
+  }
   .draft {
     fill: #b9cbe044;
     stroke: #2672ad;
     stroke-dasharray: 4 3;
     vector-effect: non-scaling-stroke;
+  }
+  .draft-size {
+    fill: #1d5f91;
+    font-size: 10px;
+    font-weight: 700;
+    pointer-events: none;
   }
   .repeat-badge rect {
     fill: #2e596f;
@@ -2475,6 +4045,8 @@
     border-radius: 6px;
     background: #fbfcfd;
     box-shadow: 0 12px 32px #17202b30;
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
   }
   .context-menu-header {
     display: flex;
@@ -2505,6 +4077,20 @@
     padding: 0 8px;
     text-align: left;
     cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .context-menu button kbd {
+    color: #7b838d;
+    font-size: 9px;
+    white-space: nowrap;
+  }
+  .menu-separator {
+    height: 1px;
+    margin: 4px 2px;
+    background: #dfe3e7;
   }
   .context-menu button:hover,
   .context-menu button:focus-visible {
@@ -2515,6 +4101,108 @@
     border-top: 1px solid #e0d2d0;
     border-radius: 0 0 4px 4px;
     color: #98453d;
+  }
+  .shortcuts-backdrop {
+    position: fixed;
+    z-index: 60;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: #17202b66;
+    backdrop-filter: blur(2px);
+  }
+  .shortcuts-dialog {
+    width: min(880px, calc(100vw - 48px));
+    max-height: calc(100vh - 48px);
+    overflow: auto;
+    border: 1px solid #aeb5be;
+    border-radius: 8px;
+    background: #fbfcfd;
+    box-shadow: 0 24px 70px #1018204d;
+  }
+  .shortcuts-dialog > header {
+    position: sticky;
+    z-index: 1;
+    top: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 18px 20px;
+    border-bottom: 1px solid #d4d9df;
+    background: #fbfcfdf2;
+  }
+  .shortcuts-dialog .eyebrow {
+    color: #69727d;
+    font-size: 10px;
+    font-weight: 750;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+  }
+  .shortcuts-dialog h2 {
+    margin: 3px 0 0;
+    font-size: 21px;
+  }
+  .shortcuts-dialog > header button {
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid #bcc3cb;
+    border-radius: 4px;
+    background: white;
+    padding: 0 9px;
+    cursor: pointer;
+  }
+  .shortcut-groups {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1px;
+    background: #dfe3e8;
+  }
+  .shortcut-groups > section {
+    padding: 18px 20px;
+    background: #f8f9fb;
+  }
+  .shortcut-groups h3 {
+    margin: 0 0 10px;
+    color: #5f6873;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .shortcut-groups dl {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .shortcut-groups dl > div {
+    min-height: 34px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 16px;
+    border-top: 1px solid #e0e4e8;
+  }
+  .shortcut-groups dl > div:first-child {
+    border-top: 0;
+  }
+  .shortcut-groups dt {
+    color: #353d46;
+  }
+  .shortcut-groups dd {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 5px;
+    color: #6b737e;
+  }
+  .shortcuts-dialog > footer {
+    padding: 12px 20px;
+    border-top: 1px solid #d4d9df;
+    color: #6d7580;
+    font-size: 11px;
   }
   .bottom-panel {
     position: absolute;
@@ -2679,17 +4367,9 @@
     color: #636b75;
     margin: 9px 0;
   }
-  .control-label {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-  .control-label output {
-    color: #303944;
-    font-variant-numeric: tabular-nums;
-  }
   .inspector input,
-  .inspector select {
+  .inspector select,
+  .inspector textarea {
     width: 100%;
     height: 31px;
     border: 1px solid #c4cad1;
@@ -2697,6 +4377,19 @@
     background: white;
     padding: 0 7px;
     color: #252b33;
+  }
+  .inspector textarea {
+    min-height: 70px;
+    padding: 7px;
+    resize: vertical;
+  }
+  .inspector .checkbox-row {
+    flex-direction: row;
+    align-items: center;
+  }
+  .inspector .checkbox-row input {
+    width: 16px;
+    height: 16px;
   }
   .muted {
     color: #737a84;
@@ -2733,6 +4426,49 @@
   }
   .field-grid label {
     margin: 0;
+  }
+  .stroke-property {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 7px;
+    padding: 8px;
+    border: 1px solid #d3d8de;
+    border-radius: 4px;
+    background: #f8f9fa;
+  }
+  .property-label {
+    color: #58616b;
+    font-size: 11px;
+    font-weight: 650;
+  }
+  .property-empty {
+    grid-column: 1;
+    color: #818892;
+    font-size: 10px;
+  }
+  .stroke-fields {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 7px;
+  }
+  .stroke-property .property-action {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    align-self: stretch;
+    border: 1px solid #bcc4cc;
+    border-radius: 3px;
+    background: white;
+    padding: 0 8px;
+    color: #3f4852;
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .stroke-property .danger-subtle {
+    grid-row: 1;
+    color: #9b433a;
   }
   .no-selection {
     padding: 38px 28px;

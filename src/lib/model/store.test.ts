@@ -128,6 +128,44 @@ describe('project document store', () => {
     expect(get(reloaded).present.version).toBe(2);
   });
 
+  it('materializes new style defaults when restoring an older v2 project', () => {
+    const storage = new MemoryStorage();
+    const document = applyOperation(blankDocument(), createRectangle('legacy-style-node'));
+    const node = document.nodes['legacy-style-node'];
+    const revisionNode =
+      document.revisions[document.currentRevisionId].snapshot.nodes['legacy-style-node'];
+    for (const target of [node, revisionNode]) {
+      const oldStyle = target.style as Partial<typeof target.style>;
+      delete oldStyle.opacity;
+      delete oldStyle.fontWeight;
+      delete oldStyle.textAlign;
+      delete oldStyle.lineHeight;
+    }
+    storage.setItem(
+      PROJECT_STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        activeProjectId: 'older-v2',
+        projects: [{ id: 'older-v2', name: 'Older v2', document }],
+      }),
+    );
+
+    const store = createDocumentStore(storage);
+    store.restore();
+
+    expect(get(store).present.nodes['legacy-style-node'].style).toMatchObject({
+      opacity: 1,
+      fontWeight: 400,
+      textAlign: 'left',
+      lineHeight: 1.4,
+    });
+    expect(get(store).present.nodes['legacy-style-node'].style.strokeWidth).toBeUndefined();
+    expect(
+      get(store).present.revisions[document.currentRevisionId].snapshot.nodes['legacy-style-node']
+        .style.opacity,
+    ).toBe(1);
+  });
+
   it('keeps undo history per project during a session', () => {
     const storage = new MemoryStorage();
     const store = createDocumentStore(storage);
@@ -142,6 +180,23 @@ describe('project document store', () => {
     expect(get(store).present.nodes['first-file-node']).toBeUndefined();
     store.switchProject(second.id);
     expect(get(store).present.nodes['second-file-node']).toBeDefined();
+  });
+
+  it('commits an editor transaction as one undoable history step', () => {
+    const store = createDocumentStore(new MemoryStorage());
+    store.restore();
+
+    store.applyBatch(
+      [createRectangle('batch-a'), createRectangle('batch-b')],
+      'editor-duplicate-selection',
+    );
+    expect(Object.keys(get(store).present.nodes)).toEqual(['batch-a', 'batch-b']);
+    expect(get(store).present.revision).toBe(1);
+
+    store.undo();
+    expect(Object.keys(get(store).present.nodes)).toEqual([]);
+    store.redo();
+    expect(Object.keys(get(store).present.nodes)).toEqual(['batch-a', 'batch-b']);
   });
 
   it('persists lifecycle metadata without clearing direct-edit undo history', () => {

@@ -18,14 +18,25 @@ function visitNode(
   seen: Set<string>,
   rows: LayerRow[],
   reverseChildren: boolean,
+  collapsedIds?: ReadonlySet<string>,
 ) {
   const node = document.nodes[nodeId];
   if (!node || seen.has(nodeId)) return;
   seen.add(nodeId);
   rows.push({ node, depth });
   const childIds = reverseChildren ? [...node.childIds].reverse() : node.childIds;
+  if (collapsedIds?.has(nodeId)) {
+    const hideDescendants = (childId: string) => {
+      const child = document.nodes[childId];
+      if (!child || seen.has(childId)) return;
+      seen.add(childId);
+      child.childIds.forEach(hideDescendants);
+    };
+    childIds.forEach(hideDescendants);
+    return;
+  }
   for (const childId of childIds)
-    visitNode(document, childId, depth + 1, seen, rows, reverseChildren);
+    visitNode(document, childId, depth + 1, seen, rows, reverseChildren, collapsedIds);
 }
 
 function appendOrphans(
@@ -52,11 +63,15 @@ export function orderedScreenNodes(document: LayerDocument, screenId: string): D
 }
 
 /** Layer-panel order: topmost roots first, with each container followed by its child stack. */
-export function screenLayerRows(document: LayerDocument, screenId: string): LayerRow[] {
+export function screenLayerRows(
+  document: LayerDocument,
+  screenId: string,
+  collapsedIds: ReadonlySet<string> = new Set(),
+): LayerRow[] {
   const seen = new Set<string>();
   const rows: LayerRow[] = [];
   for (const rootId of [...(screen(document, screenId)?.rootIds ?? [])].reverse())
-    visitNode(document, rootId, 0, seen, rows, true);
+    visitNode(document, rootId, 0, seen, rows, true, collapsedIds);
   appendOrphans(document, screenId, seen, rows, true);
   return rows;
 }

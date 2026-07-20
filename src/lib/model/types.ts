@@ -17,12 +17,21 @@ export type AtomicDecision = 'pending' | 'accepted' | 'rejected';
 export type Bounds = { x: number; y: number; width: number; height: number };
 export type StyleProperties = {
   fill: string;
-  stroke: string;
+  stroke?: string;
+  strokeWidth?: number;
+  opacity: number;
   radius: number;
   padding: number;
   textColor: string;
   fontSize: number;
+  fontWeight: number;
+  textAlign: 'left' | 'center' | 'right';
+  lineHeight: number;
   density?: 'compact' | 'comfortable';
+};
+export type StylePatch = Omit<Partial<StyleProperties>, 'stroke' | 'strokeWidth'> & {
+  stroke?: string | null;
+  strokeWidth?: number | null;
 };
 export type LegacyNodeSemantics = {
   role: string;
@@ -39,6 +48,7 @@ export type DesignNode = {
   bounds: Bounds;
   style: StyleProperties;
   text?: string;
+  clipContent?: boolean;
   /** Stable identity is assigned by the reducer when an older caller omits it. */
   entityId?: string;
   /** @deprecated Archived during v1 migration and ignored by the v2 interaction. */
@@ -97,7 +107,7 @@ export type DesignOperation =
       type: 'style';
       actor: Actor;
       targetIds: string[];
-      patch: Partial<StyleProperties>;
+      patch: StylePatch;
     }
   | {
       id: string;
@@ -106,7 +116,48 @@ export type DesignOperation =
       sourceId: string;
       targetIds: string[];
       scope: 'repeater-siblings' | 'component-on-screen';
-      patch: Partial<StyleProperties>;
+      patch: StylePatch;
+    }
+  | {
+      id: string;
+      type: 'update-node';
+      actor: Actor;
+      targetIds: string[];
+      patch: { name?: string; text?: string; clipContent?: boolean };
+    }
+  | {
+      id: string;
+      type: 'reparent';
+      actor: Actor;
+      targetIds: string[];
+      parentId?: string;
+      /** Bottom-to-top insertion position in the destination stack. */
+      index?: number;
+    }
+  | {
+      id: string;
+      type: 'group';
+      actor: Actor;
+      targetIds: string[];
+      group: DesignNode;
+    }
+  | { id: string; type: 'ungroup'; actor: Actor; targetIds: string[] }
+  | {
+      id: string;
+      type: 'reorder';
+      actor: Actor;
+      targetIds: string[];
+      direction: 'forward' | 'backward' | 'front' | 'back';
+    }
+  | {
+      id: string;
+      type: 'duplicate';
+      actor: Actor;
+      targetIds: string[];
+      /** Stable source-to-copy IDs supplied by the caller for clipboard/replay safety. */
+      idMap: Record<string, string>;
+      dx: number;
+      dy: number;
     }
   | { id: string; type: 'duplicate-screen'; actor: Actor; sourceScreenId: string; screenId: string }
   | { id: string; type: 'create-branch'; actor: Actor; sourceScreenId: string; branchId: string };
@@ -300,11 +351,30 @@ export const boundsSchema = z.object({
 });
 export const styleSchema = z.object({
   fill: z.string(),
-  stroke: z.string(),
+  stroke: z.string().optional(),
+  strokeWidth: finite.nonnegative().optional(),
+  opacity: finite.min(0).max(1).default(1),
   radius: finite.nonnegative(),
   padding: finite.nonnegative(),
   textColor: z.string(),
   fontSize: finite.positive(),
+  fontWeight: finite.min(1).max(1000).default(400),
+  textAlign: z.enum(['left', 'center', 'right']).default('left'),
+  lineHeight: finite.positive().default(1.4),
+  density: z.enum(['compact', 'comfortable']).optional(),
+});
+const stylePatchSchema: z.ZodType<StylePatch> = z.object({
+  fill: z.string().optional(),
+  stroke: z.string().nullable().optional(),
+  strokeWidth: finite.nonnegative().nullable().optional(),
+  opacity: finite.min(0).max(1).optional(),
+  radius: finite.nonnegative().optional(),
+  padding: finite.nonnegative().optional(),
+  textColor: z.string().optional(),
+  fontSize: finite.positive().optional(),
+  fontWeight: finite.min(1).max(1000).optional(),
+  textAlign: z.enum(['left', 'center', 'right']).optional(),
+  lineHeight: finite.positive().optional(),
   density: z.enum(['compact', 'comfortable']).optional(),
 });
 export const nodeSchema: z.ZodType<DesignNode> = z.object({
@@ -317,6 +387,7 @@ export const nodeSchema: z.ZodType<DesignNode> = z.object({
   bounds: boundsSchema,
   style: styleSchema,
   text: z.string().optional(),
+  clipContent: z.boolean().optional(),
   entityId: z.string().min(1).optional(),
   semantics: z
     .object({
@@ -379,7 +450,7 @@ export const operationSchema: z.ZodType<DesignOperation> = z.discriminatedUnion(
     ...operationBase,
     type: z.literal('style'),
     targetIds: z.array(z.string()).min(1),
-    patch: styleSchema.partial(),
+    patch: stylePatchSchema,
   }),
   z.object({
     ...operationBase,
@@ -387,7 +458,51 @@ export const operationSchema: z.ZodType<DesignOperation> = z.discriminatedUnion(
     sourceId: z.string(),
     targetIds: z.array(z.string()).min(1),
     scope: z.enum(['repeater-siblings', 'component-on-screen']),
-    patch: styleSchema.partial(),
+    patch: stylePatchSchema,
+  }),
+  z.object({
+    ...operationBase,
+    type: z.literal('update-node'),
+    targetIds: z.array(z.string()).min(1),
+    patch: z
+      .object({
+        name: z.string().min(1).max(120).optional(),
+        text: z.string().max(10000).optional(),
+        clipContent: z.boolean().optional(),
+      })
+      .refine((patch) => Object.keys(patch).length > 0, 'Node patch cannot be empty'),
+  }),
+  z.object({
+    ...operationBase,
+    type: z.literal('reparent'),
+    targetIds: z.array(z.string()).min(1),
+    parentId: z.string().min(1).optional(),
+    index: z.number().int().nonnegative().optional(),
+  }),
+  z.object({
+    ...operationBase,
+    type: z.literal('group'),
+    targetIds: z.array(z.string()).min(1),
+    group: nodeSchema,
+  }),
+  z.object({
+    ...operationBase,
+    type: z.literal('ungroup'),
+    targetIds: z.array(z.string()).min(1),
+  }),
+  z.object({
+    ...operationBase,
+    type: z.literal('reorder'),
+    targetIds: z.array(z.string()).min(1),
+    direction: z.enum(['forward', 'backward', 'front', 'back']),
+  }),
+  z.object({
+    ...operationBase,
+    type: z.literal('duplicate'),
+    targetIds: z.array(z.string()).min(1),
+    idMap: z.record(z.string(), z.string().min(1)),
+    dx: finite,
+    dy: finite,
   }),
   z.object({
     ...operationBase,
@@ -504,11 +619,14 @@ export const proposalSchema: z.ZodType<ProposedOperation> = z.object({
 
 export const defaultStyle: StyleProperties = {
   fill: '#d9dde3',
-  stroke: '#a7adb7',
+  opacity: 1,
   radius: 4,
   padding: 12,
   textColor: '#20242b',
   fontSize: 14,
+  fontWeight: 400,
+  textAlign: 'left',
+  lineHeight: 1.4,
   density: 'comfortable',
 };
 

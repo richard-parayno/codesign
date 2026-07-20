@@ -59,6 +59,15 @@ describe('layer hierarchy', () => {
       ['child-a', 1],
     ]);
     expect(descendantNodeIds(document, ['frame'])).toEqual(['frame', 'child-a', 'child-b']);
+    expect(
+      screenLayerRows(document, 'screen-1', new Set(['frame'])).map(({ node: item, depth }) => [
+        item.id,
+        depth,
+      ]),
+    ).toEqual([
+      ['top-root', 0],
+      ['frame', 0],
+    ]);
   });
 
   it('chooses the deepest topmost frame that fully contains a new layer', () => {

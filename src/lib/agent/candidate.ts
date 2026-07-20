@@ -40,10 +40,15 @@ const componentIds = [
 const nullableStyleSchema = z.object({
   fill: z.string().nullable(),
   stroke: z.string().nullable(),
+  strokeWidth: z.number().finite().nonnegative().nullable(),
+  opacity: z.number().finite().min(0).max(1).nullable(),
   radius: z.number().finite().nonnegative().nullable(),
   padding: z.number().finite().nonnegative().nullable(),
   textColor: z.string().nullable(),
   fontSize: z.number().finite().positive().nullable(),
+  fontWeight: z.number().finite().min(1).max(1000).nullable(),
+  textAlign: z.enum(['left', 'center', 'right']).nullable(),
+  lineHeight: z.number().finite().positive().nullable(),
   density: z.enum(['compact', 'comfortable']).nullable(),
 });
 

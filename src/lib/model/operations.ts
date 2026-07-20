@@ -57,8 +57,16 @@ export function appendProcessEvent(
   });
 }
 
-function applyStylePatch(node: DesignNode, patch: Partial<DesignNode['style']>) {
-  node.style = { ...node.style, ...patch };
+function applyStylePatch(
+  node: DesignNode,
+  patch: Extract<DesignOperation, { type: 'style' }>['patch'],
+) {
+  const next = { ...node.style };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete next[key as keyof typeof next];
+    else Object.assign(next, { [key]: value });
+  }
+  node.style = next;
   if (!patch.density || !node.componentBinding) return;
   const props = { ...node.componentBinding.props, density: patch.density };
   if (validateComponentBinding(node.componentBinding.componentId, props).ok)
@@ -78,6 +86,12 @@ function summary(operation: DesignOperation) {
     promote: `Resolved to ${'componentId' in operation ? operation.componentId : 'component'}`,
     style: 'Changed style',
     generalize: `Generalized style · ${count} targets`,
+    'update-node': `Updated ${count} node${count === 1 ? '' : 's'}`,
+    reparent: `Reparented ${count} node${count === 1 ? '' : 's'}`,
+    group: `Grouped ${count} node${count === 1 ? '' : 's'}`,
+    ungroup: `Ungrouped ${count} group${count === 1 ? '' : 's'}`,
+    reorder: `Reordered ${count} layer${count === 1 ? '' : 's'}`,
+    duplicate: `Duplicated ${count} node${count === 1 ? '' : 's'}`,
     'duplicate-screen': 'Duplicated screen',
     'create-branch': 'Created alternative branch',
   };
@@ -95,6 +109,53 @@ function descendants(document: DesignDocument, ids: string[]) {
   };
   ids.forEach(visit);
   return found;
+}
+
+function selectionRoots(document: DesignDocument, ids: string[]) {
+  const selected = new Set(ids);
+  return ids.filter((id, index) => {
+    if (ids.indexOf(id) !== index) return false;
+    let parentId = document.nodes[id]?.parentId;
+    const visited = new Set<string>();
+    while (parentId && !visited.has(parentId)) {
+      if (selected.has(parentId)) return false;
+      visited.add(parentId);
+      parentId = document.nodes[parentId]?.parentId;
+    }
+    return true;
+  });
+}
+
+function siblingIds(document: DesignDocument, node: DesignNode) {
+  if (node.parentId) return document.nodes[node.parentId].childIds;
+  const screen = document.screens.find((item) => item.id === node.screenId);
+  if (!screen) throw new OperationError('Node screen does not exist');
+  return screen.rootIds;
+}
+
+function removeFromHierarchy(document: DesignDocument, ids: Set<string>) {
+  for (const node of Object.values(document.nodes))
+    node.childIds = node.childIds.filter((id) => !ids.has(id));
+  for (const screen of document.screens)
+    screen.rootIds = screen.rootIds.filter((id) => !ids.has(id));
+}
+
+function hierarchyContains(document: DesignDocument, ancestorId: string, nodeId: string) {
+  return descendants(document, [ancestorId]).has(nodeId);
+}
+
+function removeNodeMetadata(document: DesignDocument, node: DesignNode) {
+  if (node.entityId) {
+    for (const representationId of document.entities[node.entityId]?.representationIds ?? [])
+      delete document.representations[representationId];
+    delete document.entities[node.entityId];
+  }
+  document.pinnedNodeIds = document.pinnedNodeIds.filter((id) => id !== node.id);
+  delete document.nodeFidelityOverrides[node.id];
+  delete document.frameFidelity[node.id];
+  document.transitions = document.transitions.filter(
+    (transition) => transition.sourceNodeId !== node.id,
+  );
 }
 
 function cloneScreen(
@@ -176,6 +237,79 @@ export function validateOperation(document: DesignDocument, candidate: unknown):
       throw new OperationError('Repeater targets must be unique');
     const screens = new Set(operation.targetIds.map((id) => document.nodes[id].screenId));
     if (screens.size !== 1) throw new OperationError('Repeater targets must share a screen');
+  }
+  if (operation.type === 'update-node') {
+    if (
+      operation.patch.text !== undefined &&
+      targets.some((id) => document.nodes[id].kind !== 'text')
+    )
+      throw new OperationError('Text content can only be applied to text nodes');
+    if (
+      operation.patch.clipContent !== undefined &&
+      targets.some((id) => document.nodes[id].kind !== 'frame')
+    )
+      throw new OperationError('Clip content can only be applied to frames');
+  }
+  if (operation.type === 'reparent') {
+    const roots = selectionRoots(document, operation.targetIds);
+    if (new Set(roots.map((id) => document.nodes[id].screenId)).size !== 1)
+      throw new OperationError('Reparent targets must share a screen');
+    if (operation.parentId) {
+      const parent = document.nodes[operation.parentId];
+      if (!parent) throw new OperationError('Parent does not exist');
+      if (parent.kind !== 'frame' && parent.kind !== 'group')
+        throw new OperationError('Only frames and groups can contain layers');
+      if (roots.some((id) => document.nodes[id].screenId !== parent.screenId))
+        throw new OperationError('Parent and child must share a screen');
+      if (roots.some((id) => id === parent.id || hierarchyContains(document, id, parent.id)))
+        throw new OperationError('Reparenting would create a hierarchy cycle');
+    }
+  }
+  if (operation.type === 'group') {
+    const roots = selectionRoots(document, operation.targetIds);
+    if (roots.length !== operation.targetIds.length)
+      throw new OperationError('Group targets must be unique sibling layers');
+    if (document.nodes[operation.group.id]) throw new OperationError('Group ID already exists');
+    if (operation.group.kind !== 'group')
+      throw new OperationError('Group node must have group kind');
+    const first = document.nodes[roots[0]];
+    if (
+      roots.some(
+        (id) =>
+          document.nodes[id].screenId !== first.screenId ||
+          document.nodes[id].parentId !== first.parentId,
+      )
+    )
+      throw new OperationError('Group targets must be siblings on the same screen');
+    if (operation.group.screenId !== first.screenId)
+      throw new OperationError('Group and children must share a screen');
+    if (operation.group.parentId && operation.group.parentId !== first.parentId)
+      throw new OperationError('Group parent must match the selected layers');
+  }
+  if (operation.type === 'ungroup') {
+    if (operation.targetIds.some((id) => document.nodes[id].kind !== 'group'))
+      throw new OperationError('Only groups can be ungrouped');
+    if (
+      operation.targetIds.some((id, index) =>
+        operation.targetIds.some(
+          (otherId, otherIndex) => index !== otherIndex && hierarchyContains(document, id, otherId),
+        ),
+      )
+    )
+      throw new OperationError('Nested groups must be ungrouped one level at a time');
+  }
+  if (operation.type === 'duplicate') {
+    const copiedIds = descendants(document, selectionRoots(document, operation.targetIds));
+    const mappedSources = Object.keys(operation.idMap);
+    if (
+      mappedSources.length !== copiedIds.size ||
+      mappedSources.some((id) => !copiedIds.has(id)) ||
+      [...copiedIds].some((id) => !operation.idMap[id])
+    )
+      throw new OperationError('Duplicate ID map must cover the complete selected hierarchy');
+    const newIds = Object.values(operation.idMap);
+    if (new Set(newIds).size !== newIds.length || newIds.some((id) => document.nodes[id]))
+      throw new OperationError('Duplicate IDs must be unique and unused');
   }
   if (operation.type === 'promote') {
     const binding = validateComponentBinding(operation.componentId, operation.props);
@@ -298,6 +432,157 @@ function mutateOperation(document: DesignDocument, operation: DesignOperation) {
         touch(document.nodes[id]);
       }
       break;
+    case 'update-node':
+      for (const id of operation.targetIds) {
+        const node = document.nodes[id];
+        if (operation.patch.name !== undefined) node.name = operation.patch.name;
+        if (operation.patch.text !== undefined) node.text = operation.patch.text;
+        if (operation.patch.clipContent !== undefined)
+          node.clipContent = operation.patch.clipContent;
+        touch(node);
+      }
+      break;
+    case 'reparent': {
+      const roots = selectionRoots(document, operation.targetIds);
+      const rootSet = new Set(roots);
+      const oldParentIds = new Set(
+        roots.map((id) => document.nodes[id].parentId).filter((id): id is string => !!id),
+      );
+      removeFromHierarchy(document, rootSet);
+      const destination = operation.parentId
+        ? document.nodes[operation.parentId].childIds
+        : document.screens.find((screen) => screen.id === document.nodes[roots[0]].screenId)!
+            .rootIds;
+      const index = Math.min(operation.index ?? destination.length, destination.length);
+      destination.splice(index, 0, ...roots);
+      for (const id of roots) {
+        document.nodes[id].parentId = operation.parentId;
+        touch(document.nodes[id]);
+      }
+      for (const id of oldParentIds) touch(document.nodes[id]);
+      if (operation.parentId) touch(document.nodes[operation.parentId]);
+      break;
+    }
+    case 'group': {
+      const roots = selectionRoots(document, operation.targetIds);
+      const first = document.nodes[roots[0]];
+      const sourceStack = siblingIds(document, first);
+      const selected = new Set(roots);
+      const orderedRoots = sourceStack.filter((id) => selected.has(id));
+      const insertionIndex = sourceStack.findIndex((id) => selected.has(id));
+      const destinationIndex = sourceStack
+        .slice(0, insertionIndex)
+        .filter((id) => !selected.has(id)).length;
+      const bounds = orderedRoots.map((id) => document.nodes[id].bounds);
+      const left = Math.min(...bounds.map((item) => item.x));
+      const top = Math.min(...bounds.map((item) => item.y));
+      const right = Math.max(...bounds.map((item) => item.x + item.width));
+      const bottom = Math.max(...bounds.map((item) => item.y + item.height));
+      const group = clone(operation.group);
+      group.entityId = undefined;
+      group.parentId = first.parentId;
+      group.childIds = orderedRoots;
+      group.bounds = { x: left, y: top, width: right - left, height: bottom - top };
+      group.provenance = { actor: operation.actor, operationId: operation.id };
+      document.nodes[group.id] = group;
+      const remaining = sourceStack.filter((id) => !selected.has(id));
+      sourceStack.splice(0, sourceStack.length, ...remaining);
+      sourceStack.splice(destinationIndex, 0, group.id);
+      for (const id of orderedRoots) {
+        document.nodes[id].parentId = group.id;
+        touch(document.nodes[id]);
+      }
+      if (group.parentId) touch(document.nodes[group.parentId]);
+      break;
+    }
+    case 'ungroup':
+      for (const groupId of operation.targetIds) {
+        const group = document.nodes[groupId];
+        const stack = siblingIds(document, group);
+        const index = stack.indexOf(groupId);
+        const childIds = [...group.childIds];
+        stack.splice(index, 1, ...childIds);
+        for (const id of childIds) {
+          document.nodes[id].parentId = group.parentId;
+          touch(document.nodes[id]);
+        }
+        if (group.parentId) touch(document.nodes[group.parentId]);
+        removeNodeMetadata(document, group);
+        delete document.nodes[groupId];
+      }
+      break;
+    case 'reorder': {
+      const stacks = new Set<string>();
+      for (const id of operation.targetIds) {
+        const node = document.nodes[id];
+        stacks.add(node.parentId ? `parent:${node.parentId}` : `screen:${node.screenId}`);
+      }
+      const selected = new Set(operation.targetIds);
+      for (const key of stacks) {
+        const stack = key.startsWith('parent:')
+          ? document.nodes[key.slice(7)].childIds
+          : document.screens.find((screen) => screen.id === key.slice(7))!.rootIds;
+        const inStack = new Set(stack.filter((id) => selected.has(id)));
+        if (operation.direction === 'front')
+          stack.splice(
+            0,
+            stack.length,
+            ...stack.filter((id) => !inStack.has(id)),
+            ...stack.filter((id) => inStack.has(id)),
+          );
+        else if (operation.direction === 'back')
+          stack.splice(
+            0,
+            stack.length,
+            ...stack.filter((id) => inStack.has(id)),
+            ...stack.filter((id) => !inStack.has(id)),
+          );
+        else if (operation.direction === 'forward') {
+          for (let index = stack.length - 2; index >= 0; index--)
+            if (inStack.has(stack[index]) && !inStack.has(stack[index + 1]))
+              [stack[index], stack[index + 1]] = [stack[index + 1], stack[index]];
+        } else
+          for (let index = 1; index < stack.length; index++)
+            if (inStack.has(stack[index]) && !inStack.has(stack[index - 1]))
+              [stack[index], stack[index - 1]] = [stack[index - 1], stack[index]];
+      }
+      operation.targetIds.forEach((id) => touch(document.nodes[id]));
+      break;
+    }
+    case 'duplicate': {
+      const roots = selectionRoots(document, operation.targetIds);
+      const copiedIds = descendants(document, roots);
+      for (const sourceId of copiedIds) {
+        const source = document.nodes[sourceId];
+        const duplicate = clone(source);
+        duplicate.id = operation.idMap[sourceId];
+        duplicate.entityId = undefined;
+        duplicate.parentId = source.parentId
+          ? (operation.idMap[source.parentId] ?? source.parentId)
+          : undefined;
+        duplicate.childIds = source.childIds.map((id) => operation.idMap[id]!);
+        duplicate.bounds.x += operation.dx;
+        duplicate.bounds.y += operation.dy;
+        duplicate.provenance = { actor: operation.actor, operationId: operation.id };
+        document.nodes[duplicate.id] = duplicate;
+        if (document.frameFidelity[sourceId])
+          document.frameFidelity[duplicate.id] = document.frameFidelity[sourceId];
+        if (document.nodeFidelityOverrides[sourceId])
+          document.nodeFidelityOverrides[duplicate.id] = document.nodeFidelityOverrides[sourceId];
+      }
+      const rootsByStack = new Map<string[], Set<string>>();
+      for (const rootId of roots) {
+        const stack = siblingIds(document, document.nodes[rootId]);
+        const ids = rootsByStack.get(stack) ?? new Set<string>();
+        ids.add(rootId);
+        rootsByStack.set(stack, ids);
+      }
+      for (const [stack, ids] of rootsByStack) {
+        const next = stack.flatMap((id) => (ids.has(id) ? [id, operation.idMap[id]] : [id]));
+        stack.splice(0, stack.length, ...next);
+      }
+      break;
+    }
     case 'duplicate-screen': {
       const source = document.screens.find((screen) => screen.id === operation.sourceScreenId);
       if (!source) throw new OperationError('Source screen does not exist');
@@ -373,13 +658,19 @@ function recordEntitiesAndRepresentations(
     document.entities[entityId].parentEntityId = parentEntityId;
   }
   const affectedIds = new Set<string>();
+  const operationIds = new Set(operations.map((operation) => operation.id));
   for (const operation of operations) {
     if (operation.type === 'create') affectedIds.add(operation.node.id);
     if ('targetIds' in operation) operation.targetIds.forEach((id) => affectedIds.add(id));
     if ('targetId' in operation) affectedIds.add(operation.targetId);
     if (operation.type === 'generalize') affectedIds.add(operation.sourceId);
     if (operation.type === 'transition') affectedIds.add(operation.transition.sourceNodeId);
+    if (operation.type === 'group') affectedIds.add(operation.group.id);
+    if (operation.type === 'duplicate')
+      Object.values(operation.idMap).forEach((id) => affectedIds.add(id));
   }
+  for (const node of Object.values(document.nodes))
+    if (operationIds.has(node.provenance.operationId)) affectedIds.add(node.id);
   const affected = Object.values(document.nodes).filter((node) => affectedIds.has(node.id));
   for (const node of affected) {
     const entity = document.entities[node.entityId!];

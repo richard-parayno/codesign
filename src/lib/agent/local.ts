@@ -3,7 +3,7 @@ import {
   type AgentCandidateBatch,
   type GenerationRequest,
 } from './candidate';
-import type { GenerationRun, StyleProperties } from '$lib/model/types';
+import type { GenerationRun, StylePatch, StyleProperties } from '$lib/model/types';
 
 const componentProps = (values: Partial<Record<string, unknown>> = {}) => ({
   density: null,
@@ -21,24 +21,32 @@ const componentProps = (values: Partial<Record<string, unknown>> = {}) => ({
 function style(overrides: Partial<StyleProperties> = {}) {
   return {
     fill: '#ffffff',
-    stroke: '#a7adb7',
+    opacity: 1,
     radius: 8,
     padding: 12,
     textColor: '#20242b',
     fontSize: 14,
+    fontWeight: 400,
+    textAlign: 'left' as const,
+    lineHeight: 1.4,
     density: 'comfortable' as const,
     ...overrides,
   };
 }
 
-function nullablePatch(values: Partial<StyleProperties>) {
+function nullablePatch(values: StylePatch) {
   return {
     fill: null,
     stroke: null,
+    strokeWidth: null,
+    opacity: null,
     radius: null,
     padding: null,
     textColor: null,
     fontSize: null,
+    fontWeight: null,
+    textAlign: null,
+    lineHeight: null,
     density: null,
     ...values,
   };
@@ -181,7 +189,6 @@ export function localCandidateBatch(
                   targetIds: [target.id],
                   patch: nullablePatch({
                     fill: '#f6f7f9',
-                    stroke: '#747b88',
                     radius: 12,
                     padding: 16,
                   }),
@@ -220,7 +227,7 @@ export function localCandidateBatch(
                 width: innerWidth,
                 height: headingHeight,
               },
-              style: style({ fill: 'transparent', stroke: 'transparent', fontSize: 20 }),
+              style: style({ fill: 'transparent', fontSize: 20 }),
               text: 'Continue from here',
               componentBinding: null,
             },
@@ -257,7 +264,7 @@ export function localCandidateBatch(
                 width: innerWidth,
                 height: contentHeight,
               },
-              style: style({ fill: '#eef0f3', stroke: '#a7adb7', radius: 8, padding: 12 }),
+              style: style({ fill: '#eef0f3', radius: 8, padding: 12 }),
               text: null,
               componentBinding: null,
             },
@@ -301,7 +308,6 @@ export function localCandidateBatch(
               },
               style: style({
                 fill: '#2563eb',
-                stroke: '#2563eb',
                 radius: 8,
                 padding: 8,
                 textColor: '#ffffff',

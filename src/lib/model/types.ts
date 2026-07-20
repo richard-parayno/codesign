@@ -1,9 +1,19 @@
 import { z } from 'zod';
 
 export type Actor = 'user' | 'agent';
+export type ProcessActor = Actor | 'system';
+/** @deprecated Retained only so v1 nodes and operation records remain readable. */
 export type Commitment = 'ambiguous' | 'inferred' | 'confirmed';
 export type NodeKind = 'frame' | 'rectangle' | 'text' | 'group' | 'instance';
+/** @deprecated The v2 interaction uses explicit CodesignAction requests. */
 export type Agency = 'protect' | 'guide' | 'explore';
+export type Fidelity = 'structure' | 'wireframe' | 'component' | 'visual' | 'production';
+export type Origin = 'human' | 'ai' | 'mixed';
+export type CodesignAction = 'complete' | 'refine' | 'vary' | 'resolve';
+export type ScopeKind = 'selection' | 'parent' | 'frame' | 'page';
+export type CandidateStatus = 'candidate' | 'partially-accepted' | 'accepted' | 'rejected';
+export type AtomicDecision = 'pending' | 'accepted' | 'rejected';
+
 export type Bounds = { x: number; y: number; width: number; height: number };
 export type StyleProperties = {
   fill: string;
@@ -13,6 +23,11 @@ export type StyleProperties = {
   textColor: string;
   fontSize: number;
   density?: 'compact' | 'comfortable';
+};
+export type LegacyNodeSemantics = {
+  role: string;
+  commitment: Commitment;
+  protected?: boolean;
 };
 export type DesignNode = {
   id: string;
@@ -24,12 +39,20 @@ export type DesignNode = {
   bounds: Bounds;
   style: StyleProperties;
   text?: string;
-  semantics?: { role: string; commitment: Commitment; protected?: boolean };
+  /** Stable identity is assigned by the reducer when an older caller omits it. */
+  entityId?: string;
+  /** @deprecated Archived during v1 migration and ignored by the v2 interaction. */
+  semantics?: LegacyNodeSemantics;
   componentBinding?: { componentId: string; props: Record<string, unknown> };
   repeaterId?: string;
   provenance: { actor: Actor; operationId: string };
 };
-export type Screen = { id: string; name: string; rootIds: string[]; branchId: string };
+export type Screen = {
+  id: string;
+  name: string;
+  rootIds: string[];
+  branchId: string;
+};
 export type Transition = {
   id: string;
   sourceNodeId: string;
@@ -88,8 +111,136 @@ export type DesignOperation =
   | { id: string; type: 'duplicate-screen'; actor: Actor; sourceScreenId: string; screenId: string }
   | { id: string; type: 'create-branch'; actor: Actor; sourceScreenId: string; branchId: string };
 
-export type OperationRecord = DesignOperation & { timestamp: number; summary: string };
-export type DesignDocument = {
+export type OperationRecord = DesignOperation & {
+  timestamp: number;
+  summary: string;
+  transactionId?: string;
+  sourceAtomicChangeId?: string;
+};
+
+export type DesignEntity = {
+  id: string;
+  parentEntityId?: string;
+  representationIds: string[];
+  activeRepresentationId: string;
+};
+export type Representation = {
+  id: string;
+  entityId: string;
+  fidelity: Fidelity;
+  origin: Origin;
+  revisionId: string;
+  rootNodeIds: string[];
+};
+export type ObservationScope = { kind: ScopeKind; nodeIds: string[] };
+export type DerivationTrace = {
+  observation: string;
+  context: string;
+  inference: string;
+  proposedChange: string;
+  evidenceNodeIds: string[];
+  affectedNodeIds: string[];
+};
+export type AtomicStateSlice = {
+  nodes: Record<string, DesignNode | null>;
+  screenRootIds?: Record<string, string[]>;
+  transitions?: Record<string, Transition | null>;
+};
+export type AtomicChange = {
+  id: string;
+  candidateId: string;
+  preservedFromAtomicChangeId?: string;
+  operation: DesignOperation;
+  dependencyIds: string[];
+  trace: DerivationTrace;
+  before: AtomicStateSlice;
+  after: AtomicStateSlice;
+};
+export type GenerationRun = {
+  id: string;
+  sourceRevisionId: string;
+  action: CodesignAction;
+  observationScope: ObservationScope;
+  mutationScopeIds: string[];
+  pinnedNodeIds: string[];
+  requestedFidelity: Fidelity;
+  contextSnapshotId?: string;
+  candidateIds: string[];
+  backend: 'local' | 'codex';
+  model?: string;
+  promptVersion: string;
+  schemaVersion: string;
+  createdAt: number;
+};
+export type CandidateRevision = {
+  id: string;
+  generationRunId: string;
+  sourceRevisionId: string;
+  revisionId: string;
+  fidelity: Fidelity;
+  origin: 'ai';
+  atomicChangeIds: string[];
+  decisions: Record<string, AtomicDecision>;
+  status: CandidateStatus;
+  createdAt: number;
+};
+
+export type ProcessEventType =
+  | 'legacy-imported'
+  | 'manual-operation'
+  | 'checkpoint-created'
+  | 'generation-requested'
+  | 'candidates-generated'
+  | 'candidate-viewed'
+  | 'candidate-rejected'
+  | 'reroll-requested'
+  | 'pin-changed'
+  | 'atomic-decision'
+  | 'candidate-accepted'
+  | 'source-compared'
+  | 'revision-activated'
+  | 'replayed'
+  | 'reverted';
+export type ProcessEvent = {
+  id: string;
+  sequence: number;
+  type: ProcessEventType;
+  actor: ProcessActor;
+  timestamp: number;
+  revisionId?: string;
+  generationRunId?: string;
+  candidateId?: string;
+  atomicChangeId?: string;
+  details?: Record<string, string | number | boolean | null | string[]>;
+};
+
+export type CanvasSnapshot = {
+  screens: Screen[];
+  nodes: Record<string, DesignNode>;
+  transitions: Transition[];
+  branches: Branch[];
+  activeBranchId: string;
+  activeScreenId: string;
+  entities: Record<string, DesignEntity>;
+  representations: Record<string, Representation>;
+  pinnedNodeIds: string[];
+  frameFidelity: Record<string, Fidelity>;
+  nodeFidelityOverrides: Record<string, Fidelity>;
+};
+export type DesignRevision = {
+  id: string;
+  parentRevisionId?: string;
+  status: 'working' | 'candidate' | 'accepted' | 'rejected';
+  origin: Origin;
+  createdAt: number;
+  generationRunId?: string;
+  candidateId?: string;
+  operationIds: string[];
+  atomicChangeIds: string[];
+  snapshot: CanvasSnapshot;
+};
+
+export type LegacyDesignDocumentV1 = {
   version: 1;
   revision: number;
   screens: Screen[];
@@ -101,6 +252,28 @@ export type DesignDocument = {
   hypotheses: IntentHypothesis[];
   operations: OperationRecord[];
 };
+export type LegacyArchive = {
+  sourceVersion: 1;
+  sourceKey: string;
+  migratedAt: number;
+  document: LegacyDesignDocumentV1;
+};
+
+export type DesignDocument = CanvasSnapshot & {
+  version: 2;
+  /** Monotonic working revision retained for existing direct-operation callers. */
+  revision: number;
+  currentRevisionId: string;
+  revisions: Record<string, DesignRevision>;
+  generationRuns: Record<string, GenerationRun>;
+  candidates: Record<string, CandidateRevision>;
+  atomicChanges: Record<string, AtomicChange>;
+  processEvents: ProcessEvent[];
+  operations: OperationRecord[];
+  legacyArchive?: LegacyArchive;
+};
+
+/** @deprecated Compatibility contract for the superseded single-operation agent flow. */
 export type ProposedOperation = {
   id: string;
   baseRevision: number;
@@ -112,13 +285,20 @@ export type ProposedOperation = {
 };
 
 const finite = z.number().finite();
-const boundsSchema = z.object({
+export const fidelitySchema = z.enum([
+  'structure',
+  'wireframe',
+  'component',
+  'visual',
+  'production',
+]);
+export const boundsSchema = z.object({
   x: finite,
   y: finite,
   width: finite.positive(),
   height: finite.positive(),
 });
-const styleSchema = z.object({
+export const styleSchema = z.object({
   fill: z.string(),
   stroke: z.string(),
   radius: finite.nonnegative(),
@@ -137,6 +317,7 @@ export const nodeSchema: z.ZodType<DesignNode> = z.object({
   bounds: boundsSchema,
   style: styleSchema,
   text: z.string().optional(),
+  entityId: z.string().min(1).optional(),
   semantics: z
     .object({
       role: z.string().min(1),
@@ -149,6 +330,12 @@ export const nodeSchema: z.ZodType<DesignNode> = z.object({
     .optional(),
   repeaterId: z.string().optional(),
   provenance: z.object({ actor: z.enum(['user', 'agent']), operationId: z.string() }),
+});
+const transitionSchema: z.ZodType<Transition> = z.object({
+  id: z.string().min(1),
+  sourceNodeId: z.string().min(1),
+  targetScreenId: z.string().min(1),
+  label: z.string(),
 });
 const operationBase = { id: z.string().min(1), actor: z.enum(['user', 'agent']) } as const;
 export const operationSchema: z.ZodType<DesignOperation> = z.discriminatedUnion('type', [
@@ -180,16 +367,7 @@ export const operationSchema: z.ZodType<DesignOperation> = z.discriminatedUnion(
     role: z.string().min(1),
     commitment: z.enum(['ambiguous', 'inferred', 'confirmed']),
   }),
-  z.object({
-    ...operationBase,
-    type: z.literal('transition'),
-    transition: z.object({
-      id: z.string(),
-      sourceNodeId: z.string(),
-      targetScreenId: z.string(),
-      label: z.string(),
-    }),
-  }),
+  z.object({ ...operationBase, type: z.literal('transition'), transition: transitionSchema }),
   z.object({
     ...operationBase,
     type: z.literal('promote'),
@@ -224,6 +402,96 @@ export const operationSchema: z.ZodType<DesignOperation> = z.discriminatedUnion(
     branchId: z.string(),
   }),
 ]);
+
+export const observationScopeSchema = z.object({
+  kind: z.enum(['selection', 'parent', 'frame', 'page']),
+  nodeIds: z.array(z.string()).min(1),
+}) satisfies z.ZodType<ObservationScope>;
+export const derivationTraceSchema: z.ZodType<DerivationTrace> = z.object({
+  observation: z.string().min(1).max(1000),
+  context: z.string().min(1).max(1000),
+  inference: z.string().min(1).max(1000),
+  proposedChange: z.string().min(1).max(1000),
+  evidenceNodeIds: z.array(z.string()),
+  affectedNodeIds: z.array(z.string()).min(1),
+});
+const atomicStateSliceSchema: z.ZodType<AtomicStateSlice> = z.object({
+  nodes: z.record(z.string(), nodeSchema.nullable()),
+  screenRootIds: z.record(z.string(), z.array(z.string())).optional(),
+  transitions: z.record(z.string(), transitionSchema.nullable()).optional(),
+});
+export const atomicChangeSchema: z.ZodType<AtomicChange> = z.object({
+  id: z.string().min(1),
+  candidateId: z.string().min(1),
+  preservedFromAtomicChangeId: z.string().optional(),
+  operation: operationSchema,
+  dependencyIds: z.array(z.string()),
+  trace: derivationTraceSchema,
+  before: atomicStateSliceSchema,
+  after: atomicStateSliceSchema,
+});
+export const generationRunSchema: z.ZodType<GenerationRun> = z.object({
+  id: z.string().min(1),
+  sourceRevisionId: z.string().min(1),
+  action: z.enum(['complete', 'refine', 'vary', 'resolve']),
+  observationScope: observationScopeSchema,
+  mutationScopeIds: z.array(z.string()).min(1),
+  pinnedNodeIds: z.array(z.string()),
+  requestedFidelity: fidelitySchema,
+  contextSnapshotId: z.string().optional(),
+  candidateIds: z.array(z.string()),
+  backend: z.enum(['local', 'codex']),
+  model: z.string().optional(),
+  promptVersion: z.string().min(1),
+  schemaVersion: z.string().min(1),
+  createdAt: z.number().finite().nonnegative(),
+});
+export const candidateRevisionSchema: z.ZodType<CandidateRevision> = z.object({
+  id: z.string().min(1),
+  generationRunId: z.string().min(1),
+  sourceRevisionId: z.string().min(1),
+  revisionId: z.string().min(1),
+  fidelity: fidelitySchema,
+  origin: z.literal('ai'),
+  atomicChangeIds: z.array(z.string()).min(1),
+  decisions: z.record(z.string(), z.enum(['pending', 'accepted', 'rejected'])),
+  status: z.enum(['candidate', 'partially-accepted', 'accepted', 'rejected']),
+  createdAt: z.number().finite().nonnegative(),
+});
+export const processEventSchema: z.ZodType<ProcessEvent> = z.object({
+  id: z.string().min(1),
+  sequence: z.number().int().nonnegative(),
+  type: z.enum([
+    'legacy-imported',
+    'manual-operation',
+    'checkpoint-created',
+    'generation-requested',
+    'candidates-generated',
+    'candidate-viewed',
+    'candidate-rejected',
+    'reroll-requested',
+    'pin-changed',
+    'atomic-decision',
+    'candidate-accepted',
+    'source-compared',
+    'revision-activated',
+    'replayed',
+    'reverted',
+  ]),
+  actor: z.enum(['user', 'agent', 'system']),
+  timestamp: z.number().finite().nonnegative(),
+  revisionId: z.string().optional(),
+  generationRunId: z.string().optional(),
+  candidateId: z.string().optional(),
+  atomicChangeId: z.string().optional(),
+  details: z
+    .record(
+      z.string(),
+      z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(z.string())]),
+    )
+    .optional(),
+});
+
 export const proposalSchema: z.ZodType<ProposedOperation> = z.object({
   id: z.string(),
   baseRevision: z.number().int().nonnegative(),
@@ -243,18 +511,41 @@ export const defaultStyle: StyleProperties = {
   fontSize: 14,
   density: 'comfortable',
 };
+
 export function blankDocument(): DesignDocument {
   const branch: Branch = { id: 'branch-main', name: 'Accepted', screenIds: ['screen-1'] };
-  return {
-    version: 1,
-    revision: 0,
+  const canvas: CanvasSnapshot = {
     screens: [{ id: 'screen-1', name: 'Screen 1', rootIds: [], branchId: branch.id }],
     nodes: {},
     transitions: [],
     branches: [branch],
     activeBranchId: branch.id,
     activeScreenId: 'screen-1',
-    hypotheses: [],
+    entities: {},
+    representations: {},
+    pinnedNodeIds: [],
+    frameFidelity: {},
+    nodeFidelityOverrides: {},
+  };
+  const initialRevision: DesignRevision = {
+    id: 'revision-initial',
+    status: 'working',
+    origin: 'human',
+    createdAt: 0,
+    operationIds: [],
+    atomicChangeIds: [],
+    snapshot: structuredClone(canvas),
+  };
+  return {
+    version: 2,
+    revision: 0,
+    currentRevisionId: initialRevision.id,
+    ...canvas,
+    revisions: { [initialRevision.id]: initialRevision },
+    generationRuns: {},
+    candidates: {},
+    atomicChanges: {},
+    processEvents: [],
     operations: [],
   };
 }

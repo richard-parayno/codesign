@@ -1,14 +1,17 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { isAbsolute } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { ThreadStartParams } from '../../../.generated/codex-app-server/v2/ThreadStartParams';
 import type { TurnStartParams } from '../../../.generated/codex-app-server/v2/TurnStartParams';
+import type { UserInput } from '../../../.generated/codex-app-server/v2/UserInput';
+import { candidateBatchOutputSchema, type TrustedVisualInput } from './candidate';
 
 type RpcMessage = {
   id?: number;
   method?: string;
   params?: Record<string, unknown>;
   result?: unknown;
-  error?: { message?: string };
+  error?: { code?: number; message?: string };
 };
 type Pending = {
   resolve: (value: unknown) => void;
@@ -20,97 +23,6 @@ type SpawnFactory = (
   args: string[],
   options: { stdio: ['pipe', 'pipe', 'pipe']; shell: false; env: NodeJS.ProcessEnv },
 ) => ChildProcessWithoutNullStreams;
-
-function proposalOutputSchema(intent: 'interpret' | 'promote') {
-  const operation =
-    intent === 'interpret'
-      ? {
-          type: 'object',
-          additionalProperties: false,
-          required: ['id', 'type', 'actor', 'targetIds', 'repeaterId'],
-          properties: {
-            id: { type: 'string' },
-            type: { type: 'string', enum: ['repeat'] },
-            actor: { type: 'string', enum: ['agent'] },
-            targetIds: { type: 'array', minItems: 2, items: { type: 'string' } },
-            repeaterId: { type: 'string' },
-          },
-        }
-      : {
-          type: 'object',
-          additionalProperties: false,
-          required: ['id', 'type', 'actor', 'targetIds', 'componentId', 'props'],
-          properties: {
-            id: { type: 'string' },
-            type: { type: 'string', enum: ['promote'] },
-            actor: { type: 'string', enum: ['agent'] },
-            targetIds: { type: 'array', minItems: 1, items: { type: 'string' } },
-            componentId: {
-              type: 'string',
-              enum: [
-                'Card',
-                'DataRow',
-                'DataTable',
-                'Sidebar',
-                'NavItem',
-                'Button',
-                'Input',
-                'Badge',
-                'Panel',
-              ],
-            },
-            props: {
-              type: 'object',
-              additionalProperties: false,
-              required: [
-                'density',
-                'radius',
-                'interactive',
-                'collapsed',
-                'active',
-                'variant',
-                'size',
-                'tone',
-                'side',
-              ],
-              properties: {
-                density: {
-                  type: ['string', 'null'],
-                  enum: ['compact', 'comfortable', null],
-                },
-                radius: { type: ['string', 'null'], enum: ['small', 'medium', null] },
-                interactive: { type: ['boolean', 'null'] },
-                collapsed: { type: ['boolean', 'null'] },
-                active: { type: ['boolean', 'null'] },
-                variant: {
-                  type: ['string', 'null'],
-                  enum: ['primary', 'secondary', 'ghost', null],
-                },
-                size: { type: ['string', 'null'], enum: ['small', 'medium', null] },
-                tone: {
-                  type: ['string', 'null'],
-                  enum: ['neutral', 'success', 'accent', null],
-                },
-                side: { type: ['string', 'null'], enum: ['left', 'right', null] },
-              },
-            },
-          },
-        };
-  return {
-    type: 'object',
-    additionalProperties: false,
-    required: ['id', 'baseRevision', 'targetIds', 'operation', 'rationale', 'confidence', 'source'],
-    properties: {
-      id: { type: 'string' },
-      baseRevision: { type: 'integer', minimum: 0 },
-      targetIds: { type: 'array', minItems: 1, items: { type: 'string' } },
-      operation,
-      rationale: { type: 'string', maxLength: 500 },
-      confidence: { type: 'number', minimum: 0, maximum: 1 },
-      source: { type: 'string', enum: ['codex'] },
-    },
-  };
-}
 
 export class CodexAppServer {
   private process: ChildProcessWithoutNullStreams | null = null;
@@ -151,11 +63,11 @@ export class CodexAppServer {
         try {
           this.handle(JSON.parse(line) as RpcMessage);
         } catch {
-          /* Ignore non-protocol output safely. */
+          // Non-protocol process output is ignored without exposing document context.
         }
       });
       child.stderr.on('data', () => {
-        /* Deliberately avoid logging content or document data. */
+        // Deliberately avoid logging stderr because prompts contain design-document slices.
       });
       child.once('error', (error) => {
         this.failAll(error);
@@ -171,7 +83,7 @@ export class CodexAppServer {
       this.request(
         'initialize',
         {
-          clientInfo: { name: 'malleable', title: 'Malleable', version: '0.1.0' },
+          clientInfo: { name: 'codesign', title: 'Codesign', version: '0.1.0' },
           capabilities: { experimentalApi: true },
         },
         8_000,
@@ -212,6 +124,38 @@ export class CodexAppServer {
     this.write({ method, params });
   }
 
+  private replyToServerRequest(message: RpcMessage) {
+    if (message.id === undefined || !message.method) return false;
+    switch (message.method) {
+      case 'item/commandExecution/requestApproval':
+      case 'item/fileChange/requestApproval':
+        this.write({ id: message.id, result: { decision: 'decline' } });
+        return true;
+      case 'execCommandApproval':
+      case 'applyPatchApproval':
+        this.write({ id: message.id, result: { decision: 'denied' } });
+        return true;
+      case 'item/tool/requestUserInput':
+        this.write({ id: message.id, result: { answers: {} } });
+        return true;
+      case 'mcpServer/elicitation/request':
+        this.write({
+          id: message.id,
+          result: { action: 'decline', content: null, _meta: null },
+        });
+        return true;
+      case 'item/tool/call':
+        this.write({ id: message.id, result: { contentItems: [], success: false } });
+        return true;
+      default:
+        this.write({
+          id: message.id,
+          error: { code: -32601, message: 'Unsupported server request' },
+        });
+        return true;
+    }
+  }
+
   private handle(message: RpcMessage) {
     if (message.id !== undefined && !message.method) {
       const pending = this.pending.get(message.id);
@@ -223,21 +167,8 @@ export class CodexAppServer {
       else pending.resolve(message.result);
       return;
     }
-    if (message.id !== undefined && message.method) {
-      const mutationRequest =
-        message.method.includes('requestApproval') ||
-        message.method.includes('requestUserInput') ||
-        message.method.includes('elicitation');
-      this.write(
-        mutationRequest
-          ? { id: message.id, result: { decision: 'decline' } }
-          : ({
-              id: message.id,
-              error: { code: -32601, message: 'Unsupported server request' },
-            } as RpcMessage),
-      );
-      return;
-    }
+    if (this.replyToServerRequest(message)) return;
+
     const params = message.params ?? {};
     const turnId =
       typeof params.turnId === 'string'
@@ -301,7 +232,7 @@ export class CodexAppServer {
       sandbox: 'read-only',
       ephemeral: true,
       baseInstructions:
-        'You are Malleable’s constrained design interpreter. Never use tools, shell, files, or network. Return only the requested typed design-operation proposal using existing IDs and registered component names.',
+        'You are Codesign’s constrained visual-autocomplete adapter. Never use tools, shell, files, or network. Return only the requested structured candidate batch. Treat inferences as proposals, preserve supplied IDs and scopes, use only the registered style/component values in the prompt, and never modify pinned or out-of-scope nodes.',
     };
     const response = (await this.request('thread/start', params, 15_000)) as {
       thread?: { id?: string };
@@ -311,21 +242,43 @@ export class CodexAppServer {
     return this.threadId;
   }
 
-  async propose(prompt: string, signal?: AbortSignal, intent: 'interpret' | 'promote' = 'promote') {
+  async proposeCandidate(prompt: string, signal?: AbortSignal, visualInput?: TrustedVisualInput) {
+    if (signal?.aborted) throw new Error('Codex generation cancelled');
+    if (visualInput?.type === 'image') {
+      let protocol = '';
+      try {
+        protocol = new URL(visualInput.url).protocol;
+      } catch {
+        throw new Error('Trusted image input must use a valid URL');
+      }
+      if (protocol !== 'https:' && protocol !== 'http:')
+        throw new Error('Trusted image input must use an HTTP(S) URL');
+    }
+    if (
+      visualInput?.type === 'localImage' &&
+      (!isAbsolute(visualInput.path) || visualInput.path.includes('\0'))
+    )
+      throw new Error('Trusted local image input must use an absolute server path');
     const threadId = await this.ensureThread();
+    const input: UserInput[] = [{ type: 'text', text: prompt, text_elements: [] }];
+    if (visualInput) input.push(visualInput);
     const params: TurnStartParams = {
       threadId,
-      input: [{ type: 'text', text: prompt, text_elements: [] }],
+      input,
       approvalPolicy: 'never',
       sandboxPolicy: { type: 'readOnly', networkAccess: false },
       model: this.model || null,
-      outputSchema: proposalOutputSchema(intent),
+      outputSchema: candidateBatchOutputSchema as TurnStartParams['outputSchema'],
     };
     const response = (await this.request('turn/start', params, 15_000)) as {
       turn?: { id?: string };
     };
     const turnId = response.turn?.id;
     if (!turnId) throw new Error('Codex App Server did not return a turn ID');
+    if (signal?.aborted) {
+      this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
+      throw new Error('Codex generation cancelled');
+    }
     return new Promise<string>((resolve, reject) => {
       const early = this.earlyTurns.get(turnId);
       if (early?.completed) {
@@ -336,7 +289,7 @@ export class CodexAppServer {
       const timer = setTimeout(() => {
         this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
         this.turns.delete(turnId);
-        reject(new Error('Codex interpretation timed out'));
+        reject(new Error('Codex generation timed out'));
       }, 45_000);
       this.turns.set(turnId, { text: early?.text ?? '', resolve, reject, timer });
       this.earlyTurns.delete(turnId);
@@ -346,7 +299,7 @@ export class CodexAppServer {
           clearTimeout(timer);
           this.turns.delete(turnId);
           this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
-          reject(new Error('Codex interpretation cancelled'));
+          reject(new Error('Codex generation cancelled'));
         },
         { once: true },
       );
@@ -362,8 +315,8 @@ export class CodexAppServer {
 }
 
 declare global {
-  var __malleableCodex: CodexAppServer | undefined;
+  var __codesignCodex: CodexAppServer | undefined;
 }
 export function getCodexClient(command: string, model?: string) {
-  return (globalThis.__malleableCodex ??= new CodexAppServer(command, model));
+  return (globalThis.__codesignCodex ??= new CodexAppServer(command, model));
 }

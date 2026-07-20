@@ -1,39 +1,36 @@
-# Malleable demo script — under three minutes
+# Codesign demo script — under three minutes
 
 ## Primary path
 
-**0:00–0:10 — Start with nothing.** Open the app and click **Reset to blank** if needed. Point out `Local` and `Guide`: the demo is offline and the agent is constrained.
+**0:00–0:15 — Establish direct control.** Open the app and click **Reset to blank** if needed. Draw a frame with `F`, or use **Load demo checkpoint** for the reliable path. Point out that `Edit`, `Co-design`, and `Preview` are separate modes.
 
-**0:10–0:40 — Sketch.** Press `F` and drag an application frame. Use `R` for a sidebar, header, content region, and four horizontal row shapes. Use `T` for a label if time allows. Shift-click the four rows in the canvas or layer list.
+**0:15–0:35 — Choose an explicit boundary.** Select one frame or region, then enter **Co-design**. Nothing generates yet. Show **Can change** with its solid canvas outline. Change **Can reference** from Selection to Containing frame or Page and show the lighter dashed observational boundary.
 
-**0:40–0:57 — Bind repetition.** Choose **Repeat?** in the contextual bar. Show the staged proposal: targets, confidence, rationale, scope, and source. Accept. The rows gain confirmed intent and repeat badges. Undo and redo once to show that the semantic action is one operation.
+**0:35–0:55 — Request visual autocomplete.** Choose **Complete pattern**. The deterministic local generator returns structured candidates. The source is unchanged; the continuation appears as native ghost rectangles and text on the canvas.
 
-**0:57–1:20 — Make the flow playable.** Click **Duplicate screen** in the Screens section. Return to the first screen. Choose **Connect** (`C`), click a row, then choose **Connect** beside the second screen. Enter **Preview**, click the connected row, and show that the second state opens. Press Escape or select Edit.
+**0:55–1:25 — Review evidence and atomic changes.** Switch between candidate tabs. Highlight one change and open **Review derivation trace**. Read the objective Observed, Context, Codesign proposed, Change, and Decision fields. Use **Compare with source**, then return to the candidate.
 
-**1:20–1:43 — Promote within a contract.** Select the sidebar or one repeated row and choose **Promote**. Accept the registered `Sidebar`, `DataRow`, or `Card` match. Point out that rough and promoted regions coexist. The model cannot invent a component or token.
+**1:25–1:50 — Make a partial decision.** Leave two changes checked and uncheck one. Dependencies are included automatically. Choose the visible partial-accept action. The selected operations land in one revision; the unselected change is retained as rejected in **Process history**.
 
-**1:43–2:02 — Generalize a direct edit.** With a promoted repeated row selected, open Design in the right inspector. Change density to Compact or adjust padding/radius. Choose **Generalize to repeater siblings** and show the explicit propagation in one history entry.
+**1:50–2:10 — Reject and revisit.** Generate again, reject a candidate, open **Process history**, and use **View candidate** or **Compare with source**. Rejection does not delete the candidate.
 
-**2:02–2:23 — Inspect intent.** Open Intent. Show Ambiguous, Inferred, and Confirmed totals, then select a node to show its semantic role, commitment, binding, provenance, operation ID, and protection status.
+**2:10–2:30 — Pin and reroll.** Generate another candidate, pin one proposed atomic change, then choose **Reroll unpinned changes**. The earlier candidate remains switchable, and the rerolled candidate carries the pinned change while varying the rest.
 
-Use **Why this intent** to make the source explicit: spatial patterns begin as inference; accepted proposals, assigned roles, and connections confirm intent; promotion resolves it against the registered component contract.
+**2:30–2:45 — Show fidelity without fake controls.** Point out the named Structure, Wireframe, Component, Visual, and Production stops. Each has a textual state. Unsupported Visual and Production stops are descriptive, not clickable.
 
-**2:23–2:42 — Show shared IR.** Expand **Operation history**, then **Svelte projection**. Point out agent versus user attribution, registered imports for promoted content, and greybox placeholders for unresolved content. The projection is generated from the same document as the canvas.
-
-**2:42–2:57 — Explore safely.** Choose **Branch current screen**, change the alternative, then select the Accepted branch’s original screen in the left panel. The original remains unchanged. Alternatively, switch the agency envelope to Explore and accept a proposal; Malleable creates the branch before applying it.
-
-**2:57–3:00 — Close.** “Design the screen; let AI understand what the moves mean.”
+**2:45–3:00 — Preserve normal design work.** Return to **Edit**, adjust geometry or appearance, duplicate a screen, and enter **Preview**. Close with: “Codesign suggests visible continuations; you decide which structured changes become part of the design.”
 
 ## Deterministic fallback
 
-Click **Load demo checkpoint**. This loads a frame, shell regions, and four rows with repetition already confirmed. Continue from duplicate/connect/Preview. The button is intentionally separate from Reset so the default blank-canvas claim remains truthful.
+Click **Load demo checkpoint**, select the main frame, enter **Co-design**, choose **Containing frame**, then **Complete pattern**. This path is fully local and should not require authentication, network access, or credits.
 
-If Codex is signed out, unavailable, slow, or returns invalid output, leave the visible local fallback indicator in place and continue: every critical interaction works through the deterministic adapter. Do not troubleshoot authentication during the three-minute presentation.
+If the optional Codex backend is signed out, slow, or returns invalid output, the API reports a local fallback and the same candidate review flow continues. Do not troubleshoot authentication during a presentation.
 
 ## Preflight
 
-1. Use a 1440×900 or 1280×800 browser window at 100% zoom.
+1. Use a 1440×900 browser window at 100% zoom.
 2. Run `devenv shell -- pnpm dev --host 0.0.0.0`.
-3. For the real-agent variant, run `devenv shell -- codex login status` and set `MALLEABLE_AGENT_BACKEND=codex`; otherwise keep `local`.
-4. Load the checkpoint once, exercise duplicate/connect/Preview, then Reset to blank.
-5. Confirm the browser has localStorage enabled and no stale error toast is present.
+3. Keep `CODESIGN_AGENT_BACKEND=local` for the deterministic demo.
+4. Load the checkpoint once and exercise Complete, partial acceptance, reject, pin/reroll, source compare, and reload.
+5. Confirm project switching still works and the SvelteKit terminal shows `[codesign:action]` records.
+6. Reset to blank before presenting if you want to demonstrate the empty starting state.

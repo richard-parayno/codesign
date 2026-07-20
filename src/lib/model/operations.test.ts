@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { applyOperation, OperationError } from './operations';
+import { isDesignDocumentV2 } from './migration';
+import { applyOperation, applyOperationBatch, OperationError } from './operations';
 import { blankDocument, defaultStyle, type DesignNode } from './types';
 
 function node(id: string, x: number, y: number): DesignNode {
@@ -40,11 +41,11 @@ describe('design operations', () => {
       3,
     );
     expect(repeated.nodes.a.repeaterId).toBe('records');
-    expect(repeated.nodes.b.semantics).toEqual({ role: 'record', commitment: 'confirmed' });
-    expect(repeated.hypotheses[0]).toMatchObject({ kind: 'repetition', status: 'accepted' });
-    expect(
+    expect(repeated.nodes.b.repeaterId).toBe('records');
+    expect(repeated.nodes.b.semantics).toBeUndefined();
+    expect(() =>
       applyOperation(
-        document,
+        repeated,
         {
           id: 'repeat',
           type: 'repeat',
@@ -54,7 +55,7 @@ describe('design operations', () => {
         },
         3,
       ),
-    ).toEqual(repeated);
+    ).toThrow('already applied');
   });
 
   it('rejects unknown components and invalid registered props', () => {
@@ -167,6 +168,53 @@ describe('design operations', () => {
         dx: 1,
         dy: 1,
       }),
-    ).toThrow('protected');
+    ).toThrow('pinned');
+  });
+
+  it('applies a batch as one revision and leaves the source untouched when any change fails', () => {
+    const document = applyOperation(blankDocument(), {
+      id: 'create-a',
+      type: 'create',
+      actor: 'user',
+      node: node('a', 0, 0),
+    });
+    const applied = applyOperationBatch(
+      document,
+      [
+        { id: 'move-a', type: 'move', actor: 'user', targetIds: ['a'], dx: 10, dy: 0 },
+        {
+          id: 'style-a',
+          type: 'style',
+          actor: 'user',
+          targetIds: ['a'],
+          patch: { radius: 12 },
+        },
+      ],
+      { timestamp: 20, transactionId: 'two-edits' },
+    );
+
+    expect(applied.revision).toBe(document.revision + 1);
+    expect(applied.nodes.a.bounds.x).toBe(10);
+    expect(applied.nodes.a.style.radius).toBe(12);
+    expect(applied.operations.slice(-2).map((record) => record.transactionId)).toEqual([
+      'two-edits',
+      'two-edits',
+    ]);
+    expect(() =>
+      applyOperationBatch(document, [
+        { id: 'move-valid', type: 'move', actor: 'user', targetIds: ['a'], dx: 10, dy: 0 },
+        { id: 'move-invalid', type: 'move', actor: 'user', targetIds: ['missing'], dx: 1, dy: 0 },
+      ]),
+    ).toThrow('no longer exist');
+    expect(document.nodes.a.bounds.x).toBe(0);
+    expect(document.operations.some((operation) => operation.id === 'move-valid')).toBe(false);
+
+    const deleted = applyOperation(applied, {
+      id: 'delete-a',
+      type: 'delete',
+      actor: 'user',
+      targetIds: ['a'],
+    });
+    expect(isDesignDocumentV2(deleted)).toBe(true);
   });
 });

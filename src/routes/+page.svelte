@@ -3,31 +3,54 @@
   import { documentStore } from '$lib/model/store';
   import {
     defaultStyle,
-    type Agency,
     type Bounds,
+    type CandidateRevision,
+    type CodesignAction,
     type DesignNode,
     type DesignOperation,
-    type ProposedOperation,
+    type Fidelity,
+    type GenerationRun,
+    type ObservationScope,
+    type ProcessEvent,
   } from '$lib/model/types';
-  import { localProposal } from '$lib/agent/local';
+  import {
+    acceptCandidateChanges,
+    activateRevision,
+    compareWithSource,
+    effectiveFidelity,
+    recordReroll,
+    rejectCandidate,
+    replayCandidate,
+    setAtomicChangePinned,
+    setNodePinned,
+    stageCandidates,
+    stageGenerationRun,
+    viewCandidate,
+  } from '$lib/model/codesign';
+  import type { CandidateDraft } from '$lib/model/codesign';
   import { demoCheckpoint } from '$lib/model/checkpoint';
   import { generateSvelte } from '$lib/model/codegen';
-  import { componentRegistry } from '$lib/design-system/registry';
   import { logAction } from '$lib/debug/action-log';
+  import CodesignPanel, {
+    type CandidateView,
+    type ObservationScopeView,
+  } from '$lib/codesign/CodesignPanel.svelte';
+  import type { FidelityStopView } from '$lib/codesign/FidelityStops.svelte';
+  import ProcessPanel, { type ProcessEventView } from '$lib/codesign/ProcessPanel.svelte';
 
   type Tool = 'select' | 'frame' | 'rectangle' | 'text' | 'connect';
+  type EditorMode = 'edit' | 'codesign' | 'preview';
   const DEFAULT_CANVAS_BACKGROUND = '#edf0f3';
   const CANVAS_BACKGROUND_KEY = 'malleable.canvas-background.v1';
   let tool: Tool = 'select';
   let selection: string[] = [];
-  let proposal: ProposedOperation | null = null;
   let error = '';
   let notice = '';
-  let agency: Agency = 'guide';
+  let editorMode: EditorMode = 'edit';
   let preview = false;
   let bottomOpen = false;
-  let bottomTab: 'history' | 'proposals' | 'code' = 'history';
-  let inspectorTab: 'intent' | 'design' = 'intent';
+  let bottomTab: 'process' | 'operations' | 'code' = 'process';
+  let inspectorTab: 'properties' | 'trace' = 'properties';
   let zoom = 1;
   let pan = { x: 0, y: 0 };
   let canvasBackground = DEFAULT_CANVAS_BACKGROUND;
@@ -45,15 +68,25 @@
   let connectSource = '';
   let backend: 'local' | 'codex' = 'local';
   let agentStatus = 'Local rules ready';
-  let loadingProposal = false;
+  let loadingCandidate = false;
   let idCounter = 0;
-  let lastGuidedSelection = '';
   let viewportLogTimer: ReturnType<typeof setTimeout> | undefined;
-  let proposalRequestId = 0;
+  let generationRequestId = 0;
+  let observationKind: ObservationScope['kind'] = 'frame';
+  let requestedFidelity: Fidelity = 'wireframe';
+  let activeCandidateId = '';
+  let selectedAtomicIds: string[] = [];
+  let pinnedAtomicIds: string[] = [];
+  let highlightedChangeId = '';
+  let compareSourceActive = false;
+  let activeProcessEventId = '';
+  let codesignStatus = 'Entering Co-design does not change your design.';
 
   $: document = $documentStore.present;
+  $: pinnedAtomicIds = derivePinnedAtomicIds(document.processEvents);
   $: projects = $documentStore.projects;
   $: activeProjectId = $documentStore.activeProjectId;
+  $: storageWarning = $documentStore.warning;
   $: activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0];
   $: currentScreen =
     document.screens.find((screen) => screen.id === document.activeScreenId) ?? document.screens[0];
@@ -63,27 +96,60 @@
   $: selectedNodes = selection.map((id) => document.nodes[id]).filter(Boolean);
   $: contextNode = contextMenu?.nodeId ? document.nodes[contextMenu.nodeId] : undefined;
   $: code = generateSvelte(document);
-  $: {
-    const guidedSelection = selection.slice().sort().join(':');
-    if (
-      agency === 'guide' &&
-      !preview &&
-      selection.length >= 2 &&
-      selectedNodes.every((node) => !node.repeaterId) &&
-      !proposal &&
-      guidedSelection !== lastGuidedSelection
-    ) {
-      lastGuidedSelection = guidedSelection;
-      proposal = localProposal(document, selection, 'interpret');
-      logAction('proposal.ready', {
-        intent: 'interpret',
-        source: proposal.source,
-        operationType: proposal.operation.type,
-        targetIds: proposal.targetIds,
-        automatic: true,
-      });
-    } else if (selection.length < 2) lastGuidedSelection = '';
-  }
+  $: observationScope = makeObservationScope(
+    observationKind,
+    selection,
+    selectedNodes,
+    visibleNodes,
+  );
+  $: observationScopes = makeObservationScopeOptions(selection, selectedNodes, visibleNodes);
+  $: latestRun = activeCandidateId
+    ? document.generationRuns[document.candidates[activeCandidateId]?.generationRunId]
+    : Object.values(document.generationRuns).sort((a, b) => b.createdAt - a.createdAt)[0];
+  $: runCandidates = latestRun
+    ? Object.values(document.candidates)
+        .filter((candidate) => {
+          const run = document.generationRuns[candidate.generationRunId];
+          return (
+            candidate.sourceRevisionId === latestRun.sourceRevisionId &&
+            run?.mutationScopeIds.slice().sort().join(':') ===
+              latestRun.mutationScopeIds.slice().sort().join(':') &&
+            run?.observationScope.nodeIds.slice().sort().join(':') ===
+              latestRun.observationScope.nodeIds.slice().sort().join(':')
+          );
+        })
+        .sort((a, b) => a.createdAt - b.createdAt)
+    : [];
+  $: activeCandidate =
+    document.candidates[activeCandidateId] ?? runCandidates[runCandidates.length - 1];
+  $: activeCandidateSnapshot = activeCandidate
+    ? document.revisions[activeCandidate.revisionId]?.snapshot
+    : undefined;
+  $: sourceSnapshot = activeCandidate
+    ? document.revisions[activeCandidate.sourceRevisionId]?.snapshot
+    : undefined;
+  $: renderedNodes =
+    compareSourceActive && sourceSnapshot
+      ? Object.values(sourceSnapshot.nodes).filter(
+          (node) => node.screenId === document.activeScreenId,
+        )
+      : visibleNodes;
+  $: ghostSnapshot = activeCandidateSnapshot;
+  $: ghostNodes = ghostSnapshot
+    ? Object.values(ghostSnapshot.nodes).filter((node) => {
+        if (node.screenId !== document.activeScreenId) return false;
+        const source = sourceSnapshot?.nodes[node.id];
+        return !source || JSON.stringify(source) !== JSON.stringify(node);
+      })
+    : [];
+  $: candidateViews = makeCandidateViews(
+    runCandidates,
+    document,
+    selectedAtomicIds,
+    pinnedAtomicIds,
+  );
+  $: fidelityStops = makeFidelityStops(selectedNodes, document, runCandidates);
+  $: processEventViews = makeProcessEventViews(document.processEvents, document);
 
   onMount(() => {
     documentStore.restore();
@@ -124,8 +190,7 @@
         return;
       }
       if (key === 'escape') {
-        preview = false;
-        proposal = null;
+        setEditorMode('edit');
         contextMenu = null;
         draft = null;
         gesture = null;
@@ -177,7 +242,7 @@
     if (control.closest('.canvas-toolbar')) return 'canvas-toolbar';
     if (control.closest('.context-menu')) return 'context-menu';
     if (control.closest('.context-bar')) return 'selection-toolbar';
-    if (control.closest('.proposal-card')) return 'proposal';
+    if (control.closest('.codesign-panel')) return 'codesign';
     if (control.closest('.bottom-panel')) return 'bottom-panel';
     if (control.closest('.inspector')) return 'inspector';
     return 'editor';
@@ -196,15 +261,18 @@
     tool = nextTool;
     logAction('tool.changed', { tool: nextTool, source });
   }
-  function setEditorMode(nextPreview: boolean) {
-    if (preview === nextPreview) return;
-    preview = nextPreview;
-    logAction('mode.changed', { mode: nextPreview ? 'preview' : 'edit' });
-  }
-  function setAgencyMode(nextAgency: Agency) {
-    if (agency === nextAgency) return;
-    agency = nextAgency;
-    logAction('agency.changed', { agency: nextAgency });
+  function setEditorMode(nextMode: EditorMode) {
+    if (editorMode === nextMode) return;
+    editorMode = nextMode;
+    preview = nextMode === 'preview';
+    if (nextMode === 'codesign') {
+      bottomTab = 'process';
+      inspectorTab = 'trace';
+      codesignStatus = selection.length
+        ? 'Choose an action to generate a candidate. Your design is unchanged.'
+        : 'Select a frame or object to choose where Codesign may propose changes.';
+    }
+    logAction('mode.changed', { mode: nextMode });
   }
   function undo(source: 'toolbar' | 'keyboard') {
     const revision = document.revision;
@@ -229,16 +297,18 @@
   }
   function clearProjectTransientState() {
     selection = [];
-    proposal = null;
     contextMenu = null;
     draft = null;
     gesture = null;
     connectSource = '';
     error = '';
     notice = '';
-    loadingProposal = false;
-    proposalRequestId += 1;
-    lastGuidedSelection = '';
+    loadingCandidate = false;
+    generationRequestId += 1;
+    activeCandidateId = '';
+    selectedAtomicIds = [];
+    highlightedChangeId = '';
+    compareSourceActive = false;
   }
   function createProject() {
     const fromProjectId = activeProjectId;
@@ -385,29 +455,241 @@
       Math.min(node.style.padding, (node.bounds.width - 8) / 2, (node.bounds.height - 8) / 2),
     );
   }
-  function intentEvidence(node: DesignNode) {
-    const evidence: string[] = [];
-    for (const hypothesis of document.hypotheses)
-      if (hypothesis.status === 'accepted' && hypothesis.targetIds.includes(node.id))
-        evidence.push(
-          hypothesis.kind === 'repetition'
-            ? `Repeated geometry: ${hypothesis.evidence.join(', ')}`
-            : `${hypothesis.kind}: ${hypothesis.evidence.join(', ')}`,
-        );
-    if (node.semantics?.role)
-      evidence.push(
-        `${node.semantics.commitment === 'confirmed' ? 'Confirmed' : 'Inferred'} role: ${node.semantics.role}`,
-      );
-    if (node.componentBinding)
-      evidence.push(`Promoted to the registered ${node.componentBinding.componentId} contract`);
-    const transition = document.transitions.find((item) => item.sourceNodeId === node.id);
-    if (transition) {
-      const target = document.screens.find((screen) => screen.id === transition.targetScreenId);
-      evidence.push(`Connected interaction: opens ${target?.name ?? 'another screen'}`);
+  function contains(outer: DesignNode, inner: DesignNode) {
+    return (
+      outer.id !== inner.id &&
+      outer.bounds.x <= inner.bounds.x &&
+      outer.bounds.y <= inner.bounds.y &&
+      outer.bounds.x + outer.bounds.width >= inner.bounds.x + inner.bounds.width &&
+      outer.bounds.y + outer.bounds.height >= inner.bounds.y + inner.bounds.height
+    );
+  }
+  function containingFrame(node: DesignNode, screenNodes: DesignNode[]) {
+    return screenNodes
+      .filter((candidate) => candidate.kind === 'frame' && contains(candidate, node))
+      .sort(
+        (a, b) =>
+          a.bounds.width * a.bounds.height - b.bounds.width * b.bounds.height ||
+          a.id.localeCompare(b.id),
+      )[0];
+  }
+  function uniqueIds(ids: Array<string | undefined>) {
+    return [...new Set(ids.filter((id): id is string => Boolean(id)))];
+  }
+  function belongsToRegion(node: DesignNode, region: DesignNode, screenNodes: DesignNode[]) {
+    if (node.id === region.id || contains(region, node)) return true;
+    const byId = new Map(screenNodes.map((item) => [item.id, item]));
+    let current = node.parentId ? byId.get(node.parentId) : undefined;
+    const visited = new Set<string>();
+    while (current && !visited.has(current.id)) {
+      if (current.id === region.id) return true;
+      visited.add(current.id);
+      current = current.parentId ? byId.get(current.parentId) : undefined;
     }
-    if (!evidence.length)
-      evidence.push('No intent has been committed yet; this remains an ambiguous canvas object');
-    return evidence;
+    return false;
+  }
+  function makeObservationScope(
+    kind: ObservationScope['kind'],
+    mutationIds: string[],
+    nodes: DesignNode[],
+    screenNodes: DesignNode[],
+  ): ObservationScope {
+    if (kind === 'selection') return { kind, nodeIds: uniqueIds(mutationIds) };
+    if (kind === 'page')
+      return { kind, nodeIds: uniqueIds([...mutationIds, ...screenNodes.map((node) => node.id)]) };
+    const regionIds = uniqueIds(
+      kind === 'parent'
+        ? nodes.map((node) => node.parentId ?? containingFrame(node, screenNodes)?.id)
+        : nodes.map((node) =>
+            node.kind === 'frame' ? node.id : containingFrame(node, screenNodes)?.id,
+          ),
+    );
+    const regions = regionIds
+      .map((id) => screenNodes.find((node) => node.id === id))
+      .filter((region): region is DesignNode => Boolean(region));
+    const contextIds = screenNodes
+      .filter((node) => regions.some((region) => belongsToRegion(node, region, screenNodes)))
+      .map((node) => node.id);
+    return { kind, nodeIds: uniqueIds([...mutationIds, ...contextIds]) };
+  }
+  function makeObservationScopeOptions(
+    mutationIds: string[],
+    nodes: DesignNode[],
+    screenNodes: DesignNode[],
+  ): ObservationScopeView[] {
+    const selectionScope = makeObservationScope('selection', mutationIds, nodes, screenNodes);
+    const parentScope = makeObservationScope('parent', mutationIds, nodes, screenNodes);
+    const frameScope = makeObservationScope('frame', mutationIds, nodes, screenNodes);
+    const pageScope = makeObservationScope('page', mutationIds, nodes, screenNodes);
+    return [
+      {
+        scope: selectionScope,
+        label: 'Selection',
+        description: 'Reference only the layers Codesign may change.',
+      },
+      {
+        scope: parentScope,
+        label: 'Parent',
+        description: 'Reference the nearest parent region and the selection.',
+        disabledReason:
+          parentScope.nodeIds.length === selectionScope.nodeIds.length
+            ? 'No parent region is available.'
+            : undefined,
+      },
+      {
+        scope: frameScope,
+        label: 'Containing frame',
+        description: 'Reference the smallest containing frame and the selection.',
+        disabledReason:
+          frameScope.nodeIds.length === selectionScope.nodeIds.length &&
+          !nodes.some((node) => node.kind === 'frame')
+            ? 'No containing frame is available.'
+            : undefined,
+      },
+      {
+        scope: pageScope,
+        label: 'Page',
+        description: 'Reference every visible layer on this screen.',
+      },
+    ];
+  }
+  function changeLabel(type: DesignOperation['type']) {
+    const labels: Record<DesignOperation['type'], string> = {
+      create: 'Create element',
+      move: 'Move element',
+      resize: 'Resize element',
+      delete: 'Delete element',
+      repeat: 'Create repeated pattern',
+      bind: 'Assign semantic role',
+      transition: 'Create interaction',
+      promote: 'Resolve to component',
+      style: 'Refine appearance',
+      generalize: 'Apply shared style',
+      'duplicate-screen': 'Duplicate screen',
+      'create-branch': 'Create branch',
+    };
+    return labels[type];
+  }
+  function makeCandidateViews(
+    candidates: CandidateRevision[],
+    sourceDocument: typeof document,
+    selectedIds: string[],
+    pinnedIds: string[],
+  ): CandidateView[] {
+    return candidates.map((candidate, index) => ({
+      candidate,
+      label: `Candidate ${index + 1}`,
+      changes: candidate.atomicChangeIds
+        .map((id) => sourceDocument.atomicChanges[id])
+        .filter(Boolean)
+        .map((change) => ({
+          change,
+          label: changeLabel(change.operation.type),
+          summary: change.trace.proposedChange,
+          selected: selectedIds.includes(change.id),
+          pinned: pinnedIds.includes(change.id),
+          dependencyLabels: change.dependencyIds.map((id) =>
+            changeLabel(sourceDocument.atomicChanges[id]?.operation.type ?? 'create'),
+          ),
+          disabledReason:
+            candidate.decisions[change.id] !== 'pending'
+              ? `Already ${candidate.decisions[change.id]}.`
+              : undefined,
+        })),
+    }));
+  }
+  function makeFidelityStops(
+    nodes: DesignNode[],
+    sourceDocument: typeof document,
+    candidates: CandidateRevision[],
+  ): FidelityStopView[] {
+    const selected = nodes[0];
+    const current = selected ? effectiveFidelity(sourceDocument, selected.id) : 'wireframe';
+    const entity = selected?.entityId ? sourceDocument.entities[selected.entityId] : undefined;
+    const saved = (entity?.representationIds ?? [])
+      .map((id) => sourceDocument.representations[id])
+      .filter(Boolean);
+    const candidateFidelities = new Set(
+      candidates
+        .filter(
+          (candidate) =>
+            candidate.status === 'candidate' &&
+            sourceDocument.generationRuns[candidate.generationRunId]?.mutationScopeIds.includes(
+              selected?.id ?? '',
+            ),
+        )
+        .map((candidate) => candidate.fidelity),
+    );
+    const fidelities: Fidelity[] = ['structure', 'wireframe', 'component', 'visual', 'production'];
+    return fidelities.map((fidelity) => {
+      const representations = saved.filter((item) => item.fidelity === fidelity);
+      const representation = representations.at(-1);
+      if (candidateFidelities.has(fidelity)) return { fidelity, state: 'candidate' };
+      if (representations.length > 1)
+        return {
+          fidelity,
+          state: 'versions',
+          versionCount: representations.length,
+          representationId: representation?.id,
+        };
+      if (fidelity === current) return { fidelity, state: 'current' };
+      if (representation) return { fidelity, state: 'saved', representationId: representation.id };
+      if (fidelity === 'wireframe' || fidelity === 'component')
+        return { fidelity, state: 'generate' };
+      return {
+        fidelity,
+        state: 'unavailable',
+        disabledReason: 'This deterministic prototype does not generate this fidelity yet.',
+      };
+    });
+  }
+  function makeProcessEventViews(
+    events: ProcessEvent[],
+    sourceDocument: typeof document,
+  ): ProcessEventView[] {
+    return events.map((event) => {
+      const candidate = event.candidateId
+        ? sourceDocument.candidates[event.candidateId]
+        : undefined;
+      const accepted = candidate
+        ? Object.values(candidate.decisions).filter((decision) => decision === 'accepted').length
+        : 0;
+      const rejected = candidate
+        ? Object.values(candidate.decisions).filter((decision) => decision === 'rejected').length
+        : 0;
+      const isReplayEvent = ['candidate-accepted', 'candidate-rejected'].includes(event.type);
+      return {
+        event,
+        title:
+          event.type === 'candidate-accepted' && candidate?.status === 'partially-accepted'
+            ? `Partially accepted · ${accepted} accepted, ${rejected} rejected`
+            : event.type.replaceAll('-', ' '),
+        summary:
+          event.type === 'candidate-rejected'
+            ? 'The candidate remains available for review and replay.'
+            : event.type === 'candidates-generated'
+              ? 'Structured alternatives were saved without changing the design.'
+              : event.type === 'generation-requested'
+                ? 'Codesign captured an explicit source revision and scope.'
+                : 'This decision is retained in the project ledger.',
+        canViewCandidate: Boolean(candidate),
+        canCompareSource: Boolean(candidate),
+        canReplay: Boolean(candidate && candidate.status !== 'candidate' && isReplayEvent),
+        replayDisabledReason:
+          candidate && candidate.status === 'candidate'
+            ? 'Decide this candidate before replaying it.'
+            : undefined,
+      };
+    });
+  }
+  function derivePinnedAtomicIds(events: ProcessEvent[]) {
+    const pins = new Set<string>();
+    for (const event of events) {
+      if (event.type !== 'pin-changed' || !event.atomicChangeId) continue;
+      if (event.details?.pinned === true) pins.add(event.atomicChangeId);
+      if (event.details?.pinned === false) pins.delete(event.atomicChangeId);
+    }
+    return [...pins];
   }
   function canvasDown(event: PointerEvent) {
     contextMenu = null;
@@ -422,7 +704,6 @@
     const p = point(event);
     if (selection.length) logAction('selection.cleared', { source: 'canvas' });
     selection = [];
-    proposal = null;
     if (tool === 'frame' || tool === 'rectangle' || tool === 'text') {
       gesture = { mode: 'draw', startX: p.x, startY: p.y, lastX: p.x, lastY: p.y };
       draft = { x: p.x, y: p.y, width: 1, height: 1 };
@@ -527,7 +808,6 @@
       nodeIds: selection,
       additive: event.shiftKey,
     });
-    proposal = null;
     const p = point(event);
     gesture = { mode: 'move', startX: p.x, startY: p.y, lastX: p.x, lastY: p.y };
   }
@@ -595,7 +875,6 @@
     event.preventDefault();
     event.stopPropagation();
     if (node && !selection.includes(node.id)) selection = [node.id];
-    proposal = null;
     const width = 236;
     const height = preview ? 110 : node ? 244 : 196;
     contextMenu = {
@@ -624,13 +903,9 @@
     if (!contextNode) return;
     if (!selection.includes(contextNode.id)) selection = [contextNode.id];
     contextMenu = null;
-    void interpret('promote');
-  }
-  function bindFromContext() {
-    if (!contextNode) return;
-    if (!selection.includes(contextNode.id)) selection = [contextNode.id];
-    contextMenu = null;
-    bind('content-region');
+    setEditorMode('codesign');
+    requestedFidelity = 'component';
+    codesignStatus = 'Choose Resolve to map the selected object to a registered component.';
   }
   function deleteFromContext() {
     if (!contextNode) return;
@@ -640,121 +915,238 @@
     selection = [];
   }
 
-  async function interpret(intent: 'interpret' | 'promote') {
+  async function generateCandidates(action: CodesignAction, rerollCandidateId?: string) {
     if (!selection.length) {
-      error = 'Select objects to interpret';
-      logAction('proposal.rejected', { intent, message: error });
+      error = 'Select a frame or object before generating a candidate';
+      logAction('codesign.request-rejected', { action, message: error });
       return;
     }
-    loadingProposal = true;
-    const requestId = ++proposalRequestId;
+    loadingCandidate = true;
+    const requestId = ++generationRequestId;
     const requestProjectId = activeProjectId;
     error = '';
-    logAction('proposal.requested', {
-      intent,
-      agency,
+    codesignStatus = 'Generating a candidate… Your design is unchanged.';
+    logAction('codesign.requested', {
+      action,
       backend,
-      targetIds: selection,
-      revision: document.revision,
+      mutationScopeIds: selection,
+      observationScope: observationScope.kind,
+      observationCount: observationScope.nodeIds.length,
+      sourceRevisionId: document.currentRevisionId,
+      requestedFidelity,
+      rerollCandidateId: rerollCandidateId ?? '',
     });
     try {
-      if (backend === 'codex') {
-        const response = await fetch('/api/agent', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            intent,
-            agency,
-            document: {
-              revision: document.revision,
-              activeScreenId: document.activeScreenId,
-              nodes: Object.fromEntries(selection.map((id) => [id, document.nodes[id]])),
-            },
-            targetIds: selection,
-          }),
-        });
-        const value = await response.json();
-        if (!response.ok) throw new Error(value.message ?? 'Codex proposal failed');
-        if (requestId !== proposalRequestId) {
-          logAction('proposal.discarded', { intent, projectId: requestProjectId });
-          return;
-        }
-        proposal = value.proposal;
-        agentStatus = value.fallback
-          ? 'Codex unavailable · local fallback'
-          : 'Codex App Server ready';
-      } else proposal = localProposal(document, selection, intent);
-      if (proposal) {
-        logAction('proposal.ready', {
-          intent,
-          source: proposal.source,
-          operationType: proposal.operation.type,
-          targetIds: proposal.targetIds,
-          automatic: false,
-        });
+      const pinnedChanges = rerollCandidateId
+        ? pinnedAtomicIds
+            .filter((id) => document.candidates[rerollCandidateId]?.atomicChangeIds.includes(id))
+            .map((id) => document.atomicChanges[id])
+            .filter(Boolean)
+        : [];
+      const response = await fetch('/api/agent', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          requestedFidelity,
+          observationScope,
+          mutationScopeIds: selection,
+          pinnedNodeIds: document.pinnedNodeIds,
+          pinnedAtomicChanges: pinnedChanges,
+          document: {
+            currentRevisionId: document.currentRevisionId,
+            activeScreenId: document.activeScreenId,
+            knownNodeIds: Object.keys(document.nodes),
+            nodes: Object.fromEntries(
+              observationScope.nodeIds
+                .map((id) => [id, document.nodes[id]])
+                .filter(([, node]) => node),
+            ),
+          },
+        }),
+      });
+      const value = (await response.json()) as {
+        run?: GenerationRun;
+        candidates?: CandidateDraft[];
+        fallback?: boolean;
+        message?: string;
+      };
+      if (!response.ok || !value.run || !value.candidates)
+        throw new Error(value.message ?? 'Codesign generation failed');
+      if (requestId !== generationRequestId || requestProjectId !== activeProjectId) {
+        logAction('codesign.discarded', { action, projectId: requestProjectId });
+        return;
       }
+      let next = stageGenerationRun(document, value.run);
+      next = stageCandidates(next, value.run.id, value.candidates);
+      for (const candidate of value.candidates) {
+        for (const change of candidate.atomicChanges) {
+          if (
+            change.preservedFromAtomicChangeId &&
+            pinnedAtomicIds.includes(change.preservedFromAtomicChangeId)
+          ) {
+            next = setAtomicChangePinned(next, change.id, true);
+          }
+        }
+      }
+      documentStore.replaceMetadata(next);
+      const generatedIds = value.candidates.map((candidate) => candidate.id);
+      activeCandidateId = generatedIds[0] ?? '';
+      selectedAtomicIds = value.candidates[0]?.atomicChanges.map((change) => change.id) ?? [];
+      compareSourceActive = false;
+      highlightedChangeId = '';
+      bottomOpen = true;
+      bottomTab = 'process';
+      agentStatus = value.fallback ? 'Codex unavailable · local fallback' : agentStatus;
+      codesignStatus = `${value.candidates.length} structured ${value.candidates.length === 1 ? 'candidate is' : 'candidates are'} ready for review.`;
+      logAction('codesign.ready', {
+        action,
+        generationRunId: value.run.id,
+        candidateIds: generatedIds,
+        backend: value.run.backend,
+        fallback: Boolean(value.fallback),
+      });
     } catch (cause) {
-      if (requestId !== proposalRequestId) return;
-      proposal = localProposal(document, selection, intent);
-      agentStatus = 'Local fallback active';
-      error = cause instanceof Error ? cause.message : 'Agent unavailable';
-      logAction('proposal.fallback', {
-        intent,
+      if (requestId !== generationRequestId) return;
+      error = cause instanceof Error ? cause.message : 'Codesign generation failed';
+      codesignStatus = error;
+      logAction('codesign.failed', {
+        action,
         message: error,
-        operationType: proposal.operation.type,
-        targetIds: proposal.targetIds,
       });
     } finally {
-      if (requestId === proposalRequestId) loadingProposal = false;
+      if (requestId === generationRequestId) loadingCandidate = false;
     }
   }
-  function acceptProposal() {
-    if (!proposal) return;
-    if (proposal.baseRevision !== document.revision) {
-      error = 'Selection changed—interpret again';
-      logAction('proposal.stale', {
-        proposalId: proposal.id,
-        baseRevision: proposal.baseRevision,
-        currentRevision: document.revision,
-      });
-      proposal = null;
-      return;
-    }
-    logAction('proposal.accepted', {
-      proposalId: proposal.id,
-      operationType: proposal.operation.type,
-      source: proposal.source,
-      agency,
-      targetIds: proposal.targetIds,
-    });
-    if (agency !== 'explore') {
-      apply(proposal.operation);
-      proposal = null;
-      return;
-    }
-    const branchId = uid('branch');
-    const sourceScreenId = document.activeScreenId;
-    const sourceNodes = Object.values(document.nodes).filter(
-      (node) => node.screenId === sourceScreenId,
+  function selectCandidate(candidateId: string) {
+    const candidate = document.candidates[candidateId];
+    if (!candidate) return;
+    activeCandidateId = candidateId;
+    selectedAtomicIds = candidate.atomicChangeIds.filter(
+      (id) => candidate.decisions[id] === 'pending',
     );
-    const mapped = proposal.targetIds.map(
-      (targetId) =>
-        `${branchId}-screen-node-${sourceNodes.findIndex((node) => node.id === targetId) + 1}`,
-    );
-    const original = proposal.operation;
-    apply({ id: uid('op'), type: 'create-branch', actor: 'agent', sourceScreenId, branchId });
-    const branchOperation = { ...original, id: uid('op'), targetIds: mapped } as DesignOperation;
-    queueMicrotask(() => apply(branchOperation));
-    proposal = null;
+    compareSourceActive = false;
+    documentStore.replaceMetadata(viewCandidate(document, candidateId));
+    codesignStatus = 'Candidate selected. Your design is unchanged.';
+    logAction('codesign.candidate-viewed', { candidateId });
   }
-  function dismissProposal() {
-    if (!proposal) return;
-    logAction('proposal.dismissed', {
-      proposalId: proposal.id,
-      operationType: proposal.operation.type,
-      source: proposal.source,
-    });
-    proposal = null;
+  function toggleAtomicChange(changeId: string, selected: boolean) {
+    const candidate = activeCandidate;
+    if (!candidate) return;
+    const next = new Set(selectedAtomicIds);
+    const includeDependencies = (id: string) => {
+      next.add(id);
+      document.atomicChanges[id]?.dependencyIds.forEach(includeDependencies);
+    };
+    const removeDependents = (id: string) => {
+      next.delete(id);
+      candidate.atomicChangeIds
+        .filter((candidateId) => document.atomicChanges[candidateId]?.dependencyIds.includes(id))
+        .forEach(removeDependents);
+    };
+    if (selected) includeDependencies(changeId);
+    else removeDependents(changeId);
+    selectedAtomicIds = [...next];
+    highlightedChangeId = changeId;
+    logAction('codesign.atomic-toggled', { changeId, selected });
+  }
+  function toggleAtomicPin(changeId: string, pinned: boolean) {
+    documentStore.replaceMetadata(setAtomicChangePinned(document, changeId, pinned));
+    codesignStatus = pinned
+      ? 'Pinned change will be preserved on the next reroll.'
+      : 'Change unpinned.';
+    logAction('codesign.atomic-pin-changed', { changeId, pinned });
+  }
+  function acceptCandidate(candidateId: string, acceptAll: boolean) {
+    const candidate = document.candidates[candidateId];
+    if (!candidate) return;
+    const pending = candidate.atomicChangeIds.filter((id) => candidate.decisions[id] === 'pending');
+    const acceptedIds = acceptAll
+      ? pending
+      : pending.filter((id) => selectedAtomicIds.includes(id));
+    const rejectedIds = pending.filter((id) => !acceptedIds.includes(id));
+    try {
+      documentStore.commitRevision(
+        acceptCandidateChanges(document, candidateId, acceptedIds, rejectedIds),
+      );
+      selectedAtomicIds = [];
+      compareSourceActive = false;
+      codesignStatus = rejectedIds.length
+        ? `Accepted ${acceptedIds.length} and saved ${rejectedIds.length} as rejected.`
+        : `Accepted all ${acceptedIds.length} changes in one revision.`;
+      logAction('codesign.accepted', { candidateId, acceptedIds, rejectedIds });
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : 'Candidate could not be accepted';
+      codesignStatus = error;
+    }
+  }
+  function rejectActiveCandidate(candidateId: string) {
+    documentStore.replaceMetadata(rejectCandidate(document, candidateId));
+    selectedAtomicIds = [];
+    codesignStatus = 'Candidate rejected and retained in process history.';
+    logAction('codesign.rejected', { candidateId });
+  }
+  function rerollCandidate(candidateId: string) {
+    const candidate = document.candidates[candidateId];
+    if (!candidate) return;
+    documentStore.replaceMetadata(recordReroll(document, candidate.generationRunId));
+    void generateCandidates(document.generationRuns[candidate.generationRunId].action, candidateId);
+  }
+  function toggleSourceComparison(compare: boolean) {
+    if (!activeCandidate) return;
+    compareSourceActive = compare;
+    const result = compareWithSource(document, activeCandidate.id);
+    documentStore.replaceMetadata(result.document);
+    codesignStatus = compare ? 'Showing the captured source revision.' : 'Showing the candidate.';
+  }
+  function replayRecordedCandidate(candidateId: string) {
+    try {
+      const candidate = document.candidates[candidateId];
+      if (!candidate) return;
+      const acceptedIds = candidate.atomicChangeIds.filter(
+        (id) => candidate.decisions[id] === 'accepted',
+      );
+      documentStore.commitRevision(
+        replayCandidate(
+          document,
+          candidateId,
+          acceptedIds.length ? acceptedIds : candidate.atomicChangeIds,
+        ),
+      );
+      codesignStatus = 'Recorded changes reapplied from their source revision.';
+      logAction('codesign.replayed', { candidateId });
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : 'Recorded changes could not be reapplied';
+    }
+  }
+  function selectObservationScope(scope: ObservationScope) {
+    observationKind = scope.kind;
+    codesignStatus = `Codesign can reference ${scope.nodeIds.length} ${scope.nodeIds.length === 1 ? 'layer' : 'layers'}; only the selection can change.`;
+  }
+  function stageFidelity(fidelity: Fidelity) {
+    requestedFidelity = fidelity;
+    codesignStatus = `${fidelity[0].toUpperCase() + fidelity.slice(1)} is staged as the target. Choose Complete to generate.`;
+  }
+  function inspectFidelityCandidate(fidelity: Fidelity) {
+    const candidate = runCandidates.find((item) => item.fidelity === fidelity);
+    if (candidate) selectCandidate(candidate.id);
+  }
+  function navigateRepresentation(fidelity: Fidelity, representationId: string) {
+    requestedFidelity = fidelity;
+    const representation = document.representations[representationId];
+    if (!representation) return;
+    documentStore.replaceMetadata(activateRevision(document, representation.revisionId));
+    if (representation.rootNodeIds[0]) selection = [representation.rootNodeIds[0]];
+    codesignStatus = `${fidelity[0].toUpperCase() + fidelity.slice(1)} representation selected.`;
+    logAction('fidelity.navigated', { fidelity, representationId });
+  }
+  function toggleSelectedNodePin(nodeId: string) {
+    const pinned = !document.pinnedNodeIds.includes(nodeId);
+    documentStore.replaceMetadata(setNodePinned(document, nodeId, pinned));
+    codesignStatus = pinned
+      ? 'Element pinned. Future candidates cannot change it.'
+      : 'Element unpinned.';
+    logAction('codesign.node-pin-changed', { nodeId, pinned });
   }
   function duplicateScreen() {
     apply({
@@ -781,17 +1173,6 @@
     });
     connectSource = '';
     tool = 'select';
-  }
-  function bind(role: string) {
-    if (selection.length)
-      apply({
-        id: uid('op'),
-        type: 'bind',
-        actor: 'user',
-        targetIds: selection,
-        role,
-        commitment: 'confirmed',
-      });
   }
   function changeStyle(patch: Partial<DesignNode['style']>) {
     if (selection.length)
@@ -842,9 +1223,9 @@
 </script>
 
 <svelte:head
-  ><title>Malleable · Direct design intent</title><meta
+  ><title>Codesign · Visual autocomplete</title><meta
     name="description"
-    content="Move from ambiguous marks to working software."
+    content="Explore structured visual continuations without changing your source design."
   /></svelte:head
 >
 
@@ -853,14 +1234,17 @@
 <div class="app" class:preview>
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark">M</span><strong>Malleable</strong><span class="document-name"
+      <span class="brand-mark">C</span><strong>Codesign</strong><span class="document-name"
         >{activeProject?.name ?? 'Untitled design'}</span
       >
     </div>
     <div class="mode-switch" aria-label="Editor mode">
-      <button class:active={!preview} onclick={() => setEditorMode(false)}>Edit</button><button
-        class:active={preview}
-        onclick={() => setEditorMode(true)}>Preview</button
+      <button class:active={editorMode === 'edit'} onclick={() => setEditorMode('edit')}
+        >Edit</button
+      ><button class:active={editorMode === 'codesign'} onclick={() => setEditorMode('codesign')}
+        >Co-design</button
+      ><button class:active={editorMode === 'preview'} onclick={() => setEditorMode('preview')}
+        >Preview</button
       >
     </div>
     <div class="top-actions">
@@ -869,17 +1253,6 @@
           ? 'Codex'
           : 'Local'}</span
       >
-      <div class="agency" aria-label="Agent envelope">
-        {#each ['protect', 'guide', 'explore'] as mode}<button
-            class:active={agency === mode}
-            title={mode === 'protect'
-              ? 'Inspect and propose only when asked; every change waits for confirmation'
-              : mode === 'guide'
-                ? 'Stage safe contextual suggestions for local confirmation'
-                : 'Accept broader suggestions only on a new branch'}
-            onclick={() => setAgencyMode(mode as Agency)}>{mode}</button
-          >{/each}
-      </div>
       <button title="Undo · Ctrl/⌘ Z" onclick={() => undo('toolbar')}
         ><span class="button-icon" aria-hidden="true">↶</span>Undo</button
       ><button title="Redo · Ctrl/⌘ Shift Z" onclick={() => redo('toolbar')}
@@ -965,9 +1338,7 @@
                 : node.kind === 'rectangle'
                   ? 'Shape'
                   : node.kind}</span
-            ><span class="layer-name">{node.name}</span>{#if node.semantics}<span
-                class="layer-status">{node.semantics.commitment}</span
-              >{/if}</button
+            ><span class="layer-name">{node.name}</span></button
           >{/each}
       </div>
       <button class="branch-action" onclick={branch}
@@ -1001,7 +1372,9 @@
     <div class="canvas-help">
       {preview
         ? 'Click a connected object to navigate · Esc to exit'
-        : `${tool[0].toUpperCase() + tool.slice(1)} tool · Scroll to pan · Pinch to zoom · Right-click for actions`}
+        : editorMode === 'codesign'
+          ? 'Solid outline: can change · Dashed outline: can reference · Candidate ghosts never block the canvas'
+          : `${tool[0].toUpperCase() + tool.slice(1)} tool · Scroll to pan · Pinch to zoom · Right-click for actions`}
     </div>
     <svg
       class="canvas"
@@ -1031,7 +1404,7 @@
               document.nodes[transition.sourceNodeId].bounds.height / 2 -
               7}>→ state</text
           >{/each}
-        {#each visibleNodes as node (node.id)}
+        {#each renderedNodes as node (node.id)}
           <g
             id={`node-${node.id}`}
             class:selected={selection.includes(node.id)}
@@ -1044,6 +1417,27 @@
             onpointerdown={(event) => nodeDown(event, node)}
             oncontextmenu={(event) => openContextMenu(event, node)}
           >
+            {#if editorMode === 'codesign' && observationScope.nodeIds.includes(node.id)}
+              <rect
+                class:mutation-boundary={selection.includes(node.id)}
+                class:observation-boundary={!selection.includes(node.id)}
+                x={node.bounds.x - 6 / zoom}
+                y={node.bounds.y - 6 / zoom}
+                width={node.bounds.width + 12 / zoom}
+                height={node.bounds.height + 12 / zoom}
+                rx={Math.max(node.style.radius, 3)}
+              />
+            {/if}
+            {#if editorMode === 'codesign' && highlightedChangeId && document.atomicChanges[highlightedChangeId]?.trace.evidenceNodeIds.includes(node.id)}
+              <rect
+                class="evidence-highlight"
+                x={node.bounds.x - 10 / zoom}
+                y={node.bounds.y - 10 / zoom}
+                width={node.bounds.width + 20 / zoom}
+                height={node.bounds.height + 20 / zoom}
+                rx={Math.max(node.style.radius, 3)}
+              />
+            {/if}
             <rect
               class="node"
               x={node.bounds.x}
@@ -1117,6 +1511,43 @@
               />{/if}
           </g>
         {/each}
+        {#if editorMode === 'codesign' && ghostSnapshot}
+          <g
+            class:source-comparison={compareSourceActive}
+            class="candidate-ghost"
+            aria-hidden="true"
+          >
+            {#each ghostNodes as node (node.id)}
+              <g
+                class:highlighted-ghost={Boolean(
+                  highlightedChangeId &&
+                  document.atomicChanges[highlightedChangeId]?.trace.affectedNodeIds.includes(
+                    node.id,
+                  ),
+                )}
+              >
+                <rect
+                  x={node.bounds.x}
+                  y={node.bounds.y}
+                  width={node.bounds.width}
+                  height={node.bounds.height}
+                  rx={node.style.radius}
+                  fill={node.style.fill}
+                  stroke={node.style.stroke}
+                />
+                {#if node.text}
+                  <text
+                    x={node.bounds.x + contentInset(node)}
+                    y={node.bounds.y +
+                      Math.min(contentInset(node) + node.style.fontSize, node.bounds.height - 7)}
+                    style={`font-size:${node.style.fontSize}px;fill:${node.style.textColor}`}
+                    >{node.text}</text
+                  >
+                {/if}
+              </g>
+            {/each}
+          </g>
+        {/if}
         {#if draft}<rect
             class="draft"
             x={draft.x}
@@ -1127,32 +1558,11 @@
       </g>
     </svg>
     {#if selection.length && !preview}<div class="context-bar">
-        <span>{selection.length} selected</span>{#if selection.length > 1}<button
-            onclick={() => interpret('interpret')}
-            disabled={loadingProposal}>{loadingProposal ? 'Interpreting…' : 'Repeat?'}</button
-          >{/if}<button onclick={() => interpret('promote')} disabled={loadingProposal}
-          >Promote</button
-        ><button onclick={() => bind('content-region')}>Bind role</button
-        >{#if selectedNodes[0]?.componentBinding}<button onclick={generalize}>Generalize</button
+        <span>{selection.length} selected</span><button onclick={() => setEditorMode('codesign')}
+          >Open in Co-design</button
+        >{#if selectedNodes[0]?.componentBinding}<button onclick={generalize}
+            >Apply style to matching components</button
           >{/if}
-      </div>{/if}
-    {#if proposal}<div class="proposal-card">
-        <div>
-          <span class="proposal-source"
-            >{proposal.source} proposal · {Math.round(proposal.confidence * 100)}%</span
-          ><strong
-            >{proposal.operation.type === 'repeat'
-              ? `Create repeater from ${proposal.targetIds.length} objects`
-              : `Map to ${proposal.operation.type === 'promote' ? proposal.operation.componentId : 'component'}`}</strong
-          >
-          <p>{proposal.rationale}</p>
-          <small
-            >Target: {proposal.targetIds.length} object(s) · Scope: current selection · {agency}</small
-          >
-        </div>
-        <button class="accept" onclick={acceptProposal}
-          >Accept{agency === 'explore' ? ' on branch' : ''}</button
-        ><button onclick={dismissProposal}>Dismiss</button>
       </div>{/if}
 
     {#if contextMenu}<div
@@ -1174,16 +1584,13 @@
         {#if preview}<button
             role="menuitem"
             onclick={() => {
-              setEditorMode(false);
+              setEditorMode('edit');
               contextMenu = null;
             }}>Exit preview to edit</button
           >{:else if contextNode}<button role="menuitem" onclick={promoteFromContext}
-            >Promote to component</button
+            >Open in Co-design</button
           ><button role="menuitem" onclick={startConnectionFromContext}>Start connection</button
-          ><button role="menuitem" onclick={bindFromContext}>Bind as content region</button><button
-            class="danger"
-            role="menuitem"
-            onclick={deleteFromContext}
+          ><button class="danger" role="menuitem" onclick={deleteFromContext}
             >Delete {selection.length > 1 ? 'selection' : 'element'}</button
           >{:else}<button
             role="menuitem"
@@ -1208,16 +1615,16 @@
 
     <section class:open={bottomOpen} class="bottom-panel">
       <div class="bottom-tabs">
-        {#each ['history', 'proposals', 'code'] as tab}<button
+        {#each ['process', 'operations', 'code'] as tab}<button
             class:active={bottomTab === tab}
             onclick={() => {
               bottomTab = tab as typeof bottomTab;
               bottomOpen = true;
             }}
-            >{tab === 'history'
-              ? 'Operation history'
-              : tab === 'proposals'
-                ? 'Agent proposals'
+            >{tab === 'process'
+              ? 'Process history'
+              : tab === 'operations'
+                ? 'Applied operations'
                 : 'Svelte projection'}</button
           >{/each}<button class="panel-toggle" onclick={() => (bottomOpen = !bottomOpen)}
           >{bottomOpen ? 'Hide panel' : 'Show panel'}
@@ -1225,26 +1632,29 @@
         >
       </div>
       {#if bottomOpen}<div class="panel-body">
-          {#if bottomTab === 'history'}<div class="history">
+          {#if bottomTab === 'process'}
+            <ProcessPanel
+              events={processEventViews}
+              activeEventId={activeProcessEventId}
+              onInspectEvent={(eventId) => (activeProcessEventId = eventId)}
+              onViewCandidate={selectCandidate}
+              onCompareSource={(candidateId) => {
+                selectCandidate(candidateId);
+                toggleSourceComparison(true);
+              }}
+              onReplay={replayRecordedCandidate}
+            />
+          {:else if bottomTab === 'operations'}<div class="history">
               {#each [...document.operations].reverse() as operation}<div>
                   <i class:agent={operation.actor === 'agent'}
-                    >{operation.actor === 'agent' ? 'AI' : 'YOU'}</i
+                    >{operation.actor === 'agent' ? 'CODESIGN' : 'YOU'}</i
                   ><span>{operation.summary}</span><time
                     >{new Date(operation.timestamp).toLocaleTimeString([], {
                       hour: '2-digit',
                       minute: '2-digit',
                     })}</time
                   >
-                </div>{/each}{#if !document.operations.length}<p>
-                  No operations yet. Draw something to begin.
-                </p>{/if}
-            </div>{:else if bottomTab === 'proposals'}<div class="proposal-empty">
-              <strong>{proposal ? 'Proposal staged above the canvas' : 'No staged proposal'}</strong
-              >
-              <p>
-                Interpretation happens after meaningful operations or when you ask—never on every
-                pointer move.
-              </p>
+                </div>{/each}{#if !document.operations.length}<p>No applied operations yet.</p>{/if}
             </div>{:else}<div class="code-header">
               <span>Read-only deterministic export</span><button
                 onclick={() => navigator.clipboard.writeText(code)}>Copy code</button
@@ -1257,192 +1667,155 @@
 
   <aside class="inspector">
     <div class="inspector-tabs">
-      <button class:active={inspectorTab === 'intent'} onclick={() => (inspectorTab = 'intent')}
-        >Intent</button
-      ><button class:active={inspectorTab === 'design'} onclick={() => (inspectorTab = 'design')}
-        >Design</button
+      <button
+        class:active={inspectorTab === 'properties'}
+        onclick={() => (inspectorTab = 'properties')}>Properties</button
+      ><button class:active={inspectorTab === 'trace'} onclick={() => (inspectorTab = 'trace')}
+        >Trace</button
       >
     </div>
-    {#each selectedNodes.slice(0, 1) as node}
+    {#if inspectorTab === 'trace'}
+      <CodesignPanel
+        mutationLabels={selectedNodes.map((node) => node.name)}
+        observationSummary={observationScopes.find(
+          (item) => item.scope.kind === observationScope.kind,
+        )?.label ?? 'Selection'}
+        {observationScope}
+        {observationScopes}
+        supportedActions={[{ action: 'complete' }]}
+        {fidelityStops}
+        run={latestRun}
+        candidates={candidateViews}
+        activeCandidateId={activeCandidate?.id}
+        highlightedChangeId={highlightedChangeId || undefined}
+        compareSource={compareSourceActive}
+        busy={loadingCandidate}
+        statusMessage={codesignStatus}
+        rerollDisabledReason={activeCandidate?.status === 'accepted' ||
+        activeCandidate?.status === 'partially-accepted'
+          ? 'Applied candidates cannot be rerolled.'
+          : undefined}
+        onObservationScopeChange={selectObservationScope}
+        onGenerate={generateCandidates}
+        onNavigateFidelity={navigateRepresentation}
+        onStageFidelity={stageFidelity}
+        onInspectFidelityCandidate={inspectFidelityCandidate}
+        onSelectCandidate={selectCandidate}
+        onToggleAtomicChange={toggleAtomicChange}
+        onTogglePin={toggleAtomicPin}
+        onHighlightChange={(changeId) => (highlightedChangeId = changeId ?? '')}
+        onCompareSource={toggleSourceComparison}
+        onAcceptAll={(candidateId) => acceptCandidate(candidateId, true)}
+        onAcceptSelected={(candidateId) => acceptCandidate(candidateId, false)}
+        onRejectCandidate={rejectActiveCandidate}
+        onReroll={rerollCandidate}
+      />
+    {:else if selectedNodes[0]}
+      {@const node = selectedNodes[0]}
       <div class="selection-summary">
         <span class="kind-icon" aria-hidden="true">{node.componentBinding ? '◆' : '□'}</span>
         <div><strong>{node.name}</strong><small>{node.kind} · {node.id.slice(-8)}</small></div>
       </div>
-      {#if inspectorTab === 'intent'}
-        <section>
-          <h3>Commitment</h3>
-          <div class={`commitment ${node.semantics?.commitment ?? 'ambiguous'}`}>
-            <i aria-hidden="true"
-              >{node.semantics?.commitment === 'confirmed'
-                ? '●'
-                : node.semantics?.commitment === 'inferred'
-                  ? '◐'
-                  : '○'}</i
-            >
-            <div>
-              <strong>{node.semantics?.commitment ?? 'ambiguous'}</strong><span
-                >{node.semantics?.role ?? 'Unnamed area'}</span
-              >
-            </div>
-          </div>
-          <label
-            >Semantic role<select
-              value={node.semantics?.role ?? ''}
-              onchange={(event) => bind(event.currentTarget.value)}
-              ><option value="">Unassigned</option><option value="app-shell">App shell</option
-              ><option value="sidebar">Sidebar</option><option value="header">Header</option><option
-                value="content-region">Content region</option
-              ><option value="record">Record</option><option value="action">Action</option></select
-            ></label
-          >
-        </section>
-        <section>
-          <h3>Component binding</h3>
-          {#if node.componentBinding}<div class="binding">
-              <strong><span aria-hidden="true">◆</span> {node.componentBinding.componentId}</strong
-              >{#each Object.entries(node.componentBinding.props) as [key, value]}<span
-                  >{key}: {String(value)}</span
-                >{/each}
-            </div>{:else}<p class="muted">
-              Rough object. Promote it to resolve against the registry.
-            </p>
-            <button class="wide" onclick={() => interpret('promote')}>Find registered match</button
-            >{/if}
-        </section>
-        <section>
-          <h3>Why this intent</h3>
-          <p class="intent-origin">
-            Intent comes from canvas structure and actions you explicitly accept—not from an
-            invisible rewrite.
-          </p>
-          <ul class="intent-evidence">
-            {#each intentEvidence(node) as evidence}<li>{evidence}</li>{/each}
-          </ul>
-        </section>
-        <section>
-          <h3>Provenance</h3>
-          <dl>
-            <dt>Actor</dt>
-            <dd>{node.provenance.actor}</dd>
-            <dt>Operation</dt>
-            <dd>{node.provenance.operationId.slice(-12)}</dd>
-            <dt>Protection</dt>
-            <dd>
-              {node.semantics?.protected
-                ? 'Protected'
-                : agency === 'protect'
-                  ? 'Envelope protected'
-                  : 'Editable'}
-            </dd>
-          </dl>
-        </section>
-      {:else}
-        <section>
-          <h3>Geometry</h3>
-          <div class="field-grid">
-            {#each ['x', 'y', 'width', 'height'] as field}<label
-                >{field[0].toUpperCase()}<input
-                  type="number"
-                  value={Math.round(node.bounds[field as keyof Bounds])}
-                  onchange={(event) =>
-                    apply({
-                      id: uid('op'),
-                      type: 'resize',
-                      actor: 'user',
-                      targetId: node.id,
-                      bounds: { ...node.bounds, [field]: Number(event.currentTarget.value) },
-                    })}
-                /></label
-              >{/each}
-          </div>
-        </section>
-        <section>
-          <h3>Appearance</h3>
-          <label
-            >Density<select
-              value={node.style.density}
-              onchange={(event) =>
-                changeStyle({
-                  density: event.currentTarget.value as 'compact' | 'comfortable',
-                  padding: event.currentTarget.value === 'compact' ? 8 : 16,
-                })}
-              ><option value="compact">Compact</option><option value="comfortable"
-                >Comfortable</option
-              ></select
-            ></label
-          ><label
-            ><span class="control-label"
-              ><span>Corner radius</span><output>{node.style.radius}px</output></span
-            ><input
-              type="range"
-              aria-label="Corner radius"
-              min="0"
-              max="12"
-              step="4"
-              value={node.style.radius}
-              oninput={(event) => changeStyle({ radius: Number(event.currentTarget.value) })}
-            /></label
-          ><label
-            ><span class="control-label"
-              ><span>Padding</span><output>{node.style.padding}px</output></span
-            ><input
-              type="range"
-              aria-label="Padding"
-              min="4"
-              max="24"
-              step="4"
-              value={node.style.padding}
-              oninput={(event) => changeStyle({ padding: Number(event.currentTarget.value) })}
-            /></label
-          >{#if node.componentBinding}<button class="wide" onclick={generalize}
-              >Generalize to {node.repeaterId
-                ? 'repeater siblings'
-                : 'same component on screen'}</button
-            >{/if}
-        </section>
-      {/if}
-    {:else}
-      <div class="no-selection">
-        <span aria-hidden="true">◎</span><strong>No selection</strong>
-        <p>Select an object to inspect its intent, binding, and provenance.</p>
-      </div>
       <section>
-        <h3>Document intent</h3>
-        <p class="intent-origin">
-          Intent is accumulated from your layout and actions: aligned shapes suggest patterns;
-          accepted proposals, roles, and connections confirm them; promotion binds them to a
-          registered component contract.
-        </p>
-        <div class="intent-counts">
-          <div>
-            <strong
-              >{Object.values(document.nodes).filter(
-                (node) => node.semantics?.commitment === 'confirmed',
-              ).length}</strong
-            ><span>Confirmed</span>
-          </div>
-          <div>
-            <strong
-              >{Object.values(document.nodes).filter(
-                (node) => node.semantics?.commitment === 'inferred',
-              ).length}</strong
-            ><span>Inferred</span>
-          </div>
-          <div>
-            <strong>{Object.values(document.nodes).filter((node) => !node.semantics).length}</strong
-            ><span>Ambiguous</span>
-          </div>
+        <h3>Geometry</h3>
+        <div class="field-grid">
+          {#each ['x', 'y', 'width', 'height'] as field}<label
+              >{field[0].toUpperCase()}<input
+                type="number"
+                value={Math.round(node.bounds[field as keyof Bounds])}
+                onchange={(event) =>
+                  apply({
+                    id: uid('op'),
+                    type: 'resize',
+                    actor: 'user',
+                    targetId: node.id,
+                    bounds: { ...node.bounds, [field]: Number(event.currentTarget.value) },
+                  })}
+              /></label
+            >{/each}
         </div>
       </section>
       <section>
-        <h3>Agent boundary</h3>
+        <h3>Appearance</h3>
+        <label
+          >Density<select
+            value={node.style.density}
+            onchange={(event) =>
+              changeStyle({
+                density: event.currentTarget.value as 'compact' | 'comfortable',
+                padding: event.currentTarget.value === 'compact' ? 8 : 16,
+              })}
+            ><option value="compact">Compact</option><option value="comfortable">Comfortable</option
+            ></select
+          ></label
+        ><label
+          ><span class="control-label"
+            ><span>Corner radius</span><output>{node.style.radius}px</output></span
+          ><input
+            type="range"
+            aria-label="Corner radius"
+            min="0"
+            max="12"
+            step="4"
+            value={node.style.radius}
+            oninput={(event) => changeStyle({ radius: Number(event.currentTarget.value) })}
+          /></label
+        ><label
+          ><span class="control-label"
+            ><span>Padding</span><output>{node.style.padding}px</output></span
+          ><input
+            type="range"
+            aria-label="Padding"
+            min="4"
+            max="24"
+            step="4"
+            value={node.style.padding}
+            oninput={(event) => changeStyle({ padding: Number(event.currentTarget.value) })}
+          /></label
+        >{#if node.componentBinding}<button class="wide" onclick={generalize}
+            >Apply style to {node.repeaterId
+              ? 'repeater siblings'
+              : 'same component on screen'}</button
+          >{/if}
+      </section>
+      <section>
+        <h3>Fidelity and origin</h3>
+        <dl>
+          <dt>Fidelity</dt>
+          <dd>{effectiveFidelity(document, node.id)}</dd>
+          <dt>Origin</dt>
+          <dd>{node.provenance.actor === 'agent' ? 'AI' : 'Human'}</dd>
+        </dl>
+        <button class="wide" onclick={() => toggleSelectedNodePin(node.id)}
+          >{document.pinnedNodeIds.includes(node.id)
+            ? 'Unpin element'
+            : 'Pin element for future candidates'}</button
+        >
+      </section>
+    {:else}
+      <div class="no-selection">
+        <span aria-hidden="true">◎</span><strong>No selection</strong>
+        <p>Select an object to inspect its geometry, appearance, fidelity, and origin.</p>
+      </div>
+      <section>
+        <h3>Co-design starts from selection</h3>
         <p class="muted">
-          {agentStatus}. Proposals are typed, validated, and applied only through operation history.
+          Select a frame or object, switch to Co-design, then choose a visible generation action.
+          Selection alone never generates or changes anything.
         </p>
       </section>
-    {/each}
+      <section>
+        <h3>Generator boundary</h3>
+        <p class="muted">
+          {agentStatus}. Candidates are structured, scoped, and applied only after your decision.
+        </p>
+      </section>
+    {/if}
   </aside>
   <div class="live" aria-live="polite">{error || notice}</div>
+  {#if storageWarning}<div class="storage-warning" role="status">
+      <strong>Project recovery notice</strong><span>{storageWarning}</span>
+    </div>{/if}
   {#if error}<div class="error-toast">
       <strong>Couldn’t apply change</strong><span>{error}</span><button onclick={() => (error = '')}
         >Dismiss</button
@@ -1491,7 +1864,7 @@
   .app {
     height: 100vh;
     display: grid;
-    grid-template: 48px minmax(0, 1fr) / 232px minmax(0, 1fr) 304px;
+    grid-template: 48px minmax(0, 1fr) / 232px minmax(0, 1fr) 390px;
     background: #eef0f3;
     font-size: 13px;
   }
@@ -1575,22 +1948,6 @@
   }
   .status i.online {
     background: #1c9464;
-  }
-  .agency {
-    display: flex;
-    border: 1px solid #cdd1d7;
-    border-radius: 4px;
-    padding: 2px;
-  }
-  .agency button {
-    height: 24px;
-    padding: 0 6px;
-    text-transform: capitalize;
-    font-size: 11px;
-  }
-  .agency button.active {
-    background: #2e3642;
-    color: white;
   }
   .checkpoint {
     color: #285e8f !important;
@@ -1776,8 +2133,7 @@
     color: #676e78;
     cursor: pointer;
   }
-  .layers .layer-kind,
-  .layers .layer-status {
+  .layers .layer-kind {
     flex: none;
     border-radius: 3px;
     padding: 2px 4px;
@@ -1792,11 +2148,6 @@
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-  .layers .layer-status {
-    background: transparent;
-    padding: 0;
-    color: #77808a;
   }
   .layers button.selected {
     background: #e3e9ef;
@@ -1964,6 +2315,58 @@
     vector-effect: non-scaling-stroke;
     pointer-events: none;
   }
+  .mutation-boundary,
+  .observation-boundary {
+    fill: none;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+  }
+  .mutation-boundary {
+    stroke: #125f99;
+    stroke-width: 3;
+  }
+  .observation-boundary {
+    stroke: #667783;
+    stroke-width: 1.5;
+    stroke-dasharray: 7 5;
+  }
+  .evidence-highlight {
+    fill: #f3b94218;
+    stroke: #b96f05;
+    stroke-width: 3;
+    stroke-dasharray: 3 3;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+  }
+  .candidate-ghost {
+    opacity: 0.72;
+    pointer-events: none;
+  }
+  .candidate-ghost rect {
+    stroke: #855e0c;
+    stroke-width: 2;
+    stroke-dasharray: 7 4;
+    vector-effect: non-scaling-stroke;
+  }
+  .candidate-ghost text {
+    font-weight: 650;
+    pointer-events: none;
+  }
+  .candidate-ghost .highlighted-ghost rect {
+    stroke: #b7472a;
+    stroke-width: 4;
+  }
+  .candidate-ghost.source-comparison {
+    opacity: 0.42;
+  }
+  .candidate-ghost.source-comparison rect {
+    fill: transparent;
+    stroke: #5f6872;
+    stroke-dasharray: 3 4;
+  }
+  .candidate-ghost.source-comparison text {
+    opacity: 0.35;
+  }
   .handle {
     fill: #fff;
     stroke: #2672ad;
@@ -2028,53 +2431,6 @@
   }
   .context-bar button:hover {
     background: #4a596b;
-  }
-  .proposal-card {
-    position: absolute;
-    z-index: 8;
-    top: 90px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: min(600px, 80%);
-    display: grid;
-    grid-template-columns: 1fr auto auto;
-    align-items: center;
-    gap: 8px;
-    padding: 12px;
-    border: 1px solid #8fa5b8;
-    background: #f9fbfd;
-    box-shadow: 0 10px 30px #1d293930;
-    border-radius: 5px;
-  }
-  .proposal-card div {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-  }
-  .proposal-card p {
-    margin: 0;
-    color: #59616c;
-  }
-  .proposal-card small {
-    color: #7a828d;
-  }
-  .proposal-source {
-    text-transform: uppercase;
-    font-size: 9px;
-    letter-spacing: 0.08em;
-    color: #487394;
-  }
-  .proposal-card button {
-    border: 1px solid #bbc5ce;
-    background: white;
-    border-radius: 4px;
-    padding: 7px 9px;
-    cursor: pointer;
-  }
-  .proposal-card .accept {
-    background: #285e8f;
-    color: white;
-    border-color: #285e8f;
   }
   .context-menu {
     position: fixed;
@@ -2202,12 +2558,6 @@
     color: #858b94;
     font-size: 10px;
   }
-  .proposal-empty {
-    padding: 24px;
-  }
-  .proposal-empty p {
-    color: #6f7680;
-  }
   .code-header {
     position: sticky;
     top: 0;
@@ -2237,6 +2587,9 @@
     border-left: 1px solid #cdd1d7;
     background: #fafbfc;
     overflow: auto;
+  }
+  .inspector :global(.codesign-panel) {
+    padding: 14px;
   }
   .inspector-tabs {
     height: 41px;
@@ -2288,36 +2641,6 @@
     font-size: 10px;
     color: #6d747d;
   }
-  .commitment {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    border: 1px solid #d3d7dc;
-    padding: 9px;
-    border-radius: 4px;
-    margin-bottom: 12px;
-  }
-  .commitment i {
-    font-style: normal;
-  }
-  .commitment div {
-    display: flex;
-    flex-direction: column;
-    text-transform: capitalize;
-  }
-  .commitment span {
-    font-size: 11px;
-    color: #727983;
-  }
-  .commitment.confirmed {
-    border-left: 3px solid #2d8a64;
-  }
-  .commitment.inferred {
-    border-left: 3px solid #d08b32;
-  }
-  .commitment.ambiguous {
-    border-left: 3px solid #8b929c;
-  }
   .inspector label {
     display: flex;
     flex-direction: column;
@@ -2344,38 +2667,9 @@
     padding: 0 7px;
     color: #252b33;
   }
-  .binding {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    padding: 9px;
-    background: #edf4f8;
-    border-left: 3px solid #397eb8;
-  }
-  .binding span {
-    font:
-      11px ui-monospace,
-      monospace;
-    color: #5f6872;
-  }
   .muted {
     color: #737a84;
     line-height: 1.45;
-  }
-  .intent-origin {
-    margin: 0 0 10px;
-    color: #646d78;
-    font-size: 11px;
-    line-height: 1.5;
-  }
-  .intent-evidence {
-    display: grid;
-    gap: 7px;
-    margin: 0;
-    padding-left: 17px;
-    color: #3f4a56;
-    font-size: 11px;
-    line-height: 1.4;
   }
   .wide {
     width: 100%;
@@ -2425,21 +2719,6 @@
   .no-selection p {
     line-height: 1.5;
   }
-  .intent-counts {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 5px;
-  }
-  .intent-counts div {
-    display: flex;
-    flex-direction: column;
-    padding: 8px;
-    background: #f0f2f4;
-  }
-  .intent-counts span {
-    font-size: 9px;
-    color: #777e87;
-  }
   .live {
     position: absolute;
     width: 1px;
@@ -2479,6 +2758,22 @@
     font-size: 11px;
     cursor: pointer;
   }
+  .storage-warning {
+    position: fixed;
+    z-index: 29;
+    right: 404px;
+    bottom: 58px;
+    width: min(420px, calc(100vw - 32px));
+    display: grid;
+    gap: 3px;
+    padding: 11px 12px;
+    border: 1px solid #c8a562;
+    background: #fff8e8;
+    box-shadow: 0 7px 24px #35161118;
+  }
+  .storage-warning span {
+    color: #705a31;
+  }
   .preview .tools,
   .preview .context-bar {
     opacity: 0.35;
@@ -2497,13 +2792,12 @@
   }
   @media (max-width: 1200px) {
     .app {
-      grid-template-columns: 205px minmax(0, 1fr) 280px;
+      grid-template-columns: 205px minmax(0, 1fr) 340px;
     }
     .brand {
       width: auto;
     }
-    .document-name,
-    .agency {
+    .document-name {
       display: none;
     }
   }

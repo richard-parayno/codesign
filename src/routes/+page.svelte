@@ -47,11 +47,14 @@
   let agentStatus = 'Local rules ready';
   let loadingProposal = false;
   let idCounter = 0;
-  let restored = false;
   let lastGuidedSelection = '';
   let viewportLogTimer: ReturnType<typeof setTimeout> | undefined;
+  let proposalRequestId = 0;
 
   $: document = $documentStore.present;
+  $: projects = $documentStore.projects;
+  $: activeProjectId = $documentStore.activeProjectId;
+  $: activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0];
   $: currentScreen =
     document.screens.find((screen) => screen.id === document.activeScreenId) ?? document.screens[0];
   $: visibleNodes = Object.values(document.nodes).filter(
@@ -60,7 +63,6 @@
   $: selectedNodes = selection.map((id) => document.nodes[id]).filter(Boolean);
   $: contextNode = contextMenu?.nodeId ? document.nodes[contextMenu.nodeId] : undefined;
   $: code = generateSvelte(document);
-  $: if (restored) documentStore.persist(document);
   $: {
     const guidedSelection = selection.slice().sort().join(':');
     if (
@@ -92,7 +94,6 @@
     } catch {
       // The editor still works when browser storage is unavailable.
     }
-    restored = true;
     fetch('/api/agent/status')
       .then((response) => response.json())
       .then((value) => {
@@ -170,6 +171,7 @@
   }
   function controlArea(control: Element) {
     if (control.closest('.topbar')) return 'topbar';
+    if (control.closest('.projects')) return 'sidebar';
     if (control.closest('.tools')) return 'tools';
     if (control.closest('.outline')) return 'sidebar';
     if (control.closest('.canvas-toolbar')) return 'canvas-toolbar';
@@ -224,6 +226,62 @@
     documentStore.replace(demoCheckpoint());
     selection = [];
     logAction('document.demo-loaded', { fromRevision: document.revision });
+  }
+  function clearProjectTransientState() {
+    selection = [];
+    proposal = null;
+    contextMenu = null;
+    draft = null;
+    gesture = null;
+    connectSource = '';
+    error = '';
+    notice = '';
+    loadingProposal = false;
+    proposalRequestId += 1;
+    lastGuidedSelection = '';
+  }
+  function createProject() {
+    const name = prompt('Name this project', `Untitled design ${projects.length + 1}`);
+    if (name === null) return;
+    const project = documentStore.createProject(name);
+    if (!project) {
+      error = 'Enter a project name';
+      return;
+    }
+    clearProjectTransientState();
+    logAction('project.created', { projectId: project.id, name: project.name });
+  }
+  function renameProject() {
+    if (!activeProject) return;
+    const name = prompt('Rename this project', activeProject.name);
+    if (name === null || name.trim() === activeProject.name) return;
+    if (!documentStore.renameProject(activeProject.id, name)) {
+      error = 'Enter a project name';
+      return;
+    }
+    logAction('project.renamed', {
+      projectId: activeProject.id,
+      fromName: activeProject.name,
+      name: name.trim().slice(0, 80),
+    });
+  }
+  function switchProject(projectId: string) {
+    const fromProjectId = activeProjectId;
+    if (!documentStore.switchProject(projectId)) return;
+    clearProjectTransientState();
+    logAction('project.switched', { fromProjectId, projectId });
+  }
+  function deleteProject() {
+    if (!activeProject) return;
+    if (!confirm(`Delete “${activeProject.name}”? This cannot be undone.`)) return;
+    const result = documentStore.deleteProject(activeProject.id);
+    if (!result) return;
+    clearProjectTransientState();
+    logAction('project.deleted', {
+      projectId: result.removed.id,
+      name: result.removed.name,
+      activeProjectId: result.activeProjectId,
+    });
   }
   function navigateToScreen(screenId: string, branchId?: string, source = 'sidebar') {
     const fromScreenId = document.activeScreenId;
@@ -540,6 +598,8 @@
       return;
     }
     loadingProposal = true;
+    const requestId = ++proposalRequestId;
+    const requestProjectId = activeProjectId;
     error = '';
     logAction('proposal.requested', {
       intent,
@@ -566,6 +626,10 @@
         });
         const value = await response.json();
         if (!response.ok) throw new Error(value.message ?? 'Codex proposal failed');
+        if (requestId !== proposalRequestId) {
+          logAction('proposal.discarded', { intent, projectId: requestProjectId });
+          return;
+        }
         proposal = value.proposal;
         agentStatus = value.fallback
           ? 'Codex unavailable · local fallback'
@@ -581,6 +645,7 @@
         });
       }
     } catch (cause) {
+      if (requestId !== proposalRequestId) return;
       proposal = localProposal(document, selection, intent);
       agentStatus = 'Local fallback active';
       error = cause instanceof Error ? cause.message : 'Agent unavailable';
@@ -591,7 +656,7 @@
         targetIds: proposal.targetIds,
       });
     } finally {
-      loadingProposal = false;
+      if (requestId === proposalRequestId) loadingProposal = false;
     }
   }
   function acceptProposal() {
@@ -740,7 +805,7 @@
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark">M</span><strong>Malleable</strong><span class="document-name"
-        >Untitled design</span
+        >{activeProject?.name ?? 'Untitled design'}</span
       >
     </div>
     <div class="mode-switch" aria-label="Editor mode">
@@ -783,6 +848,23 @@
   </header>
 
   <aside class="leftbar">
+    <section class="projects" aria-label="Projects">
+      <label for="project-picker">Project</label>
+      <select
+        id="project-picker"
+        value={activeProjectId}
+        onchange={(event) => switchProject(event.currentTarget.value)}
+      >
+        {#each projects as project (project.id)}
+          <option value={project.id}>{project.name}</option>
+        {/each}
+      </select>
+      <div class="project-actions">
+        <button onclick={createProject}>New project</button>
+        <button onclick={renameProject}>Rename</button>
+        <button onclick={deleteProject}>Delete</button>
+      </div>
+    </section>
     <nav class="tools" aria-label="Tools">
       {#each [{ id: 'select', label: 'Select', icon: '↖', key: 'V' }, { id: 'frame', label: 'Frame', icon: '▣', key: 'F' }, { id: 'rectangle', label: 'Rectangle', icon: '□', key: 'R' }, { id: 'text', label: 'Text', icon: 'T', key: 'T' }, { id: 'connect', label: 'Connect', icon: '↗', key: 'C' }] as item}<button
           class:active={tool === item.id}
@@ -1439,6 +1521,48 @@
     border-right: 1px solid #cdd1d7;
     background: #f7f8fa;
     min-height: 0;
+  }
+  .projects {
+    display: grid;
+    gap: 6px;
+    padding: 9px 8px;
+    border-bottom: 1px solid #d6dae0;
+  }
+  .projects label {
+    color: #747b85;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .projects select {
+    width: 100%;
+    height: 32px;
+    border: 1px solid #bdc4cc;
+    border-radius: 4px;
+    background: white;
+    padding: 0 7px;
+    color: #313841;
+  }
+  .project-actions {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 4px;
+  }
+  .project-actions button {
+    min-width: 0;
+    min-height: 29px;
+    border: 1px solid #c5cbd2;
+    border-radius: 4px;
+    background: white;
+    padding: 0 7px;
+    color: #3f4853;
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .project-actions button:hover {
+    background: #edf2f6;
+    border-color: #aab6c2;
   }
   .tools {
     display: grid;

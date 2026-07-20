@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { documentStore } from '$lib/model/store';
   import {
     defaultStyle,
@@ -27,6 +27,8 @@
   let inspectorTab: 'intent' | 'design' = 'intent';
   let zoom = 1;
   let pan = { x: 0, y: 0 };
+  let contextMenu: { x: number; y: number; nodeId?: string } | null = null;
+  let contextMenuElement: HTMLDivElement;
   let draft: Bounds | null = null;
   let gesture: {
     mode: 'draw' | 'move' | 'resize' | 'pan';
@@ -51,6 +53,7 @@
     (node) => node.screenId === currentScreen?.id,
   );
   $: selectedNodes = selection.map((id) => document.nodes[id]).filter(Boolean);
+  $: contextNode = contextMenu?.nodeId ? document.nodes[contextMenu.nodeId] : undefined;
   $: code = generateSvelte(document);
   $: if (restored) documentStore.persist(document);
   $: {
@@ -103,6 +106,7 @@
       if (key === 'escape') {
         preview = false;
         proposal = null;
+        contextMenu = null;
         draft = null;
         gesture = null;
       }
@@ -127,8 +131,16 @@
         });
       }
     };
+    const dismissContextMenu = (event: PointerEvent) => {
+      if (contextMenu && event.target instanceof Element && !event.target.closest('.context-menu'))
+        contextMenu = null;
+    };
     window.addEventListener('keydown', keydown);
-    return () => window.removeEventListener('keydown', keydown);
+    window.addEventListener('pointerdown', dismissContextMenu);
+    return () => {
+      window.removeEventListener('keydown', keydown);
+      window.removeEventListener('pointerdown', dismissContextMenu);
+    };
   });
 
   function uid(prefix: string) {
@@ -152,12 +164,14 @@
     };
   }
   function canvasDown(event: PointerEvent) {
+    contextMenu = null;
     if (preview) return;
-    if (event.button === 1 || event.button === 2) {
+    if (event.button === 1) {
       const p = { x: event.clientX, y: event.clientY };
       gesture = { mode: 'pan', startX: p.x, startY: p.y, lastX: p.x, lastY: p.y };
       return;
     }
+    if (event.button !== 0) return;
     if (event.target !== event.currentTarget) return;
     const p = point(event);
     selection = [];
@@ -241,6 +255,8 @@
   }
   function nodeDown(event: PointerEvent, node: DesignNode) {
     event.stopPropagation();
+    contextMenu = null;
+    if (event.button !== 0) return;
     if (preview) {
       const transition = document.transitions.find((item) => item.sourceNodeId === node.id);
       if (transition) documentStore.navigate(transition.targetScreenId);
@@ -293,8 +309,72 @@
   }
   function wheel(event: WheelEvent) {
     event.preventDefault();
-    const next = Math.min(2, Math.max(0.35, zoom * (event.deltaY > 0 ? 0.92 : 1.08)));
-    zoom = next;
+    contextMenu = null;
+    const canvas = event.currentTarget as SVGSVGElement;
+    const rect = canvas.getBoundingClientRect();
+    if (event.ctrlKey) {
+      const pointer = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+      const world = { x: (pointer.x - pan.x) / zoom, y: (pointer.y - pan.y) / zoom };
+      const factor = Math.min(1.25, Math.max(0.8, Math.exp(-event.deltaY * 0.01)));
+      const nextZoom = Math.min(2, Math.max(0.35, zoom * factor));
+      pan = {
+        x: pointer.x - world.x * nextZoom,
+        y: pointer.y - world.y * nextZoom,
+      };
+      zoom = nextZoom;
+      return;
+    }
+    const unit =
+      event.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? 16
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? rect.height
+          : 1;
+    const horizontal = event.deltaX || (event.shiftKey ? event.deltaY : 0);
+    const vertical = event.shiftKey && !event.deltaX ? 0 : event.deltaY;
+    pan = { x: pan.x - horizontal * unit, y: pan.y - vertical * unit };
+  }
+  async function openContextMenu(event: MouseEvent, node?: DesignNode) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (node && !selection.includes(node.id)) selection = [node.id];
+    proposal = null;
+    const width = 236;
+    const height = preview ? 110 : node ? 244 : 196;
+    contextMenu = {
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
+      nodeId: node?.id,
+    };
+    await tick();
+    contextMenuElement?.querySelector<HTMLButtonElement>('button')?.focus();
+  }
+  function startConnectionFromContext() {
+    if (!contextNode) return;
+    selection = [contextNode.id];
+    connectSource = contextNode.id;
+    tool = 'connect';
+    notice = `Connection starts at ${contextNode.name}. Choose a destination screen.`;
+    contextMenu = null;
+  }
+  function promoteFromContext() {
+    if (!contextNode) return;
+    if (!selection.includes(contextNode.id)) selection = [contextNode.id];
+    contextMenu = null;
+    void interpret('promote');
+  }
+  function bindFromContext() {
+    if (!contextNode) return;
+    if (!selection.includes(contextNode.id)) selection = [contextNode.id];
+    contextMenu = null;
+    bind('content-region');
+  }
+  function deleteFromContext() {
+    if (!contextNode) return;
+    const targetIds = selection.includes(contextNode.id) ? selection : [contextNode.id];
+    contextMenu = null;
+    apply({ id: uid('op'), type: 'delete', actor: 'user', targetIds });
+    selection = [];
   }
 
   async function interpret(intent: 'interpret' | 'promote') {
@@ -469,7 +549,9 @@
     </div>
     <div class="top-actions">
       <span class="status" title={agentStatus}
-        ><i class:online={backend === 'codex'}></i>{backend === 'codex' ? 'Codex' : 'Local'}</span
+        ><i aria-hidden="true" class:online={backend === 'codex'}></i>{backend === 'codex'
+          ? 'Codex'
+          : 'Local'}</span
       >
       <div class="agency" aria-label="Agent envelope">
         {#each ['protect', 'guide', 'explore'] as mode}<button
@@ -482,9 +564,10 @@
             onclick={() => (agency = mode as Agency)}>{mode}</button
           >{/each}
       </div>
-      <button title="Undo · Ctrl/⌘ Z" onclick={() => documentStore.undo()}>↶</button><button
-        title="Redo · Ctrl/⌘ Shift Z"
-        onclick={() => documentStore.redo()}>↷</button
+      <button title="Undo · Ctrl/⌘ Z" onclick={() => documentStore.undo()}
+        ><span class="button-icon" aria-hidden="true">↶</span>Undo</button
+      ><button title="Redo · Ctrl/⌘ Shift Z" onclick={() => documentStore.redo()}
+        ><span class="button-icon" aria-hidden="true">↷</span>Redo</button
       >
       <button
         onclick={() => {
@@ -506,24 +589,23 @@
 
   <aside class="leftbar">
     <nav class="tools" aria-label="Tools">
-      {#each [{ id: 'select', icon: '↖', key: 'V' }, { id: 'frame', icon: '▣', key: 'F' }, { id: 'rectangle', icon: '□', key: 'R' }, { id: 'text', icon: 'T', key: 'T' }, { id: 'connect', icon: '↗', key: 'C' }] as item}<button
+      {#each [{ id: 'select', label: 'Select', icon: '↖', key: 'V' }, { id: 'frame', label: 'Frame', icon: '▣', key: 'F' }, { id: 'rectangle', label: 'Rectangle', icon: '□', key: 'R' }, { id: 'text', label: 'Text', icon: 'T', key: 'T' }, { id: 'connect', label: 'Connect', icon: '↗', key: 'C' }] as item}<button
           class:active={tool === item.id}
-          aria-label={`${item.id} tool`}
-          title={`${item.id} · ${item.key}`}
+          title={`${item.label} tool · ${item.key}`}
           onclick={() => (tool = item.id as Tool)}
-          ><span>{item.icon}</span><small>{item.key}</small></button
+          ><span class="tool-icon" aria-hidden="true">{item.icon}</span><span class="tool-label"
+            >{item.label}</span
+          ><kbd>{item.key}</kbd></button
         >{/each}
     </nav>
     <section class="outline">
       <div class="section-title">
-        <span>Screens</span><button
-          aria-label="Duplicate active screen"
-          title="Duplicate screen"
-          onclick={duplicateScreen}>＋</button
+        <span>Screens</span><button title="Duplicate screen" onclick={duplicateScreen}
+          ><span aria-hidden="true">＋</span>Duplicate screen</button
         >
       </div>
       {#each document.branches as branchItem}
-        <div class="branch-label">◇ {branchItem.name}</div>
+        <div class="branch-label"><span aria-hidden="true">◇</span> Branch: {branchItem.name}</div>
         {#each document.screens.filter((screen) => screen.branchId === branchItem.id) as screen}
           <div class:active={screen.id === document.activeScreenId} class="screen-row">
             <button
@@ -547,35 +629,38 @@
             onclick={(event) => {
               selection = event.shiftKey ? [...new Set([...selection, node.id])] : [node.id];
             }}
-            >{node.kind === 'frame'
-              ? '▣'
-              : node.kind === 'text'
-                ? 'T'
-                : node.componentBinding
-                  ? '◆'
-                  : '□'} <span>{node.name}</span>{#if node.semantics}<i
-                title={node.semantics.commitment}
-                >{node.semantics.commitment === 'confirmed' ? '●' : '◐'}</i
+            ><span class="layer-kind"
+              >{node.componentBinding
+                ? 'Component'
+                : node.kind === 'rectangle'
+                  ? 'Shape'
+                  : node.kind}</span
+            ><span class="layer-name">{node.name}</span>{#if node.semantics}<span
+                class="layer-status">{node.semantics.commitment}</span
               >{/if}</button
           >{/each}
       </div>
-      <button class="branch-action" onclick={branch}>◇ Branch current screen</button>
+      <button class="branch-action" onclick={branch}
+        ><span aria-hidden="true">◇</span>Branch current screen</button
+      >
     </section>
   </aside>
 
   <main class="workspace">
     <div class="canvas-toolbar">
-      <span>{Math.round(zoom * 100)}%</span><button
-        onclick={() => (zoom = Math.max(0.35, zoom - 0.1))}>−</button
+      <button onclick={() => (zoom = Math.max(0.35, zoom - 0.1))}
+        ><span aria-hidden="true">−</span>Zoom out</button
       ><button
         onclick={() => {
           zoom = 1;
           pan = { x: 0, y: 0 };
-        }}>100</button
-      ><button onclick={() => (zoom = Math.min(2, zoom + 0.1))}>＋</button><span class="mode-hint"
+        }}>Reset zoom <span class="zoom-value">{Math.round(zoom * 100)}%</span></button
+      ><button onclick={() => (zoom = Math.min(2, zoom + 0.1))}
+        ><span aria-hidden="true">＋</span>Zoom in</button
+      ><span class="mode-hint"
         >{preview
           ? 'Click a connected object to navigate · Esc to exit'
-          : `${tool[0].toUpperCase() + tool.slice(1)} tool`}</span
+          : `${tool[0].toUpperCase() + tool.slice(1)} tool · Scroll to pan · Pinch to zoom · Right-click for actions`}</span
       >
     </div>
     <svg
@@ -590,7 +675,7 @@
         draft = null;
       }}
       onwheel={wheel}
-      oncontextmenu={(event) => event.preventDefault()}
+      oncontextmenu={(event) => openContextMenu(event)}
     >
       <defs
         ><pattern id="smallGrid" width="16" height="16" patternUnits="userSpaceOnUse"
@@ -629,6 +714,7 @@
             tabindex="0"
             aria-label={node.name}
             onpointerdown={(event) => nodeDown(event, node)}
+            oncontextmenu={(event) => openContextMenu(event, node)}
           >
             <rect
               class="node"
@@ -730,6 +816,58 @@
         ><button onclick={() => (proposal = null)}>Dismiss</button>
       </div>{/if}
 
+    {#if contextMenu}<div
+        class="context-menu"
+        role="menu"
+        aria-label={contextNode ? `${contextNode.name} actions` : 'Canvas actions'}
+        style={`left:${contextMenu.x}px;top:${contextMenu.y}px`}
+        bind:this={contextMenuElement}
+      >
+        <div class="context-menu-header">
+          <strong>{contextNode?.name ?? 'Canvas'}</strong><span
+            >{preview
+              ? 'Preview actions'
+              : contextNode
+                ? `${selection.length > 1 ? `${selection.length} selected · ` : ''}${contextNode.componentBinding ? 'Component' : contextNode.kind}`
+                : 'Canvas actions'}</span
+          >
+        </div>
+        {#if preview}<button
+            role="menuitem"
+            onclick={() => {
+              preview = false;
+              contextMenu = null;
+            }}>Exit preview to edit</button
+          >{:else if contextNode}<button role="menuitem" onclick={promoteFromContext}
+            >Promote to component</button
+          ><button role="menuitem" onclick={startConnectionFromContext}>Start connection</button
+          ><button role="menuitem" onclick={bindFromContext}>Bind as content region</button><button
+            class="danger"
+            role="menuitem"
+            onclick={deleteFromContext}
+            >Delete {selection.length > 1 ? 'selection' : 'element'}</button
+          >{:else}<button
+            role="menuitem"
+            onclick={() => {
+              zoom = 1;
+              pan = { x: 0, y: 0 };
+              contextMenu = null;
+            }}>Reset canvas view</button
+          ><button
+            role="menuitem"
+            onclick={() => {
+              contextMenu = null;
+              duplicateScreen();
+            }}>Duplicate screen</button
+          ><button
+            role="menuitem"
+            onclick={() => {
+              contextMenu = null;
+              branch();
+            }}>Branch current screen</button
+          >{/if}
+      </div>{/if}
+
     <section class:open={bottomOpen} class="bottom-panel">
       <div class="bottom-tabs">
         {#each ['history', 'proposals', 'code'] as tab}<button
@@ -744,7 +882,8 @@
                 ? 'Agent proposals'
                 : 'Svelte projection'}</button
           >{/each}<button class="panel-toggle" onclick={() => (bottomOpen = !bottomOpen)}
-          >{bottomOpen ? '⌄' : '⌃'}</button
+          >{bottomOpen ? 'Hide panel' : 'Show panel'}
+          <span aria-hidden="true">{bottomOpen ? '⌄' : '⌃'}</span></button
         >
       </div>
       {#if bottomOpen}<div class="panel-body">
@@ -788,14 +927,14 @@
     </div>
     {#each selectedNodes.slice(0, 1) as node}
       <div class="selection-summary">
-        <span class="kind-icon">{node.componentBinding ? '◆' : '□'}</span>
+        <span class="kind-icon" aria-hidden="true">{node.componentBinding ? '◆' : '□'}</span>
         <div><strong>{node.name}</strong><small>{node.kind} · {node.id.slice(-8)}</small></div>
       </div>
       {#if inspectorTab === 'intent'}
         <section>
           <h3>Commitment</h3>
           <div class={`commitment ${node.semantics?.commitment ?? 'ambiguous'}`}>
-            <i
+            <i aria-hidden="true"
               >{node.semantics?.commitment === 'confirmed'
                 ? '●'
                 : node.semantics?.commitment === 'inferred'
@@ -822,7 +961,7 @@
         <section>
           <h3>Component binding</h3>
           {#if node.componentBinding}<div class="binding">
-              <strong>◆ {node.componentBinding.componentId}</strong
+              <strong><span aria-hidden="true">◆</span> {node.componentBinding.componentId}</strong
               >{#each Object.entries(node.componentBinding.props) as [key, value]}<span
                   >{key}: {String(value)}</span
                 >{/each}
@@ -910,7 +1049,7 @@
       {/if}
     {:else}
       <div class="no-selection">
-        <span>◎</span><strong>No selection</strong>
+        <span aria-hidden="true">◎</span><strong>No selection</strong>
         <p>Select an object to inspect its intent, binding, and provenance.</p>
       </div>
       <section>
@@ -947,7 +1086,7 @@
   <div class="live" aria-live="polite">{error || notice}</div>
   {#if error}<div class="error-toast">
       <strong>Couldn’t apply change</strong><span>{error}</span><button onclick={() => (error = '')}
-        >×</button
+        >Dismiss</button
       >
     </div>{/if}
 </div>
@@ -976,6 +1115,19 @@
   }
   :global(button) {
     color: inherit;
+  }
+  :global(kbd) {
+    min-width: 18px;
+    padding: 1px 4px;
+    border: 1px solid #c7ccd2;
+    border-radius: 3px;
+    background: #f2f4f6;
+    color: #69717c;
+    font:
+      9px/1.35 ui-monospace,
+      SFMono-Regular,
+      monospace;
+    text-align: center;
   }
   .app {
     height: 100vh;
@@ -1025,6 +1177,9 @@
     height: 30px;
     padding: 0 9px;
     border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     cursor: pointer;
   }
   .topbar button:hover {
@@ -1082,38 +1237,46 @@
     color: #285e8f !important;
     border-color: #b7cadc !important;
   }
+  .button-icon {
+    font-size: 15px;
+    line-height: 1;
+  }
   .leftbar {
     display: flex;
+    flex-direction: column;
     border-right: 1px solid #cdd1d7;
     background: #f7f8fa;
     min-height: 0;
   }
   .tools {
-    width: 48px;
-    border-right: 1px solid #d6dae0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding-top: 8px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    padding: 8px;
     gap: 4px;
+    border-bottom: 1px solid #d6dae0;
   }
   .tools button {
-    width: 38px;
-    height: 40px;
+    min-width: 0;
+    height: 34px;
     border: 1px solid transparent;
     background: transparent;
     border-radius: 4px;
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 20px minmax(0, 1fr) auto;
     align-items: center;
+    gap: 4px;
+    padding: 0 6px;
+    text-align: left;
     cursor: pointer;
   }
-  .tools button span {
-    font-size: 17px;
+  .tools .tool-icon {
+    font-size: 15px;
+    text-align: center;
   }
-  .tools button small {
-    font-size: 8px;
-    color: #8a9099;
+  .tools .tool-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .tools button.active {
     background: #e1e7ef;
@@ -1123,14 +1286,16 @@
   .outline {
     flex: 1;
     min-width: 0;
+    min-height: 0;
     overflow: auto;
     padding: 6px;
   }
   .section-title {
-    height: 32px;
+    min-height: 38px;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 6px;
     padding: 0 5px;
     text-transform: uppercase;
     letter-spacing: 0.08em;
@@ -1139,10 +1304,25 @@
     color: #747b85;
   }
   .section-title button {
-    border: 0;
-    background: transparent;
-    font-size: 18px;
+    min-height: 27px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: 1px solid #c5cbd2;
+    border-radius: 4px;
+    background: white;
+    padding: 0 7px;
+    color: #3f4853;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+    white-space: nowrap;
     cursor: pointer;
+  }
+  .section-title button:hover {
+    background: #edf2f6;
+    border-color: #aab6c2;
   }
   .branch-label {
     padding: 8px 6px 3px;
@@ -1183,25 +1363,39 @@
     flex-direction: column;
   }
   .layers button {
-    height: 29px;
+    min-height: 34px;
     border: 0;
     background: transparent;
     border-radius: 3px;
     text-align: left;
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 7px;
+    padding: 0 5px;
     color: #676e78;
     cursor: pointer;
   }
-  .layers button span {
+  .layers .layer-kind,
+  .layers .layer-status {
+    flex: none;
+    border-radius: 3px;
+    padding: 2px 4px;
+    background: #e8ebef;
+    color: #6f7781;
+    font-size: 8px;
+    line-height: 1.2;
+    text-transform: capitalize;
+  }
+  .layers .layer-name {
     flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .layers button i {
-    font-style: normal;
-    font-size: 8px;
+  .layers .layer-status {
+    background: transparent;
+    padding: 0;
+    color: #77808a;
   }
   .layers button.selected {
     background: #e3e9ef;
@@ -1214,6 +1408,10 @@
     background: white;
     border-radius: 4px;
     padding: 7px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
     cursor: pointer;
   }
   .workspace {
@@ -1235,7 +1433,8 @@
     top: 8px;
     left: 50%;
     transform: translateX(-50%);
-    height: 30px;
+    min-height: 34px;
+    max-width: calc(100% - 16px);
     display: flex;
     align-items: center;
     gap: 2px;
@@ -1244,17 +1443,33 @@
     border-radius: 4px;
     background: #f9fafbef;
     box-shadow: 0 2px 8px #1f293716;
+    white-space: nowrap;
+    overflow-x: auto;
   }
   .canvas-toolbar button {
-    height: 22px;
+    height: 26px;
     border: 0;
     background: transparent;
     border-radius: 3px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 7px;
     cursor: pointer;
+  }
+  .canvas-toolbar button:hover {
+    background: #e8ebef;
   }
   .canvas-toolbar span {
     padding: 0 6px;
     font-size: 11px;
+  }
+  .canvas-toolbar button > span {
+    padding: 0;
+  }
+  .canvas-toolbar .zoom-value {
+    color: #727a84;
+    font-variant-numeric: tabular-nums;
   }
   .canvas-toolbar .mode-hint {
     color: #787f89;
@@ -1416,6 +1631,59 @@
     color: white;
     border-color: #285e8f;
   }
+  .context-menu {
+    position: fixed;
+    z-index: 40;
+    width: 236px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px;
+    border: 1px solid #bfc5cc;
+    border-radius: 6px;
+    background: #fbfcfd;
+    box-shadow: 0 12px 32px #17202b30;
+  }
+  .context-menu-header {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: -6px -6px 4px;
+    padding: 9px 11px;
+    border-bottom: 1px solid #d7dbe0;
+    background: #f2f4f6;
+    border-radius: 6px 6px 0 0;
+  }
+  .context-menu-header strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .context-menu-header span {
+    color: #737b85;
+    font-size: 10px;
+    text-transform: capitalize;
+  }
+  .context-menu button {
+    width: 100%;
+    min-height: 32px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    padding: 0 8px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .context-menu button:hover,
+  .context-menu button:focus-visible {
+    background: #e7edf3;
+  }
+  .context-menu button.danger {
+    margin-top: 3px;
+    border-top: 1px solid #e0d2d0;
+    border-radius: 0 0 4px 4px;
+    color: #98453d;
+  }
   .bottom-panel {
     position: absolute;
     z-index: 6;
@@ -1452,7 +1720,14 @@
   }
   .bottom-tabs .panel-toggle {
     margin-left: auto;
-    font-size: 18px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .bottom-tabs .panel-toggle span {
+    font-size: 16px;
   }
   .panel-body {
     height: 210px;
@@ -1727,9 +2002,13 @@
   .error-toast button {
     grid-column: 2;
     grid-row: 1/3;
-    border: 0;
-    background: transparent;
-    font-size: 18px;
+    align-self: center;
+    border: 1px solid #cfa8a1;
+    border-radius: 3px;
+    background: white;
+    padding: 5px 7px;
+    font-size: 11px;
+    cursor: pointer;
   }
   .preview .tools,
   .preview .context-bar {

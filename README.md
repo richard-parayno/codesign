@@ -59,7 +59,9 @@ The three agency envelopes are deliberately different: Protect always leaves age
 - `V` Select, `F` Frame, `R` Rectangle, `T` Text, `C` Connect
 - Shift-click for multi-selection
 - Drag a selected object to move it; drag the lower-right handle to resize
-- Middle- or right-drag to pan; wheel to zoom
+- Scroll or use a two-finger touchpad gesture to pan in either axis
+- Pinch on a touchpad to zoom around the pointer; middle-drag remains available for mouse panning
+- Right-click an object for relevant element actions, or right-click empty canvas for canvas actions
 - Arrow keys nudge by 1 px; Shift+arrow nudges by 10 px
 - Ctrl/⌘+Z undo; Ctrl/⌘+Shift+Z or Ctrl/⌘+Y redo
 - Delete/Backspace removes selected objects; Escape cancels a proposal or exits Preview

@@ -8,7 +8,7 @@
 
 **0:40–0:57 — Bind repetition.** Choose **Repeat?** in the contextual bar. Show the staged proposal: targets, confidence, rationale, scope, and source. Accept. The rows gain confirmed intent and repeat badges. Undo and redo once to show that the semantic action is one operation.
 
-**0:57–1:20 — Make the flow playable.** Click `+` next to Screens to duplicate the current screen. Return to the first screen. Press `C`, click a row, then choose **Connect** beside the second screen. Enter **Preview**, click the connected row, and show that the second state opens. Press Escape or select Edit.
+**0:57–1:20 — Make the flow playable.** Click **Duplicate screen** in the Screens section. Return to the first screen. Choose **Connect** (`C`), click a row, then choose **Connect** beside the second screen. Enter **Preview**, click the connected row, and show that the second state opens. Press Escape or select Edit.
 
 **1:20–1:43 — Promote within a contract.** Select the sidebar or one repeated row and choose **Promote**. Accept the registered `Sidebar`, `DataRow`, or `Card` match. Point out that rough and promoted regions coexist. The model cannot invent a component or token.
 

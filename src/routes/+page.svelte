@@ -15,6 +15,8 @@
   import { componentRegistry } from '$lib/design-system/registry';
 
   type Tool = 'select' | 'frame' | 'rectangle' | 'text' | 'connect';
+  const DEFAULT_CANVAS_BACKGROUND = '#edf0f3';
+  const CANVAS_BACKGROUND_KEY = 'malleable.canvas-background.v1';
   let tool: Tool = 'select';
   let selection: string[] = [];
   let proposal: ProposedOperation | null = null;
@@ -27,6 +29,7 @@
   let inspectorTab: 'intent' | 'design' = 'intent';
   let zoom = 1;
   let pan = { x: 0, y: 0 };
+  let canvasBackground = DEFAULT_CANVAS_BACKGROUND;
   let contextMenu: { x: number; y: number; nodeId?: string } | null = null;
   let contextMenuElement: HTMLDivElement;
   let draft: Bounds | null = null;
@@ -73,6 +76,13 @@
 
   onMount(() => {
     documentStore.restore();
+    try {
+      const savedBackground = localStorage.getItem(CANVAS_BACKGROUND_KEY);
+      if (savedBackground && /^#[0-9a-f]{6}$/i.test(savedBackground))
+        canvasBackground = savedBackground;
+    } catch {
+      // The editor still works when browser storage is unavailable.
+    }
     restored = true;
     fetch('/api/agent/status')
       .then((response) => response.json())
@@ -146,6 +156,15 @@
   function uid(prefix: string) {
     idCounter += 1;
     return `${prefix}-${Date.now().toString(36)}-${idCounter}`;
+  }
+  function setCanvasBackground(value: string) {
+    if (!/^#[0-9a-f]{6}$/i.test(value)) return;
+    canvasBackground = value;
+    try {
+      localStorage.setItem(CANVAS_BACKGROUND_KEY, value);
+    } catch {
+      // Keep the in-memory preference when browser storage is unavailable.
+    }
   }
   function apply(operation: DesignOperation) {
     try {
@@ -657,16 +676,29 @@
         }}>Reset zoom <span class="zoom-value">{Math.round(zoom * 100)}%</span></button
       ><button onclick={() => (zoom = Math.min(2, zoom + 0.1))}
         ><span aria-hidden="true">＋</span>Zoom in</button
-      ><span class="mode-hint"
-        >{preview
-          ? 'Click a connected object to navigate · Esc to exit'
-          : `${tool[0].toUpperCase() + tool.slice(1)} tool · Scroll to pan · Pinch to zoom · Right-click for actions`}</span
+      ><label class="canvas-color-control"
+        ><span>Canvas color</span><input
+          type="color"
+          aria-label="Canvas color"
+          value={canvasBackground}
+          oninput={(event) => setCanvasBackground(event.currentTarget.value)}
+        /></label
+      ><button
+        class="reset-canvas-color"
+        disabled={canvasBackground === DEFAULT_CANVAS_BACKGROUND}
+        onclick={() => setCanvasBackground(DEFAULT_CANVAS_BACKGROUND)}>Reset color</button
       >
+    </div>
+    <div class="canvas-help">
+      {preview
+        ? 'Click a connected object to navigate · Esc to exit'
+        : `${tool[0].toUpperCase() + tool.slice(1)} tool · Scroll to pan · Pinch to zoom · Right-click for actions`}
     </div>
     <svg
       class="canvas"
       role="application"
       aria-label="Design canvas"
+      style={`background-color:${canvasBackground}`}
       onpointerdown={canvasDown}
       onpointermove={canvasMove}
       onpointerup={canvasUp}
@@ -677,19 +709,6 @@
       onwheel={wheel}
       oncontextmenu={(event) => openContextMenu(event)}
     >
-      <defs
-        ><pattern id="smallGrid" width="16" height="16" patternUnits="userSpaceOnUse"
-          ><path d="M 16 0 L 0 0 0 16" fill="none" stroke="#d7dbe0" stroke-width="0.5" /></pattern
-        ><pattern id="grid" width="64" height="64" patternUnits="userSpaceOnUse"
-          ><rect width="64" height="64" fill="url(#smallGrid)" /><path
-            d="M 64 0 L 0 0 0 64"
-            fill="none"
-            stroke="#c5cad1"
-            stroke-width="0.75"
-          /></pattern
-        ></defs
-      >
-      <rect width="100%" height="100%" fill="url(#grid)" pointer-events="none" />
       <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
         {#each document.transitions.filter((item) => document.nodes[item.sourceNodeId]?.screenId === document.activeScreenId) as transition}<path
             class="transition"
@@ -1424,8 +1443,8 @@
     display: block;
     width: 100%;
     height: calc(100% - 42px);
-    background: #edf0f3;
     touch-action: none;
+    transition: background-color 0.12s ease;
   }
   .canvas-toolbar {
     position: absolute;
@@ -1444,7 +1463,6 @@
     background: #f9fafbef;
     box-shadow: 0 2px 8px #1f293716;
     white-space: nowrap;
-    overflow-x: auto;
   }
   .canvas-toolbar button {
     height: 26px;
@@ -1471,9 +1489,61 @@
     color: #727a84;
     font-variant-numeric: tabular-nums;
   }
-  .canvas-toolbar .mode-hint {
-    color: #787f89;
+  .canvas-color-control {
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding-left: 6px;
     border-left: 1px solid #d4d8dd;
+    color: #4f5761;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .canvas-color-control > span {
+    padding: 0;
+  }
+  .canvas-color-control input {
+    width: 26px;
+    height: 22px;
+    border: 1px solid #bfc5cc;
+    border-radius: 4px;
+    background: white;
+    padding: 2px;
+    cursor: pointer;
+  }
+  .canvas-color-control input::-webkit-color-swatch-wrapper {
+    padding: 0;
+  }
+  .canvas-color-control input::-webkit-color-swatch {
+    border: 0;
+    border-radius: 2px;
+  }
+  .canvas-toolbar .reset-canvas-color {
+    color: #616974;
+    font-size: 11px;
+  }
+  .canvas-toolbar .reset-canvas-color:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .canvas-help {
+    position: absolute;
+    z-index: 4;
+    right: 12px;
+    bottom: 54px;
+    max-width: calc(100% - 24px);
+    padding: 6px 9px;
+    border: 1px solid #cbd0d6;
+    border-radius: 4px;
+    background: #f9fafbef;
+    color: #787f89;
+    box-shadow: 0 2px 8px #1f293710;
+    font-size: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
   }
   .node {
     vector-effect: non-scaling-stroke;

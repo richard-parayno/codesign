@@ -241,15 +241,34 @@
     lastGuidedSelection = '';
   }
   function createProject() {
-    const name = prompt('Name this project', `Untitled design ${projects.length + 1}`);
-    if (name === null) return;
+    const fromProjectId = activeProjectId;
+    const suggestedName = `Untitled design ${projects.length + 1}`;
+    logAction('project.create-opened', {
+      fromProjectId,
+      suggestedName,
+      projectCount: projects.length,
+    });
+    const name = prompt('Name this project', suggestedName);
+    if (name === null) {
+      logAction('project.create-cancelled', { fromProjectId });
+      return;
+    }
     const project = documentStore.createProject(name);
     if (!project) {
       error = 'Enter a project name';
+      logAction('project.create-rejected', {
+        fromProjectId,
+        reason: 'empty-name',
+      });
       return;
     }
     clearProjectTransientState();
-    logAction('project.created', { projectId: project.id, name: project.name });
+    logAction('project.created', {
+      projectId: project.id,
+      name: project.name,
+      fromProjectId,
+      projectCount: projects.length,
+    });
   }
   function renameProject() {
     if (!activeProject) return;

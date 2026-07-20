@@ -5,46 +5,158 @@ import {
   CandidateValidationError,
   SUPPORTED_ACTIONS,
   createGenerationRun,
+  candidateToDocumentCoordinates,
+  operationToSceneCoordinates,
   generationRequestSchema,
   normalizeCandidateBatch,
-  safeAgentContext,
   validateGenerationRequest,
   type CandidateGenerationResponse,
   type GenerationRequest,
 } from '$lib/agent/candidate';
-import { getCodexClient } from '$lib/agent/codex-client.server';
-import { localCandidateBatch } from '$lib/agent/local';
-import { componentRegistry } from '$lib/design-system/registry';
+import {
+  LocalCodesignProvider,
+  ProviderFailure,
+  asProviderFailure,
+  createProvider,
+  providerSettings,
+} from '$lib/agent/providers';
+import {
+  SCENE_CONTEXT_SCHEMA_VERSION,
+  buildSceneContext,
+  type SceneContext,
+} from '$lib/agent/scene-context';
+import {
+  VisualSnapshotError,
+  withTrustedVisualSnapshot,
+  type TrustedVisualSnapshot,
+} from '$lib/agent/visual-snapshot.server';
+import type { CanvasSnapshot, GenerationRun } from '$lib/model/types';
 
-function parseJson(text: string) {
-  const trimmed = text
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/, '');
-  return JSON.parse(trimmed) as unknown;
+function canvasSnapshot(request: GenerationRequest): CanvasSnapshot {
+  return {
+    screens: [
+      {
+        id: request.document.activeScreenId,
+        name: request.document.screenName,
+        rootIds: request.document.screenRootIds.filter((id) => request.document.nodes[id]),
+        branchId: 'generation-context',
+      },
+    ],
+    nodes: structuredClone(request.document.nodes),
+    transitions: [],
+    branches: [
+      {
+        id: 'generation-context',
+        name: 'Generation context',
+        screenIds: [request.document.activeScreenId],
+      },
+    ],
+    activeBranchId: 'generation-context',
+    activeScreenId: request.document.activeScreenId,
+    entities: {},
+    representations: {},
+    pinnedNodeIds: [...request.pinnedNodeIds],
+    frameFidelity: structuredClone(request.document.frameFidelity),
+    nodeFidelityOverrides: structuredClone(request.document.nodeFidelityOverrides),
+  };
 }
 
-function backendSetting() {
-  return env.CODESIGN_AGENT_BACKEND ?? env.MALLEABLE_AGENT_BACKEND ?? 'local';
+function sceneContext(request: GenerationRequest, trusted?: TrustedVisualSnapshot): SceneContext {
+  return buildSceneContext({
+    snapshot: canvasSnapshot(request),
+    focusNodeIds: request.target.focusNodeIds,
+    observationNodeIds: request.target.observationScope.nodeIds,
+    observationRootId: request.target.observationScope.rootId ?? null,
+    mutationTargetIds: request.target.mutationScope.existingNodeIds,
+    mutationScope: request.target.mutationScope,
+    action: request.action,
+    fidelity: request.requestedFidelity,
+    metadata: {
+      snapshotId: request.visualSnapshot?.id ?? `context-${request.document.currentRevisionId}`,
+      revisionId: request.document.currentRevisionId,
+      capturedAt: Date.now(),
+      projectId: request.projectId,
+      ...(trusted
+        ? {
+            visual: {
+              mimeType: trusted.mimeType,
+              width: trusted.width,
+              height: trusted.height,
+              sha256: trusted.sha256,
+            },
+          }
+        : {}),
+    },
+  });
 }
 
-function commandSetting() {
-  return env.CODESIGN_CODEX_COMMAND ?? env.MALLEABLE_CODEX_COMMAND ?? 'codex';
+function generationPrompt(request: GenerationRequest, run: GenerationRun, context: SceneContext) {
+  return [
+    'Complete the supplied design scene with one coherent candidate batch.',
+    'Use the visual snapshot and canonical scene context together. Preserve the existing visual language; do not assume a navbar, dashboard, or any particular product pattern.',
+    'Return at least three individually useful atomic changes using only create, style, update-node, move, and resize.',
+    'Every new ID must begin with idNamespace plus a hyphen. Respect mutationScope exactly, never mutate pinned nodes, keep creates inside an allowed insertion parent and editable region, and order nested creates after their parent dependency.',
+    'Ground observations in observable node IDs. Phrase inferred intent as a proposal, not as a discovered fact.',
+    'Preserve every pinnedAtomicChange exactly once with preservedFromAtomicChangeId and fresh namespaced IDs where required.',
+    JSON.stringify({
+      idNamespace: run.id,
+      pinnedNodeIds: run.pinnedNodeIds,
+      pinnedAtomicChanges: request.pinnedAtomicChanges.map((change) => ({
+        id: change.id,
+        operation: operationToSceneCoordinates(change.operation, context.coordinateSpace.origin),
+        dependencyIds: change.dependencyIds,
+        trace: change.trace,
+      })),
+      scene: context,
+    }),
+  ].join('\n');
 }
 
-function modelSetting() {
-  return env.CODESIGN_CODEX_MODEL ?? env.MALLEABLE_CODEX_MODEL ?? undefined;
-}
-
-function localResponse(
+function runMetadata(
   request: GenerationRequest,
+  context: SceneContext,
+  backend: 'local' | 'codex',
+  settings: ReturnType<typeof providerSettings>,
   runId: string,
   createdAt: number,
-  fallback: boolean,
+  trusted?: TrustedVisualSnapshot,
+  fallback = false,
+) {
+  return createGenerationRun(request, {
+    backend,
+    model: backend === 'codex' ? settings.model : undefined,
+    reasoningEffort:
+      backend === 'codex' ? (settings.effort as 'low' | 'medium' | 'high' | 'xhigh') : undefined,
+    fallback,
+    contextNodeIds: context.nodes.map((node) => node.id),
+    contextRootId: context.coordinateSpace.observationRootId ?? undefined,
+    contextSummarized: context.summarization.applied,
+    contextSchemaVersion: SCENE_CONTEXT_SCHEMA_VERSION,
+    trustedSnapshot: trusted
+      ? {
+          mimeType: trusted.mimeType,
+          width: trusted.width,
+          height: trusted.height,
+          sha256: trusted.sha256,
+        }
+      : undefined,
+    runId,
+    createdAt,
+  });
+}
+
+async function generateLocal(
+  request: GenerationRequest,
+  context: SceneContext,
+  settings: ReturnType<typeof providerSettings>,
+  runId: string,
+  createdAt: number,
+  trusted?: TrustedVisualSnapshot,
+  fallback = false,
   message?: string,
-): CandidateGenerationResponse {
-  const run = createGenerationRun(request, { backend: 'local', runId, createdAt });
-  const wire = localCandidateBatch(request, run);
+): Promise<CandidateGenerationResponse> {
+  const run = runMetadata(request, context, 'local', settings, runId, createdAt, trusted, fallback);
+  const wire = await new LocalCodesignProvider().generate({ request, run });
   return {
     run,
     candidates: [normalizeCandidateBatch(request, run, wire)],
@@ -53,6 +165,29 @@ function localResponse(
     visualInputUsed: false,
     message,
   };
+}
+
+function errorResponse(cause: unknown) {
+  if (cause instanceof CandidateValidationError)
+    return json(
+      {
+        message: cause.message,
+        ...(cause.message.includes('not available') ? { supportedActions: SUPPORTED_ACTIONS } : {}),
+      },
+      { status: cause.message.includes('not available') ? 422 : 400 },
+    );
+  if (cause instanceof VisualSnapshotError)
+    return json({ message: cause.message }, { status: cause.code === 'cancelled' ? 499 : 400 });
+  const failure = asProviderFailure(cause);
+  const status = {
+    'missing-login': 401,
+    'model-unavailable': 422,
+    'rate-limited': 429,
+    cancelled: 499,
+    'protocol-failure': 502,
+    unavailable: 503,
+  }[failure.category];
+  return json({ message: failure.message, category: failure.category }, { status });
 }
 
 export async function POST({ request }) {
@@ -68,102 +203,132 @@ export async function POST({ request }) {
   const input = parsed.data;
   try {
     validateGenerationRequest(input);
-  } catch (cause) {
-    const message = cause instanceof Error ? cause.message : 'Invalid generation scope';
-    const status = message.includes('not available') ? 422 : 400;
-    return json({ message, supportedActions: SUPPORTED_ACTIONS }, { status });
-  }
-
-  const runId = `generation-${randomUUID()}`;
-  const createdAt = Date.now();
-  if (backendSetting() !== 'codex') {
-    try {
-      return json(localResponse(input, runId, createdAt, false));
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : 'Local generation failed';
-      return json({ message }, { status: cause instanceof CandidateValidationError ? 400 : 500 });
+    const settings = providerSettings();
+    const runId = `generation-${randomUUID()}`;
+    const createdAt = Date.now();
+    if (settings.provider === 'local') {
+      if (!input.visualSnapshot) {
+        const context = sceneContext(input);
+        return json(await generateLocal(input, context, settings, runId, createdAt));
+      }
+      const response = await withTrustedVisualSnapshot(
+        { mimeType: input.visualSnapshot.mimeType, base64: input.visualSnapshot.data },
+        async (trusted) => {
+          if (
+            trusted.width !== input.visualSnapshot?.width ||
+            trusted.height !== input.visualSnapshot?.height
+          )
+            throw new VisualSnapshotError(
+              'Visual snapshot dimensions do not match the uploaded image',
+              'invalid-dimensions',
+            );
+          const context = sceneContext(input, trusted);
+          return generateLocal(input, context, settings, runId, createdAt, trusted);
+        },
+        { signal: request.signal },
+      );
+      return json(response);
     }
-  }
+    if (!input.visualSnapshot)
+      throw new CandidateValidationError('AI scene generation requires a visual snapshot');
 
-  const model = modelSetting();
-  const run = createGenerationRun(input, {
-    backend: 'codex',
-    model,
-    runId,
-    createdAt,
-  });
-  const safeContext = {
-    ...safeAgentContext(input, run),
-    supportedOperations: ['create', 'style'],
-    allowedStyleValues: {
-      colors: [
-        'transparent',
-        '#ffffff',
-        '#f6f7f9',
-        '#eef0f3',
-        '#d9dde3',
-        '#a7adb7',
-        '#747b88',
-        '#20242b',
-        '#2563eb',
-      ],
-      radius: [0, 4, 8, 12, 16],
-      padding: [0, 4, 8, 12, 16, 24],
-      fontSize: [12, 14, 16, 20, 24],
-      density: ['compact', 'comfortable'],
-    },
-    registry: Object.values(componentRegistry).map(({ id, allowedProps, slots }) => ({
-      id,
-      allowedProps,
-      slots,
-    })),
-  };
-  const prompt = [
-    'Produce one Codesign visual-autocomplete candidate batch for the supplied bounded scene.',
-    'Return at least three individually useful atomic changes. Use only create and style operations.',
-    'Every ID you create must begin with the supplied idNamespace followed by a hyphen.',
-    'Observe only observationScope.nodeIds; mutate only mutationScopeIds; never target pinnedNodeIds.',
-    'Created nodes must be direct children of a mutation-scope node and remain on activeScreenId.',
-    'Use objective observations and contextual facts. Phrase inference as a Codesign proposal, never as discovered user intent.',
-    'Every evidence ID must be observable and every affected ID must be a mutation target or a created node.',
-    'Preserve each pinnedAtomicChanges entry exactly once with preservedFromAtomicChangeId set to its source ID; use fresh namespaced IDs where required.',
-    'Use only the registered components, prop values, and style values supplied below. Do not use tools.',
-    JSON.stringify(safeContext),
-  ].join('\n');
-
-  try {
-    // Browser metadata is intentionally not a transport input. A future trusted server-side
-    // snapshot resolver may pass a v2 `image` URL or `localImage` path to this method.
-    const text = await getCodexClient(commandSetting(), model).proposeCandidate(
-      prompt,
-      request.signal,
+    const response = await withTrustedVisualSnapshot(
+      { mimeType: input.visualSnapshot.mimeType, base64: input.visualSnapshot.data },
+      async (trusted, generationSignal) => {
+        if (
+          trusted.width !== input.visualSnapshot?.width ||
+          trusted.height !== input.visualSnapshot?.height
+        )
+          throw new VisualSnapshotError(
+            'Visual snapshot dimensions do not match the uploaded image',
+            'invalid-dimensions',
+          );
+        const context = sceneContext(input, trusted);
+        const run = runMetadata(input, context, 'codex', settings, runId, createdAt, trusted);
+        const relativeWire = await createProvider(settings).generate({
+          request: input,
+          run,
+          prompt: generationPrompt(input, run, context),
+          signal: generationSignal,
+          visualInput: { type: 'localImage', path: trusted.path, detail: 'original' },
+          model: settings.model,
+          effort: settings.effort,
+        });
+        const wire = candidateToDocumentCoordinates(relativeWire, context.coordinateSpace.origin);
+        return {
+          run,
+          candidates: [normalizeCandidateBatch(input, run, wire)],
+          fallback: false,
+          supportedActions: SUPPORTED_ACTIONS,
+          visualInputUsed: true,
+        } satisfies CandidateGenerationResponse;
+      },
+      { signal: request.signal },
     );
-    const candidate = normalizeCandidateBatch(input, run, parseJson(text));
-    const response: CandidateGenerationResponse = {
-      run,
-      candidates: [candidate],
-      fallback: false,
-      supportedActions: SUPPORTED_ACTIONS,
-      visualInputUsed: false,
-    };
     return json(response);
   } catch (cause) {
-    const reason = cause instanceof Error ? cause.message : 'unknown protocol error';
-    console.warn('[codesign] Codex candidate fell back:', reason);
-    try {
-      return json(
-        localResponse(
-          input,
-          runId,
-          createdAt,
-          true,
-          'Codex was unavailable or returned an invalid candidate; deterministic local generation is active.',
-        ),
-      );
-    } catch (fallbackCause) {
-      const message =
-        fallbackCause instanceof Error ? fallbackCause.message : 'Candidate generation failed';
-      return json({ message }, { status: 500 });
+    const settings = (() => {
+      try {
+        return providerSettings();
+      } catch {
+        return undefined;
+      }
+    })();
+    if (
+      settings?.provider === 'codex' &&
+      env.CODESIGN_ALLOW_LOCAL_FALLBACK === 'true' &&
+      !(cause instanceof VisualSnapshotError) &&
+      !(cause instanceof CandidateValidationError) &&
+      asProviderFailure(cause).category !== 'cancelled'
+    ) {
+      try {
+        const fallbackRunId = `generation-${randomUUID()}`;
+        const fallbackCreatedAt = Date.now();
+        if (input.visualSnapshot) {
+          const fallback = await withTrustedVisualSnapshot(
+            { mimeType: input.visualSnapshot.mimeType, base64: input.visualSnapshot.data },
+            async (trusted) => {
+              if (
+                trusted.width !== input.visualSnapshot?.width ||
+                trusted.height !== input.visualSnapshot?.height
+              )
+                throw new VisualSnapshotError(
+                  'Visual snapshot dimensions do not match the uploaded image',
+                  'invalid-dimensions',
+                );
+              const context = sceneContext(input, trusted);
+              return generateLocal(
+                input,
+                context,
+                settings,
+                fallbackRunId,
+                fallbackCreatedAt,
+                trusted,
+                true,
+                'Codex was unavailable; explicit local fallback is active.',
+              );
+            },
+            { signal: request.signal },
+          );
+          return json(fallback);
+        }
+        const context = sceneContext(input);
+        return json(
+          await generateLocal(
+            input,
+            context,
+            settings,
+            fallbackRunId,
+            fallbackCreatedAt,
+            undefined,
+            true,
+            'Codex was unavailable; explicit local fallback is active.',
+          ),
+        );
+      } catch {
+        throw new ProviderFailure('protocol-failure');
+      }
     }
+    return errorResponse(cause);
   }
 }

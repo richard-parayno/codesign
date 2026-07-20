@@ -15,7 +15,6 @@ import {
   type DesignOperation,
   type Fidelity,
   type GenerationRun,
-  type ObservationScope,
 } from '$lib/model/types';
 import { z } from 'zod';
 
@@ -23,7 +22,6 @@ export const CANDIDATE_SCHEMA_VERSION = 'codesign-candidate-batch-v1';
 export const PROMPT_VERSION = 'codesign-complete-v1';
 export const SUPPORTED_ACTIONS = ['complete'] as const satisfies readonly CodesignAction[];
 
-const MAX_CONTEXT_NODES = 250;
 const MAX_KNOWN_NODE_IDS = 5_000;
 const componentIds = [
   'Card',
@@ -97,9 +95,42 @@ const styleOperationSchema = z.object({
   patch: nullableStyleSchema,
 });
 
+const updateNodeOperationSchema = z.object({
+  id: z.string().min(1),
+  type: z.literal('update-node'),
+  actor: z.literal('agent'),
+  targetIds: z.array(z.string()).min(1).max(20),
+  patch: z
+    .object({
+      name: z.string().min(1).max(120).optional(),
+      text: z.string().max(10_000).optional(),
+    })
+    .refine((patch) => Object.keys(patch).length > 0),
+});
+
+const moveOperationSchema = z.object({
+  id: z.string().min(1),
+  type: z.literal('move'),
+  actor: z.literal('agent'),
+  targetIds: z.array(z.string()).min(1).max(20),
+  dx: z.number().finite(),
+  dy: z.number().finite(),
+});
+
+const resizeOperationSchema = z.object({
+  id: z.string().min(1),
+  type: z.literal('resize'),
+  actor: z.literal('agent'),
+  targetId: z.string().min(1),
+  bounds: boundsSchema,
+});
+
 const wireOperationSchema = z.discriminatedUnion('type', [
   createOperationSchema,
   styleOperationSchema,
+  updateNodeOperationSchema,
+  moveOperationSchema,
+  resizeOperationSchema,
 ]);
 
 const traceSchema = z.object({
@@ -131,27 +162,73 @@ export const agentCandidateBatchSchema = z.object({
 
 export type AgentCandidateBatch = z.infer<typeof agentCandidateBatchSchema>;
 
+/** Converts model-authored observation-root-relative bounds back to document coordinates. */
+export function candidateToDocumentCoordinates(
+  value: AgentCandidateBatch,
+  origin: { x: number; y: number },
+): AgentCandidateBatch {
+  const candidate = structuredClone(value);
+  for (const change of candidate.candidate.atomicChanges) {
+    const operation = change.operation;
+    if (operation.type === 'create' || operation.type === 'resize') {
+      const bounds = operation.type === 'create' ? operation.node.bounds : operation.bounds;
+      bounds.x += origin.x;
+      bounds.y += origin.y;
+    }
+  }
+  return candidate;
+}
+
+/** Converts a persisted document-coordinate operation into the model's scene-relative space. */
+export function operationToSceneCoordinates(
+  value: DesignOperation,
+  origin: { x: number; y: number },
+): DesignOperation {
+  const operation = structuredClone(value);
+  if (operation.type === 'create' || operation.type === 'resize') {
+    const bounds = operation.type === 'create' ? operation.node.bounds : operation.bounds;
+    bounds.x -= origin.x;
+    bounds.y -= origin.y;
+  }
+  return operation;
+}
+
 const visualSnapshotSchema = z.object({
   id: z.string().min(1).max(160),
   mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']),
-  width: z.number().int().positive().max(16_384),
-  height: z.number().int().positive().max(16_384),
-  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  width: z.number().int().positive().max(4_096),
+  height: z.number().int().positive().max(4_096),
+  data: z.string().min(16).max(12_000_000),
 });
 
 export const generationRequestSchema = z.object({
+  projectId: z.string().min(1).max(160).default('local-project'),
   action: z.enum(['complete', 'refine', 'vary', 'resolve']),
   requestedFidelity: fidelitySchema,
-  observationScope: observationScopeSchema.extend({ nodeIds: z.array(z.string()).min(1).max(250) }),
-  mutationScopeIds: z.array(z.string()).min(1).max(20),
+  target: z.object({
+    focusNodeIds: z.array(z.string()).min(1).max(20),
+    observationScope: observationScopeSchema.extend({
+      nodeIds: z.array(z.string()).min(1).max(MAX_KNOWN_NODE_IDS),
+    }),
+    mutationScope: z.object({
+      existingNodeIds: z.array(z.string()).max(20),
+      insertionParentIds: z.array(z.string()).max(20),
+      regions: z.array(boundsSchema).min(1).max(20),
+      allowCreate: z.boolean(),
+    }),
+  }),
   pinnedNodeIds: z.array(z.string()).max(250),
   pinnedAtomicChanges: z.array(atomicChangeSchema).max(6).default([]),
   visualSnapshot: visualSnapshotSchema.optional(),
   document: z.object({
     currentRevisionId: z.string().min(1),
     activeScreenId: z.string().min(1),
+    screenName: z.string().min(1).max(120).default('Screen'),
+    screenRootIds: z.array(z.string()).max(MAX_KNOWN_NODE_IDS).default([]),
     knownNodeIds: z.array(z.string()).max(MAX_KNOWN_NODE_IDS),
     nodes: z.record(z.string(), nodeSchema),
+    frameFidelity: z.record(z.string(), fidelitySchema).default({}),
+    nodeFidelityOverrides: z.record(z.string(), fidelitySchema).default({}),
   }),
 });
 
@@ -162,6 +239,18 @@ export class CandidateValidationError extends Error {}
 type BackendMetadata = {
   backend: 'local' | 'codex';
   model?: string;
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  fallback?: boolean;
+  contextNodeIds?: string[];
+  contextRootId?: string;
+  contextSummarized?: boolean;
+  contextSchemaVersion?: string;
+  trustedSnapshot?: {
+    mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+    width: number;
+    height: number;
+    sha256: string;
+  };
   runId: string;
   createdAt: number;
 };
@@ -211,28 +300,101 @@ function assertStyleTokens(style: Partial<DesignNode['style']>) {
     throw new CandidateValidationError('Agent style uses an unregistered font-size value');
 }
 
+function boundsInsideRegion(bounds: DesignNode['bounds'], request: GenerationRequest) {
+  return request.target.mutationScope.regions.some(
+    (region) =>
+      bounds.x >= region.x &&
+      bounds.y >= region.y &&
+      bounds.x + bounds.width <= region.x + region.width &&
+      bounds.y + bounds.height <= region.y + region.height,
+  );
+}
+
 function normalizeOperation(
   operation: z.infer<typeof wireOperationSchema>,
   request: GenerationRequest,
   runId: string,
+  simulation: DesignDocument,
+  createdBy: ReadonlyMap<string, string>,
+  dependencyIds: string[],
 ): DesignOperation {
   assertNamespaced(operation.id, runId, 'Operation ID');
+  const existingMutable = new Set(request.target.mutationScope.existingNodeIds);
+  const assertMutableTargets = (ids: string[]) => {
+    if (ids.some((id) => !existingMutable.has(id) && !createdBy.has(id)))
+      throw new CandidateValidationError(`${operation.type} operation exceeds the mutation scope`);
+    if (ids.some((id) => request.pinnedNodeIds.includes(id)))
+      throw new CandidateValidationError('Pinned nodes cannot be mutation targets');
+    if (
+      ids.some((id) => {
+        const creationChangeId = createdBy.get(id);
+        return creationChangeId && !dependencyIds.includes(creationChangeId);
+      })
+    )
+      throw new CandidateValidationError(
+        'Mutation of a generated node must depend on its creation change',
+      );
+  };
   if (operation.type === 'style') {
     const patch = compactStyle(operation.patch);
     assertStyleTokens(patch);
-    if (operation.targetIds.some((id) => !request.mutationScopeIds.includes(id)))
-      throw new CandidateValidationError('Style operation exceeds the mutation scope');
+    assertMutableTargets(operation.targetIds);
     return { ...operation, patch } as DesignOperation;
+  }
+  if (operation.type === 'update-node') {
+    assertMutableTargets(operation.targetIds);
+    return operation;
+  }
+  if (operation.type === 'move') {
+    assertMutableTargets(operation.targetIds);
+    for (const id of operation.targetIds) {
+      const node = simulation.nodes[id];
+      if (!node) throw new CandidateValidationError('Move target does not exist');
+      const moved = {
+        ...node.bounds,
+        x: node.bounds.x + operation.dx,
+        y: node.bounds.y + operation.dy,
+      };
+      if (!boundsInsideRegion(moved, request))
+        throw new CandidateValidationError('Move operation exceeds the editable region');
+    }
+    return operation;
+  }
+  if (operation.type === 'resize') {
+    assertMutableTargets([operation.targetId]);
+    if (!boundsInsideRegion(operation.bounds, request))
+      throw new CandidateValidationError('Resize operation exceeds the editable region');
+    return operation;
   }
 
   const source = operation.node;
+  if (!request.target.mutationScope.allowCreate)
+    throw new CandidateValidationError('Creation is disabled for this generation target');
   assertNamespaced(source.id, runId, 'Created node ID');
-  if (request.document.knownNodeIds.includes(source.id))
+  if (request.document.knownNodeIds.includes(source.id) || createdBy.has(source.id))
     throw new CandidateValidationError('Created node ID collides with the document');
   if (source.screenId !== request.document.activeScreenId)
     throw new CandidateValidationError('Created node must stay on the active screen');
-  if (!source.parentId || !request.mutationScopeIds.includes(source.parentId))
-    throw new CandidateValidationError('Created node must be placed inside the mutation scope');
+  if (source.parentId) {
+    const parentCreation = createdBy.get(source.parentId);
+    if (parentCreation && !dependencyIds.includes(parentCreation))
+      throw new CandidateValidationError('Nested creation must depend on its parent creation');
+    if (
+      !parentCreation &&
+      !request.target.mutationScope.insertionParentIds.includes(source.parentId)
+    )
+      throw new CandidateValidationError('Created node uses an unsupported insertion parent');
+    const parent = simulation.nodes[source.parentId];
+    if (!parent || (parent.kind !== 'frame' && parent.kind !== 'group'))
+      throw new CandidateValidationError('Created node parent must be a frame or group');
+  } else if (
+    request.target.mutationScope.insertionParentIds.length > 0 ||
+    request.target.observationScope.kind !== 'screen'
+  ) {
+    throw new CandidateValidationError('Created root is not allowed for this target');
+  }
+  if (!boundsInsideRegion(source.bounds, request))
+    throw new CandidateValidationError('Created node exceeds the editable region');
   if (source.childIds.length)
     throw new CandidateValidationError('Created nodes cannot claim unstaged children');
   assertStyleTokens({ ...source.style, density: source.style.density ?? undefined });
@@ -253,7 +415,7 @@ function normalizeOperation(
     name: source.name,
     kind: source.kind,
     screenId: source.screenId,
-    parentId: source.parentId,
+    parentId: source.parentId ?? undefined,
     childIds: [],
     bounds: source.bounds,
     style: { ...source.style, density: source.style.density ?? undefined },
@@ -270,9 +432,8 @@ function simulationDocument(request: GenerationRequest) {
   document.screens[0] = {
     ...document.screens[0],
     id: request.document.activeScreenId,
-    rootIds: Object.values(request.document.nodes)
-      .filter((node) => !node.parentId)
-      .map((node) => node.id),
+    name: request.document.screenName,
+    rootIds: request.document.screenRootIds.filter((id) => request.document.nodes[id]),
   };
   document.branches[0].screenIds = [request.document.activeScreenId];
   document.nodes = structuredClone(request.document.nodes);
@@ -281,12 +442,14 @@ function simulationDocument(request: GenerationRequest) {
 }
 
 function stateForOperation(document: DesignDocument, operation: DesignOperation) {
-  if (operation.type === 'style')
+  if (['style', 'update-node', 'move'].includes(operation.type) && 'targetIds' in operation)
     return {
       nodes: Object.fromEntries(
         operation.targetIds.map((id) => [id, structuredClone(document.nodes[id])]),
       ),
     };
+  if (operation.type === 'resize')
+    return { nodes: { [operation.targetId]: structuredClone(document.nodes[operation.targetId]) } };
   if (operation.type === 'create') {
     const nodes: Record<string, DesignNode | null> = { [operation.node.id]: null };
     if (operation.node.parentId)
@@ -297,12 +460,14 @@ function stateForOperation(document: DesignDocument, operation: DesignOperation)
 }
 
 function afterStateForOperation(document: DesignDocument, operation: DesignOperation) {
-  if (operation.type === 'style')
+  if (['style', 'update-node', 'move'].includes(operation.type) && 'targetIds' in operation)
     return {
       nodes: Object.fromEntries(
         operation.targetIds.map((id) => [id, structuredClone(document.nodes[id])]),
       ),
     };
+  if (operation.type === 'resize')
+    return { nodes: { [operation.targetId]: structuredClone(document.nodes[operation.targetId]) } };
   if (operation.type === 'create') {
     const nodes: Record<string, DesignNode | null> = {
       [operation.node.id]: structuredClone(document.nodes[operation.node.id]),
@@ -361,23 +526,33 @@ export function createGenerationRun(
     id: metadata.runId,
     sourceRevisionId: request.document.currentRevisionId,
     action: request.action,
-    observationScope: request.observationScope,
-    mutationScopeIds: request.mutationScopeIds,
+    target: request.target,
     pinnedNodeIds: request.pinnedNodeIds,
     requestedFidelity: request.requestedFidelity,
     contextSnapshotId: request.visualSnapshot?.id,
+    contextNodeIds: metadata.contextNodeIds ?? request.target.observationScope.nodeIds,
+    contextRootId: metadata.contextRootId ?? request.target.observationScope.rootId,
+    contextSummarized: metadata.contextSummarized ?? false,
+    snapshot: metadata.trustedSnapshot,
     candidateIds: [],
     backend: metadata.backend,
+    provider: metadata.backend,
     model: metadata.model,
+    reasoningEffort: metadata.reasoningEffort,
+    fallback: metadata.fallback ?? false,
     promptVersion: PROMPT_VERSION,
     schemaVersion: CANDIDATE_SCHEMA_VERSION,
+    contextSchemaVersion: metadata.contextSchemaVersion ?? 'codesign-scene-context-v1',
     createdAt: metadata.createdAt,
   };
 }
 
 export function validateGenerationRequest(request: GenerationRequest) {
-  unique(request.observationScope.nodeIds, 'Observation scope IDs');
-  unique(request.mutationScopeIds, 'Mutation scope IDs');
+  const target = request.target;
+  unique(target.focusNodeIds, 'Focus node IDs');
+  unique(target.observationScope.nodeIds, 'Observation scope IDs');
+  unique(target.mutationScope.existingNodeIds, 'Existing mutation IDs');
+  unique(target.mutationScope.insertionParentIds, 'Insertion parent IDs');
   unique(request.pinnedNodeIds, 'Pinned node IDs');
   unique(
     request.pinnedAtomicChanges.map((change) => change.id),
@@ -386,45 +561,70 @@ export function validateGenerationRequest(request: GenerationRequest) {
   unique(request.document.knownNodeIds, 'Known node IDs');
   if (!SUPPORTED_ACTIONS.includes(request.action as (typeof SUPPORTED_ACTIONS)[number]))
     throw new CandidateValidationError(`${request.action} is not available in this build`);
-  if (Object.keys(request.document.nodes).length > MAX_CONTEXT_NODES)
-    throw new CandidateValidationError('Observation context is too large');
+  if (Object.keys(request.document.nodes).length > MAX_KNOWN_NODE_IDS)
+    throw new CandidateValidationError('Observation context exceeds the supported bound');
   for (const [id, node] of Object.entries(request.document.nodes)) {
     if (id !== node.id)
       throw new CandidateValidationError('Context node key does not match its ID');
     if (!request.document.knownNodeIds.includes(id))
       throw new CandidateValidationError('Context contains an unknown document ID');
   }
-  if (request.observationScope.nodeIds.some((id) => !request.document.nodes[id]))
+  if (target.observationScope.nodeIds.some((id) => !request.document.nodes[id]))
     throw new CandidateValidationError('Observation scope is missing from the document slice');
-  if (request.mutationScopeIds.some((id) => !request.observationScope.nodeIds.includes(id)))
-    throw new CandidateValidationError('Mutation scope must be observable');
-  if (request.mutationScopeIds.some((id) => !request.document.nodes[id]))
+  if (target.focusNodeIds.some((id) => !target.observationScope.nodeIds.includes(id)))
+    throw new CandidateValidationError('Focus must be observable');
+  if (target.focusNodeIds.some((id) => !request.document.nodes[id]))
+    throw new CandidateValidationError('Focus is missing from the document slice');
+  if (
+    target.mutationScope.existingNodeIds.some((id) => !target.observationScope.nodeIds.includes(id))
+  )
+    throw new CandidateValidationError('Existing mutation scope must be observable');
+  if (target.mutationScope.existingNodeIds.some((id) => !request.document.nodes[id]))
     throw new CandidateValidationError('Mutation scope is missing from the document slice');
   if (
-    request.mutationScopeIds.some(
+    target.mutationScope.existingNodeIds.some(
       (id) => request.document.nodes[id].screenId !== request.document.activeScreenId,
     )
   )
     throw new CandidateValidationError('Mutation scope must stay on the active screen');
   if (request.pinnedNodeIds.some((id) => !request.document.knownNodeIds.includes(id)))
     throw new CandidateValidationError('Pinned scope contains an unknown node');
-  if (request.mutationScopeIds.some((id) => request.pinnedNodeIds.includes(id)))
+  if (target.mutationScope.existingNodeIds.some((id) => request.pinnedNodeIds.includes(id)))
     throw new CandidateValidationError('Pinned nodes cannot be mutation targets');
+  for (const parentId of target.mutationScope.insertionParentIds) {
+    const parent = request.document.nodes[parentId];
+    if (!parent || !target.observationScope.nodeIds.includes(parentId))
+      throw new CandidateValidationError('Insertion parent must be observable');
+    if (parent.kind !== 'frame' && parent.kind !== 'group')
+      throw new CandidateValidationError('Insertion parent must be a frame or group');
+    if (request.pinnedNodeIds.includes(parentId))
+      throw new CandidateValidationError('Pinned nodes cannot be insertion parents');
+  }
   for (const change of request.pinnedAtomicChanges) {
     if (change.operation.actor !== 'agent')
       throw new CandidateValidationError('Pinned atomic changes must be agent-authored');
     if (!['create', 'style'].includes(change.operation.type))
       throw new CandidateValidationError('Pinned atomic change uses an unsupported operation');
-    if (change.trace.evidenceNodeIds.some((id) => !request.observationScope.nodeIds.includes(id)))
+    if (change.trace.evidenceNodeIds.some((id) => !target.observationScope.nodeIds.includes(id)))
       throw new CandidateValidationError('Pinned atomic evidence exceeds the observation scope');
   }
+  const pinnedChangeIds = new Set(request.pinnedAtomicChanges.map((change) => change.id));
+  if (
+    request.pinnedAtomicChanges.some((change) =>
+      change.dependencyIds.some((id) => !pinnedChangeIds.has(id)),
+    )
+  )
+    throw new CandidateValidationError('Pinned atomic changes must include their dependencies');
 }
 
-function stableOperationSignature(operation: DesignOperation) {
+function stableOperationSignature(
+  operation: DesignOperation,
+  nodeIdRemap: ReadonlyMap<string, string> = new Map(),
+) {
   if (operation.type === 'style')
     return JSON.stringify({
       type: operation.type,
-      targetIds: operation.targetIds,
+      targetIds: operation.targetIds.map((id) => nodeIdRemap.get(id) ?? id),
       patch: operation.patch,
     });
   if (operation.type === 'create') {
@@ -435,7 +635,7 @@ function stableOperationSignature(operation: DesignOperation) {
         name: node.name,
         kind: node.kind,
         screenId: node.screenId,
-        parentId: node.parentId,
+        parentId: node.parentId ? (nodeIdRemap.get(node.parentId) ?? node.parentId) : node.parentId,
         bounds: node.bounds,
         style: node.style,
         text: node.text,
@@ -491,6 +691,16 @@ export function normalizeCandidateBatch(
   let simulation = simulationDocument(request);
   const changes: AtomicChange[] = [];
   const preserved = new Map<string, DesignOperation>();
+  const createdBy = new Map<string, string>();
+  const preservedNodeRemap = new Map<string, string>();
+  for (const wireChange of wireChanges) {
+    if (!wireChange.preservedFromAtomicChangeId || wireChange.operation.type !== 'create') continue;
+    const source = request.pinnedAtomicChanges.find(
+      (change) => change.id === wireChange.preservedFromAtomicChangeId,
+    );
+    if (source?.operation.type === 'create')
+      preservedNodeRemap.set(source.operation.node.id, wireChange.operation.node.id);
+  }
   for (const wireChange of wireChanges) {
     assertNamespaced(wireChange.id, run.id, 'Atomic change ID');
     if (wireChange.candidateId !== payload.candidate.id)
@@ -499,10 +709,19 @@ export function normalizeCandidateBatch(
     unique(wireChange.trace.evidenceNodeIds, 'Trace evidence IDs');
     unique(wireChange.trace.affectedNodeIds, 'Trace affected IDs');
     if (
-      wireChange.trace.evidenceNodeIds.some((id) => !request.observationScope.nodeIds.includes(id))
+      wireChange.trace.evidenceNodeIds.some(
+        (id) => !request.target.observationScope.nodeIds.includes(id),
+      )
     )
       throw new CandidateValidationError('Trace evidence exceeds the observation scope');
-    const operation = normalizeOperation(wireChange.operation, request, run.id);
+    const operation = normalizeOperation(
+      wireChange.operation,
+      request,
+      run.id,
+      simulation,
+      createdBy,
+      wireChange.dependencyIds,
+    );
     if (wireChange.preservedFromAtomicChangeId) {
       const source = request.pinnedAtomicChanges.find(
         (change) => change.id === wireChange.preservedFromAtomicChangeId,
@@ -510,7 +729,10 @@ export function normalizeCandidateBatch(
       if (!source) throw new CandidateValidationError('Candidate claims an unknown pinned change');
       if (preserved.has(source.id))
         throw new CandidateValidationError('Pinned atomic change was duplicated');
-      if (stableOperationSignature(source.operation) !== stableOperationSignature(operation))
+      if (
+        stableOperationSignature(source.operation, preservedNodeRemap) !==
+        stableOperationSignature(operation)
+      )
         throw new CandidateValidationError('Pinned atomic operation was not preserved');
       if (
         stableTraceSignature(source) !==
@@ -528,14 +750,17 @@ export function normalizeCandidateBatch(
     const operationAffected =
       operation.type === 'create'
         ? [operation.node.id]
-        : operation.type === 'style'
+        : 'targetIds' in operation
           ? operation.targetIds
-          : [];
+          : 'targetId' in operation
+            ? [operation.targetId]
+            : [];
     if (operationAffected.some((id) => !wireChange.trace.affectedNodeIds.includes(id)))
       throw new CandidateValidationError('Trace does not identify every affected node');
     if (
       wireChange.trace.affectedNodeIds.some(
-        (id) => !request.mutationScopeIds.includes(id) && !createdIds.includes(id),
+        (id) =>
+          !request.target.mutationScope.existingNodeIds.includes(id) && !createdIds.includes(id),
       )
     )
       throw new CandidateValidationError('Trace affected IDs exceed the mutation scope');
@@ -548,6 +773,7 @@ export function normalizeCandidateBatch(
       );
     }
     const after = afterStateForOperation(simulation, operation);
+    if (operation.type === 'create') createdBy.set(operation.node.id, wireChange.id);
     changes.push({
       id: wireChange.id,
       candidateId: wireChange.candidateId,
@@ -591,10 +817,15 @@ const stringEnum = (values: readonly string[]) => ({ type: 'string', enum: value
 const styleProperties = {
   fill: nullable({ type: 'string' }),
   stroke: nullable({ type: 'string' }),
+  strokeWidth: nullable({ type: 'number', minimum: 0 }),
+  opacity: nullable({ type: 'number', minimum: 0, maximum: 1 }),
   radius: nullable({ type: 'number', minimum: 0 }),
   padding: nullable({ type: 'number', minimum: 0 }),
   textColor: nullable({ type: 'string' }),
   fontSize: nullable({ type: 'number', exclusiveMinimum: 0 }),
+  fontWeight: nullable({ type: 'number', minimum: 1, maximum: 1000 }),
+  textAlign: nullable(stringEnum(['left', 'center', 'right'])),
+  lineHeight: nullable({ type: 'number', exclusiveMinimum: 0 }),
   density: nullable(stringEnum(['compact', 'comfortable'])),
 };
 const propsProperties = {
@@ -676,6 +907,37 @@ export const candidateBatchOutputSchema: CandidateOutputSchema = strictObject({
               targetIds: { type: 'array', minItems: 1, items: { type: 'string' } },
               patch: strictObject(styleProperties),
             }),
+            strictObject({
+              id: { type: 'string' },
+              type: { type: 'string', enum: ['update-node'] },
+              actor: { type: 'string', enum: ['agent'] },
+              targetIds: { type: 'array', minItems: 1, items: { type: 'string' } },
+              patch: {
+                type: 'object',
+                additionalProperties: false,
+                properties: { name: { type: 'string' }, text: { type: 'string' } },
+              },
+            }),
+            strictObject({
+              id: { type: 'string' },
+              type: { type: 'string', enum: ['move'] },
+              actor: { type: 'string', enum: ['agent'] },
+              targetIds: { type: 'array', minItems: 1, items: { type: 'string' } },
+              dx: { type: 'number' },
+              dy: { type: 'number' },
+            }),
+            strictObject({
+              id: { type: 'string' },
+              type: { type: 'string', enum: ['resize'] },
+              actor: { type: 'string', enum: ['agent'] },
+              targetId: { type: 'string' },
+              bounds: strictObject({
+                x: { type: 'number' },
+                y: { type: 'number' },
+                width: { type: 'number', exclusiveMinimum: 0 },
+                height: { type: 'number', exclusiveMinimum: 0 },
+              }),
+            }),
           ],
         },
         dependencyIds: { type: 'array', items: { type: 'string' } },
@@ -691,8 +953,7 @@ export function safeAgentContext(request: GenerationRequest, run: GenerationRun)
     requestedFidelity: run.requestedFidelity,
     sourceRevisionId: run.sourceRevisionId,
     idNamespace: run.id,
-    observationScope: run.observationScope,
-    mutationScopeIds: run.mutationScopeIds,
+    target: run.target,
     pinnedNodeIds: run.pinnedNodeIds,
     pinnedAtomicChanges: request.pinnedAtomicChanges.map((change) => ({
       id: change.id,
@@ -700,7 +961,16 @@ export function safeAgentContext(request: GenerationRequest, run: GenerationRun)
       dependencyIds: change.dependencyIds,
       trace: change.trace,
     })),
-    visualSnapshot: request.visualSnapshot,
+    visualSnapshot: run.snapshot
+      ? { id: run.contextSnapshotId, ...run.snapshot }
+      : request.visualSnapshot
+        ? {
+            id: request.visualSnapshot.id,
+            mimeType: request.visualSnapshot.mimeType,
+            width: request.visualSnapshot.width,
+            height: request.visualSnapshot.height,
+          }
+        : undefined,
     activeScreenId: request.document.activeScreenId,
     nodes: request.document.nodes,
   };

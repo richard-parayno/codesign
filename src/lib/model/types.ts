@@ -10,7 +10,7 @@ export type Agency = 'protect' | 'guide' | 'explore';
 export type Fidelity = 'structure' | 'wireframe' | 'component' | 'visual' | 'production';
 export type Origin = 'human' | 'ai' | 'mixed';
 export type CodesignAction = 'complete' | 'refine' | 'vary' | 'resolve';
-export type ScopeKind = 'selection' | 'parent' | 'frame' | 'page';
+export type ScopeKind = 'selection' | 'parent' | 'frame' | 'screen';
 export type CandidateStatus = 'candidate' | 'partially-accepted' | 'accepted' | 'rejected';
 export type AtomicDecision = 'pending' | 'accepted' | 'rejected';
 
@@ -183,7 +183,18 @@ export type Representation = {
   revisionId: string;
   rootNodeIds: string[];
 };
-export type ObservationScope = { kind: ScopeKind; nodeIds: string[] };
+export type ObservationScope = { kind: ScopeKind; rootId?: string; nodeIds: string[] };
+export type MutationScope = {
+  existingNodeIds: string[];
+  insertionParentIds: string[];
+  regions: Bounds[];
+  allowCreate: boolean;
+};
+export type GenerationTarget = {
+  focusNodeIds: string[];
+  observationScope: ObservationScope;
+  mutationScope: MutationScope;
+};
 export type DerivationTrace = {
   observation: string;
   context: string;
@@ -211,16 +222,28 @@ export type GenerationRun = {
   id: string;
   sourceRevisionId: string;
   action: CodesignAction;
-  observationScope: ObservationScope;
-  mutationScopeIds: string[];
+  target: GenerationTarget;
   pinnedNodeIds: string[];
   requestedFidelity: Fidelity;
   contextSnapshotId?: string;
+  contextNodeIds: string[];
+  contextRootId?: string;
+  contextSummarized: boolean;
+  snapshot?: {
+    mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+    width: number;
+    height: number;
+    sha256: string;
+  };
   candidateIds: string[];
   backend: 'local' | 'codex';
+  provider: 'local' | 'codex';
   model?: string;
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  fallback: boolean;
   promptVersion: string;
   schemaVersion: string;
+  contextSchemaVersion: string;
   createdAt: number;
 };
 export type CandidateRevision = {
@@ -241,6 +264,8 @@ export type ProcessEventType =
   | 'manual-operation'
   | 'checkpoint-created'
   | 'generation-requested'
+  | 'generation-failed'
+  | 'generation-cancelled'
   | 'candidates-generated'
   | 'candidate-viewed'
   | 'candidate-rejected'
@@ -519,9 +544,21 @@ export const operationSchema: z.ZodType<DesignOperation> = z.discriminatedUnion(
 ]);
 
 export const observationScopeSchema = z.object({
-  kind: z.enum(['selection', 'parent', 'frame', 'page']),
+  kind: z.enum(['selection', 'parent', 'frame', 'screen']),
+  rootId: z.string().min(1).optional(),
   nodeIds: z.array(z.string()).min(1),
 }) satisfies z.ZodType<ObservationScope>;
+export const mutationScopeSchema: z.ZodType<MutationScope> = z.object({
+  existingNodeIds: z.array(z.string()),
+  insertionParentIds: z.array(z.string()),
+  regions: z.array(boundsSchema).min(1),
+  allowCreate: z.boolean(),
+});
+export const generationTargetSchema: z.ZodType<GenerationTarget> = z.object({
+  focusNodeIds: z.array(z.string()).min(1),
+  observationScope: observationScopeSchema,
+  mutationScope: mutationScopeSchema,
+});
 export const derivationTraceSchema: z.ZodType<DerivationTrace> = z.object({
   observation: z.string().min(1).max(1000),
   context: z.string().min(1).max(1000),
@@ -549,16 +586,30 @@ export const generationRunSchema: z.ZodType<GenerationRun> = z.object({
   id: z.string().min(1),
   sourceRevisionId: z.string().min(1),
   action: z.enum(['complete', 'refine', 'vary', 'resolve']),
-  observationScope: observationScopeSchema,
-  mutationScopeIds: z.array(z.string()).min(1),
+  target: generationTargetSchema,
   pinnedNodeIds: z.array(z.string()),
   requestedFidelity: fidelitySchema,
   contextSnapshotId: z.string().optional(),
+  contextNodeIds: z.array(z.string()),
+  contextRootId: z.string().optional(),
+  contextSummarized: z.boolean(),
+  snapshot: z
+    .object({
+      mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']),
+      width: z.number().int().positive(),
+      height: z.number().int().positive(),
+      sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    })
+    .optional(),
   candidateIds: z.array(z.string()),
   backend: z.enum(['local', 'codex']),
+  provider: z.enum(['local', 'codex']),
   model: z.string().optional(),
+  reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']).optional(),
+  fallback: z.boolean(),
   promptVersion: z.string().min(1),
   schemaVersion: z.string().min(1),
+  contextSchemaVersion: z.string().min(1),
   createdAt: z.number().finite().nonnegative(),
 });
 export const candidateRevisionSchema: z.ZodType<CandidateRevision> = z.object({
@@ -581,6 +632,8 @@ export const processEventSchema: z.ZodType<ProcessEvent> = z.object({
     'manual-operation',
     'checkpoint-created',
     'generation-requested',
+    'generation-failed',
+    'generation-cancelled',
     'candidates-generated',
     'candidate-viewed',
     'candidate-rejected',

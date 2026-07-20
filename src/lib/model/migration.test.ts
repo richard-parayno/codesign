@@ -4,6 +4,7 @@ import {
   isLegacyDesignDocumentV1,
   migrateDocumentV1,
   migrateProjectEnvelopeV1,
+  recoverProjectEnvelopeV2,
 } from './migration';
 import { blankDocument, defaultStyle, type DesignNode, type LegacyDesignDocumentV1 } from './types';
 
@@ -102,6 +103,45 @@ describe('v1 to v2 migration', () => {
       { id: 'two', name: 'Two' },
     ]);
     expect(envelope.projects[0].document.currentRevisionId).toBe('revision-v1-4');
+  });
+
+  it('recovers generation runs written before focus and mutation scopes were separated', () => {
+    const document = migrateDocumentV1(legacyDocument(), 'malleable.projects.v1', 100);
+    (document.generationRuns as Record<string, unknown>)['legacy-run'] = {
+      id: 'legacy-run',
+      sourceRevisionId: document.currentRevisionId,
+      action: 'complete',
+      observationScope: { kind: 'page', nodeIds: ['frame', 'row'] },
+      mutationScopeIds: ['frame'],
+      pinnedNodeIds: [],
+      requestedFidelity: 'component',
+      candidateIds: [],
+      backend: 'local',
+      promptVersion: 'legacy-prompt',
+      schemaVersion: 'legacy-schema',
+      createdAt: 100,
+    };
+    const recovered = recoverProjectEnvelopeV2({
+      version: 2,
+      activeProjectId: 'project',
+      projects: [{ id: 'project', name: 'Project', document }],
+    });
+
+    expect(recovered).not.toBeNull();
+    expect(recovered?.projects[0].document.generationRuns['legacy-run']).toMatchObject({
+      target: {
+        focusNodeIds: ['frame'],
+        observationScope: { kind: 'screen', nodeIds: ['frame', 'row'] },
+        mutationScope: {
+          existingNodeIds: ['frame'],
+          insertionParentIds: ['frame'],
+          allowCreate: true,
+        },
+      },
+      provider: 'local',
+      contextSummarized: false,
+      fallback: false,
+    });
   });
 
   it('rejects structurally broken v1 documents before migration', () => {

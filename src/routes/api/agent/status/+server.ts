@@ -1,37 +1,25 @@
-import { env } from '$env/dynamic/private';
-import { json } from '@sveltejs/kit';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { createProvider, providerSettings } from '$lib/agent/providers';
+import { privateJson, providerError } from '../provider/_response.server';
 
-const run = promisify(execFile);
 export async function GET() {
-  const backend = env.CODESIGN_AGENT_BACKEND ?? env.MALLEABLE_AGENT_BACKEND ?? 'local';
-  const command = env.CODESIGN_CODEX_COMMAND ?? env.MALLEABLE_CODEX_COMMAND ?? 'codex';
-  if (backend !== 'codex')
-    return json({
-      backend: 'local',
-      available: true,
-      supportedActions: ['complete'],
-      message: 'Local deterministic visual completion ready',
-    });
   try {
-    await run(command, ['login', 'status'], {
-      timeout: 4_000,
-      env: process.env,
-    });
-    return json({
-      backend: 'codex',
-      available: true,
+    const settings = providerSettings();
+    const provider = createProvider(settings);
+    const status = await provider.status();
+    return privateJson({
+      backend: settings.provider,
+      available: status.available,
+      connected: status.connected,
+      status,
+      descriptor: provider.descriptor,
+      configuration:
+        settings.provider === 'codex'
+          ? { model: settings.model, effort: settings.effort, runtime: 'project-pinned' }
+          : null,
       supportedActions: ['complete'],
-      message: 'Codex CLI signed in through ChatGPT',
+      message: status.message,
     });
-  } catch {
-    return json({
-      backend: 'codex',
-      available: false,
-      supportedActions: ['complete'],
-      message:
-        'Codex is unavailable or signed out. Run devenv shell -- codex login; local fallback remains available.',
-    });
+  } catch (cause) {
+    return providerError(cause);
   }
 }

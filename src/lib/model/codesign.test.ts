@@ -59,14 +59,29 @@ function run(document: DesignDocument): GenerationRun {
     id: 'run-1',
     sourceRevisionId: document.currentRevisionId,
     action: 'complete',
-    observationScope: { kind: 'frame', nodeIds: ['frame'] },
-    mutationScopeIds: ['frame'],
+    target: {
+      focusNodeIds: ['frame'],
+      observationScope: { kind: 'frame', rootId: 'frame', nodeIds: ['frame'] },
+      mutationScope: {
+        existingNodeIds: ['frame'],
+        insertionParentIds: ['frame'],
+        regions: [{ ...document.nodes.frame.bounds }],
+        allowCreate: true,
+      },
+    },
     pinnedNodeIds: [],
     requestedFidelity: 'component',
+    contextNodeIds: ['frame'],
+    contextRootId: 'frame',
+    contextSummarized: false,
     candidateIds: [],
     backend: 'local',
+    provider: 'local',
+    reasoningEffort: 'high',
+    fallback: false,
     promptVersion: 'visual-autocomplete-v1',
     schemaVersion: '2',
+    contextSchemaVersion: 'codesign-scene-context-v1',
     createdAt: 10,
   };
 }
@@ -242,6 +257,33 @@ describe('Codesign candidate foundation', () => {
     expect(() => acceptCandidateChanges(changed, 'candidate-1', ['change-container'])).toThrow(
       'stale',
     );
+  });
+
+  it('revalidates creation permission and editable regions in the model', () => {
+    const { document } = stagedCandidate();
+    const candidate = document.candidates['candidate-1'];
+    const change = document.atomicChanges['change-container'];
+
+    const disallowed = structuredClone(document);
+    disallowed.generationRuns[candidate.generationRunId].target.mutationScope.allowCreate = false;
+    expect(() => acceptCandidateChanges(disallowed, candidate.id, [change.id])).toThrow(
+      'creation is disabled',
+    );
+
+    const outside = structuredClone(document);
+    const operation = outside.atomicChanges[change.id].operation;
+    if (operation.type !== 'create') throw new Error('Expected create operation');
+    operation.node.bounds.x = 700;
+    expect(() => acceptCandidateChanges(outside, candidate.id, [change.id])).toThrow(
+      'editable region',
+    );
+  });
+
+  it('rejects a pinned insertion parent when staging a generation run', () => {
+    const document = baseDocument();
+    expect(() =>
+      stageGenerationRun(document, { ...run(document), pinnedNodeIds: ['frame'] }),
+    ).toThrow('Pinned nodes cannot be insertion parents');
   });
 
   it('preserves rejected candidates and compares or replays without a model call', () => {

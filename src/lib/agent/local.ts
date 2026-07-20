@@ -57,7 +57,7 @@ export function localCandidateBatch(
   run: GenerationRun,
 ): AgentCandidateBatch {
   if (request.action !== 'complete') throw new Error(`${request.action} is not supported locally`);
-  const targets = request.mutationScopeIds
+  const targets = request.target.focusNodeIds
     .map((id) => request.document.nodes[id])
     .filter(Boolean)
     .sort(
@@ -66,6 +66,8 @@ export function localCandidateBatch(
     );
   const target = targets[0];
   if (!target) throw new Error('Select a visible region to complete');
+  const insertionParentId = request.target.mutationScope.insertionParentIds[0] ?? null;
+  const mayStyleTarget = request.target.mutationScope.existingNodeIds.includes(target.id);
 
   const candidateId = `${run.id}-candidate-1`;
   const styleChangeId = `${run.id}-change-container`;
@@ -82,7 +84,7 @@ export function localCandidateBatch(
     target.bounds.height - inset * 2 - headingHeight - actionHeight - 20,
   );
   const evidenceIds = [target.id];
-  const context = `The selected ${target.name} region is observed together with ${Math.max(0, request.observationScope.nodeIds.length - 1)} nearby node${request.observationScope.nodeIds.length === 2 ? '' : 's'} in the ${request.observationScope.kind} scope.`;
+  const context = `The selected ${target.name} region is observed together with ${Math.max(0, request.target.observationScope.nodeIds.length - 1)} scene node${request.target.observationScope.nodeIds.length === 2 ? '' : 's'} in the complete ${request.target.observationScope.kind} scope.`;
   const pinnedIds = new Map(
     request.pinnedAtomicChanges.map((change, index) => [
       change.id,
@@ -106,7 +108,7 @@ export function localCandidateBatch(
               id: `${run.id}-pinned-operation-${index + 1}`,
               type: 'style' as const,
               actor: 'agent' as const,
-              targetIds: operation.targetIds,
+              targetIds: operation.targetIds.map((id) => pinnedNodeIds.get(id) ?? id),
               patch: nullablePatch(operation.patch),
             }
           : operation.type === 'create'
@@ -119,7 +121,9 @@ export function localCandidateBatch(
                   name: operation.node.name,
                   kind: operation.node.kind,
                   screenId: operation.node.screenId,
-                  parentId: operation.node.parentId ?? null,
+                  parentId: operation.node.parentId
+                    ? (pinnedNodeIds.get(operation.node.parentId) ?? operation.node.parentId)
+                    : null,
                   childIds: [],
                   bounds: operation.node.bounds,
                   style: {
@@ -166,7 +170,9 @@ export function localCandidateBatch(
   );
   const containerDependencyIds = preservedContainerStyle
     ? [preservedContainerStyle.id]
-    : [styleChangeId];
+    : mayStyleTarget
+      ? [styleChangeId]
+      : [];
 
   const batch: AgentCandidateBatch = {
     schemaVersion: CANDIDATE_SCHEMA_VERSION,
@@ -175,7 +181,7 @@ export function localCandidateBatch(
       fidelity: request.requestedFidelity,
       atomicChanges: [
         ...pinnedChanges,
-        ...(preservedContainerStyle
+        ...(preservedContainerStyle || !mayStyleTarget
           ? []
           : [
               {
@@ -219,7 +225,7 @@ export function localCandidateBatch(
               name: 'Candidate heading',
               kind: 'text',
               screenId: target.screenId,
-              parentId: target.id,
+              parentId: insertionParentId,
               childIds: [],
               bounds: {
                 x: target.bounds.x + inset,
@@ -256,7 +262,7 @@ export function localCandidateBatch(
               name: 'Candidate content region',
               kind: 'rectangle',
               screenId: target.screenId,
-              parentId: target.id,
+              parentId: insertionParentId,
               childIds: [],
               bounds: {
                 x: target.bounds.x + inset,
@@ -298,7 +304,7 @@ export function localCandidateBatch(
                   ? 'instance'
                   : 'rectangle',
               screenId: target.screenId,
-              parentId: target.id,
+              parentId: insertionParentId,
               childIds: [],
               bounds: {
                 x: target.bounds.x + inset,

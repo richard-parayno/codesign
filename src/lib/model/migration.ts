@@ -455,3 +455,71 @@ export function isProjectEnvelopeV2(value: unknown): value is ProjectEnvelopeV2 
   }
   return typeof envelope.activeProjectId === 'string' && ids.has(envelope.activeProjectId);
 }
+
+/** Recovers generation runs written by earlier v2 builds before the scope model was split. */
+export function recoverProjectEnvelopeV2(value: unknown): ProjectEnvelopeV2 | null {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as Record<string, unknown>;
+  if (source.version !== 2 || !Array.isArray(source.projects)) return null;
+  const envelope = clone(source) as unknown as ProjectEnvelopeV2;
+  for (const project of envelope.projects ?? []) {
+    const document = project.document;
+    if (!document?.generationRuns || !document.revisions) continue;
+    for (const [runId, typedRun] of Object.entries(document.generationRuns)) {
+      const run = typedRun as unknown as Record<string, unknown>;
+      const sourceRevisionId = String(run.sourceRevisionId ?? '');
+      const snapshot = document.revisions[sourceRevisionId]?.snapshot;
+      const legacyObservation = run.observationScope as
+        { kind?: string; rootId?: string; nodeIds?: string[] } | undefined;
+      const legacyMutationIds = Array.isArray(run.mutationScopeIds)
+        ? run.mutationScopeIds.filter((id): id is string => typeof id === 'string')
+        : [];
+      if (!run.target && legacyObservation?.nodeIds?.length && legacyMutationIds.length) {
+        const focusNodes = legacyMutationIds
+          .map((id) => snapshot?.nodes[id])
+          .filter((node): node is DesignNode => Boolean(node));
+        const insertionParentIds = [
+          ...new Set(
+            focusNodes
+              .map((node) => {
+                if (node.kind === 'frame' || node.kind === 'group') return node.id;
+                const parent = node.parentId ? snapshot?.nodes[node.parentId] : undefined;
+                return parent && (parent.kind === 'frame' || parent.kind === 'group')
+                  ? parent.id
+                  : undefined;
+              })
+              .filter((id): id is string => Boolean(id)),
+          ),
+        ];
+        run.target = {
+          focusNodeIds: legacyMutationIds,
+          observationScope: {
+            kind: legacyObservation.kind === 'page' ? 'screen' : legacyObservation.kind,
+            rootId: legacyObservation.rootId,
+            nodeIds: legacyObservation.nodeIds,
+          },
+          mutationScope: {
+            existingNodeIds: legacyMutationIds.filter(
+              (id) => !typedRun.pinnedNodeIds?.includes(id),
+            ),
+            insertionParentIds,
+            regions: focusNodes.map((node) => ({ ...node.bounds })),
+            allowCreate: true,
+          },
+        };
+      }
+      const target = run.target as
+        { observationScope?: { nodeIds?: string[]; rootId?: string } } | undefined;
+      run.contextNodeIds ??= target?.observationScope?.nodeIds ?? [];
+      run.contextRootId ??= target?.observationScope?.rootId;
+      run.contextSummarized ??= false;
+      run.provider ??= run.backend === 'codex' ? 'codex' : 'local';
+      run.fallback ??= false;
+      run.contextSchemaVersion ??= 'codesign-scene-context-v1-legacy-recovered';
+      delete run.observationScope;
+      delete run.mutationScopeIds;
+      document.generationRuns[runId] = run as unknown as DesignDocument['generationRuns'][string];
+    }
+  }
+  return isProjectEnvelopeV2(envelope) ? envelope : null;
+}

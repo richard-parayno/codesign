@@ -15,30 +15,32 @@ Open `http://localhost:5173`. `devenv.nix` pins Node 22, pnpm, git, and the Code
 
 ## Generator backends
 
-The deterministic local backend is the default and supports the complete core flow without network access, an API key, credits, or a Codex login.
+Codex App Server is the configured real-AI path. The deterministic local provider remains available for offline development and supports the complete review flow without an API key, credits, or a Codex login.
 
 ```dotenv
-CODESIGN_AGENT_BACKEND=local
-CODESIGN_CODEX_COMMAND=codex
-CODESIGN_CODEX_MODEL=
+CODESIGN_AGENT_BACKEND=codex
+CODESIGN_CODEX_MODEL=gpt-5.6-luna
+CODESIGN_CODEX_EFFORT=high
+# Optional and always visibly labelled when used:
+CODESIGN_ALLOW_LOCAL_FALLBACK=false
 ```
 
-The older `MALLEABLE_*` names remain accepted during migration. For the optional Codex backend, set `CODESIGN_AGENT_BACKEND=codex` after authenticating with `codex login`.
+The older `MALLEABLE_*` names remain accepted during migration. For the real AI path, set `CODESIGN_AGENT_BACKEND=codex`. Codesign uses the project-pinned Codex App Server and the user's existing ChatGPT/Codex login. If needed, use the visible **Sign in to Codex** action; App Server owns the official browser login, token persistence, and refresh. `CODESIGN_CODEX_COMMAND` remains an advanced explicit runtime override.
 
-Codesign never reads or forwards `~/.codex/auth.json`. App Server runs read-only, without network access, with approvals disabled. Only the requested action, source revision, explicit observation/mutation scopes, structured node slice, pins, registry constraints, and optional trusted server-resolved visual input are supplied. Output is schema-constrained and revalidated before it can be staged. Invalid or unavailable Codex output falls back to the local generator.
+Codesign never reads or forwards `~/.codex/auth.json`. App Server runs read-only with approvals disabled. Each generation gets an isolated ephemeral thread with `gpt-5.6-luna`, high reasoning effort, and no reasoning summary. Codesign supplies a clean raster of the observation root together with a versioned structured scene manifest. Browser image bytes are validated, hashed, written to a process-owned temporary file, and removed after the turn. Output is schema-constrained and semantically revalidated before it can be staged. Provider failures are shown directly; local fallback only occurs when `CODESIGN_ALLOW_LOCAL_FALLBACK=true` and is recorded and visibly labelled.
 
 ## Core flow
 
 1. Draw a frame or click **Load demo checkpoint**.
 2. Select the frame or exact layers Codesign may change.
 3. Enter **Co-design**. Confirm the solid **Can change** boundary.
-4. Choose **Selection**, **Parent**, **Containing frame**, or **Page** under **Can reference**. The lighter dashed boundary is observational only.
-5. Choose **Complete pattern**. Nothing on the source canvas changes while generation runs.
+4. Choose **Selection**, **Parent**, **Containing frame**, or **Screen** under **Can reference**. The lighter dashed boundary is observational only.
+5. Choose **Complete with Codesign** or press Ctrl/⌘+Enter. Nothing on the source canvas changes while generation runs; use **Cancel generation** to stop a request.
 6. Switch candidates, highlight evidence, inspect each derivation trace, compare with the source, and select atomic changes.
 7. **Accept all**, accept a dependency-safe subset, **Reject candidate**, or pin a proposed change and **Reroll unpinned changes**.
 8. Open **Process history** to revisit rejected candidates, source comparisons, decisions, and replayable changes.
 
-Only **Complete pattern** is exposed in this deterministic MVP because it is the action implemented end to end. The shared request vocabulary also reserves Refine, Vary, and Resolve; the UI does not present them as dead controls.
+Only **Complete with Codesign** is exposed because it is the action implemented end to end. The shared request vocabulary also reserves Refine, Vary, and Resolve; the UI does not present them as dead controls.
 
 ## Editor controls
 

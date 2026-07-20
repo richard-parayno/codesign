@@ -44,6 +44,8 @@
 
   type Props = {
     mutationLabels: string[];
+    insertionLabels: string[];
+    canGenerate: boolean;
     observationSummary: string;
     observationScope: ObservationScope;
     observationScopes: ObservationScopeView[];
@@ -60,6 +62,7 @@
     rerollDisabledReason?: string;
     onObservationScopeChange: (scope: ObservationScope) => void;
     onGenerate: (action: CodesignAction) => void;
+    onCancel: () => void;
     onNavigateFidelity: (fidelity: Fidelity, representationId: string) => void;
     onStageFidelity: (fidelity: Fidelity) => void;
     onInspectFidelityCandidate: (fidelity: Fidelity) => void;
@@ -76,6 +79,8 @@
 
   let {
     mutationLabels,
+    insertionLabels,
+    canGenerate,
     observationSummary,
     observationScope,
     observationScopes,
@@ -92,6 +97,7 @@
     rerollDisabledReason,
     onObservationScopeChange,
     onGenerate,
+    onCancel,
     onNavigateFidelity,
     onStageFidelity,
     onInspectFidelityCandidate,
@@ -107,7 +113,10 @@
   }: Props = $props();
 
   const actionCopy: Record<CodesignAction, { label: string; description: string }> = {
-    complete: { label: 'Complete pattern', description: 'Continue a visible visual pattern.' },
+    complete: {
+      label: 'Complete with Codesign',
+      description: 'Generate a scene-aware continuation inside the shown editable region.',
+    },
     refine: { label: 'Refine', description: 'Increase fidelity while preserving structure.' },
     vary: { label: 'Vary', description: 'Propose an alternative composition or treatment.' },
     resolve: { label: 'Resolve', description: 'Map rough primitives to registered components.' },
@@ -161,7 +170,12 @@
       <h2 id="codesign-title">Co-design</h2>
     </div>
     {#if run}
-      <span class="backend">{run.backend === 'codex' ? 'Codex' : 'Local'} generator</span>
+      <span class="backend"
+        >{run.backend === 'codex' ? 'Codex' : 'Local'} · {run.model ??
+          'deterministic'}{run.reasoningEffort ? ` · ${run.reasoningEffort}` : ''}{run.fallback
+          ? ' · fallback'
+          : ''}</span
+      >
     {/if}
   </header>
 
@@ -178,7 +192,15 @@
           {/each}
         </ul>
       {:else}
-        <p>Select a frame or object to choose where Codesign may propose changes.</p>
+        <p>No selected layer can be changed.</p>
+      {/if}
+      {#if insertionLabels.length}
+        <strong>Can add inside</strong>
+        <ul>
+          {#each insertionLabels as label}
+            <li>{label}</li>
+          {/each}
+        </ul>
       {/if}
     </section>
 
@@ -206,7 +228,8 @@
     </fieldset>
   </div>
   <p class="scope-note">
-    Codesign may reference the chosen context, but only the selected layers can change.
+    Only listed mutable layers may change; new layers may be added only inside listed containers and
+    the green editable region.
   </p>
 
   <section class="generation" aria-labelledby="generation-title">
@@ -221,7 +244,7 @@
         <div class="action-option">
           <button
             type="button"
-            disabled={busy || mutationLabels.length === 0 || Boolean(item.disabledReason)}
+            disabled={busy || !canGenerate || Boolean(item.disabledReason)}
             aria-describedby={`action-help-${item.action}`}
             onclick={() => onGenerate(item.action)}>{actionCopy[item.action].label}</button
           >
@@ -231,6 +254,12 @@
         </div>
       {/each}
     </div>
+    {#if busy}
+      <div class="generation-progress" role="status">
+        <span>Generating inside the highlighted scope…</span>
+        <button type="button" onclick={onCancel}>Cancel generation</button>
+      </div>
+    {/if}
     {#if !supportedActions.length}
       <p class="empty-state">No generation actions are available for this selection.</p>
     {/if}
@@ -328,10 +357,15 @@
                 <div class="change-actions">
                   <button
                     type="button"
-                    disabled={activeCandidate.candidate.status !== 'candidate'}
+                    disabled={activeCandidate.candidate.status !== 'candidate' ||
+                      !['create', 'style'].includes(item.change.operation.type)}
                     aria-pressed={item.pinned}
                     onclick={() => onTogglePin(item.change.id, !item.pinned)}
-                    >{item.pinned ? 'Pinned for this run' : 'Pin to preserve on reroll'}</button
+                    >{!['create', 'style'].includes(item.change.operation.type)
+                      ? 'This change cannot be pinned'
+                      : item.pinned
+                        ? 'Pinned for this run'
+                        : 'Pin to preserve on reroll'}</button
                   >
                   <button
                     type="button"
@@ -577,6 +611,16 @@
     gap: 12px;
     border-top: 1px solid #d4d9df;
     padding-top: 14px;
+  }
+
+  .generation-progress {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-left: 3px solid #246da5;
+    padding: 8px 10px;
+    background: #eaf1f6;
   }
 
   .action-grid {

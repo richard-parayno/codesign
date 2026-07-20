@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { applyOperation } from '$lib/model/operations';
 import { blankDocument, defaultStyle } from '$lib/model/types';
+import { demoCheckpoint } from '$lib/model/checkpoint';
+import { deriveGenerationTarget } from '$lib/agent/generation-target';
+import { stageCandidates, stageGenerationRun } from '$lib/model/codesign';
 import { POST } from './+server';
 
 function body(action: 'complete' | 'vary' = 'complete') {
@@ -20,15 +23,26 @@ function body(action: 'complete' | 'vary' = 'complete') {
     },
   });
   return {
+    projectId: 'test-project',
     action,
     requestedFidelity: 'component',
-    observationScope: { kind: 'selection', nodeIds: ['region'] },
-    mutationScopeIds: ['region'],
+    target: {
+      focusNodeIds: ['region'],
+      observationScope: { kind: 'screen', nodeIds: ['region'] },
+      mutationScope: {
+        existingNodeIds: ['region'],
+        insertionParentIds: [],
+        regions: [{ ...document.nodes.region.bounds }],
+        allowCreate: true,
+      },
+    },
     pinnedNodeIds: [],
     pinnedAtomicChanges: [],
     document: {
       currentRevisionId: document.currentRevisionId,
       activeScreenId: document.activeScreenId,
+      screenName: document.screens[0].name,
+      screenRootIds: document.screens[0].rootIds,
       knownNodeIds: Object.keys(document.nodes),
       nodes: document.nodes,
     },
@@ -60,7 +74,7 @@ describe('POST /api/agent', () => {
         action: 'complete',
         backend: 'local',
         requestedFidelity: 'component',
-        mutationScopeIds: ['region'],
+        target: { mutationScope: { existingNodeIds: ['region'] } },
       },
       fallback: false,
       supportedActions: ['complete'],
@@ -69,6 +83,36 @@ describe('POST /api/agent', () => {
     expect(value.candidates[0].atomicChanges).toHaveLength(4);
     expect(value.candidates[0].atomicChanges[0]).toHaveProperty('before');
     expect(value.candidates[0].atomicChanges[0]).toHaveProperty('after');
+  });
+
+  it('stages a JSON-roundtripped candidate against a fresh in-memory demo checkpoint', async () => {
+    process.env.CODESIGN_AGENT_BACKEND = 'local';
+    const document = demoCheckpoint();
+    const target = deriveGenerationTarget(document, ['sidebar']);
+    const response = await post({
+      projectId: 'demo-project',
+      action: 'complete',
+      requestedFidelity: 'wireframe',
+      target,
+      pinnedNodeIds: [],
+      pinnedAtomicChanges: [],
+      document: {
+        currentRevisionId: document.currentRevisionId,
+        activeScreenId: document.activeScreenId,
+        screenName: document.screens[0].name,
+        screenRootIds: document.screens[0].rootIds,
+        knownNodeIds: Object.keys(document.nodes),
+        nodes: Object.fromEntries(
+          target.observationScope.nodeIds.map((id) => [id, document.nodes[id]]),
+        ),
+      },
+    });
+    const value = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(() =>
+      stageCandidates(stageGenerationRun(document, value.run), value.run.id, value.candidates),
+    ).not.toThrow();
   });
 
   it('reports unsupported vocabulary instead of exposing a dead action', async () => {
@@ -84,7 +128,7 @@ describe('POST /api/agent', () => {
   it('rejects mutation scope that is not observable', async () => {
     process.env.CODESIGN_AGENT_BACKEND = 'local';
     const invalid = body();
-    invalid.observationScope.nodeIds = ['missing'];
+    invalid.target.observationScope.nodeIds = ['missing'];
     const response = await post(invalid);
     expect(response.status).toBe(400);
   });

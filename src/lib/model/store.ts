@@ -6,6 +6,7 @@ import {
   isProjectEnvelopeV2,
   migrateDocumentV1,
   migrateProjectEnvelopeV1,
+  recoverProjectEnvelopeV2,
   type ProjectEnvelopeV2,
   type ProjectSummary,
 } from './migration';
@@ -284,8 +285,9 @@ export function createDocumentStore(injectedStorage?: ProjectStorage) {
       let warning: string | null = null;
       try {
         const v2 = readJson(target, PROJECT_STORAGE_KEY);
-        if (v2.present && isProjectEnvelopeV2(v2.value)) {
-          activateEnvelope(v2.value);
+        const recoveredV2 = v2.present ? recoverProjectEnvelopeV2(v2.value) : null;
+        if (recoveredV2 && isProjectEnvelopeV2(recoveredV2)) {
+          activateEnvelope(recoveredV2);
           return;
         }
         if (v2.present)

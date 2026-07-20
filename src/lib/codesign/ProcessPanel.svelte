@@ -30,6 +30,8 @@
     'manual-operation': 'Manual change',
     'checkpoint-created': 'Source checkpoint',
     'generation-requested': 'Generation requested',
+    'generation-failed': 'Generation failed',
+    'generation-cancelled': 'Generation cancelled',
     'candidates-generated': 'Candidates generated',
     'candidate-viewed': 'Candidate viewed',
     'candidate-rejected': 'Candidate rejected',

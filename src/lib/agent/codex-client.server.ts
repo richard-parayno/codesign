@@ -1,10 +1,32 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import type { AuthMode } from '../../../.generated/codex-app-server/AuthMode';
+import type { PlanType } from '../../../.generated/codex-app-server/PlanType';
+import type { ReasoningEffort } from '../../../.generated/codex-app-server/ReasoningEffort';
+import type { GetAccountResponse } from '../../../.generated/codex-app-server/v2/GetAccountResponse';
+import type { LoginAccountResponse } from '../../../.generated/codex-app-server/v2/LoginAccountResponse';
 import type { ThreadStartParams } from '../../../.generated/codex-app-server/v2/ThreadStartParams';
 import type { TurnStartParams } from '../../../.generated/codex-app-server/v2/TurnStartParams';
 import type { UserInput } from '../../../.generated/codex-app-server/v2/UserInput';
 import { candidateBatchOutputSchema, type TrustedVisualInput } from './candidate';
+import { asProviderFailure, type ProviderFailureCategory } from './providers/contracts';
+
+export const DEFAULT_CODEX_MODEL = 'gpt-5.6-luna';
+export const DEFAULT_CODEX_EFFORT = 'high';
+
+/** Project-local executable from the exact @openai/codex version pinned in package.json. */
+export function pinnedCodexCommand(cwd = process.cwd()) {
+  return resolve(cwd, 'node_modules', '.bin', 'codex');
+}
+
+/** `codex` is retained as a legacy sentinel, not resolved through an arbitrary PATH entry. */
+export function resolveCodexCommand(advancedOverride?: string) {
+  const override = advancedOverride?.trim();
+  if (!override || override === 'codex') return pinnedCodexCommand();
+  if (override.includes('\0')) throw new Error('Codex command override contains an invalid byte');
+  return override;
+}
 
 type RpcMessage = {
   id?: number;
@@ -14,6 +36,7 @@ type RpcMessage = {
   error?: { code?: number; message?: string };
 };
 type Pending = {
+  method: string;
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -23,6 +46,102 @@ type SpawnFactory = (
   args: string[],
   options: { stdio: ['pipe', 'pipe', 'pipe']; shell: false; env: NodeJS.ProcessEnv },
 ) => ChildProcessWithoutNullStreams;
+
+class AppServerRpcError extends Error {
+  constructor(
+    readonly method: string,
+    readonly code: number | undefined,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export type CodexAccountSnapshot = {
+  connected: boolean;
+  requiresOpenaiAuth: boolean;
+  authMode: AuthMode | null;
+  planType: PlanType | null;
+  accountLabel: string | null;
+};
+
+export type CodexAccountEvent =
+  | { type: 'account-updated'; account: CodexAccountSnapshot }
+  | {
+      type: 'login-completed';
+      loginId: string | null;
+      success: boolean;
+      failureCategory: ProviderFailureCategory | null;
+    };
+
+export type CodexLoginStart = {
+  loginId: string;
+  authUrl: string;
+};
+
+export type CodexGenerationOptions = {
+  model?: string;
+  effort?: ReasoningEffort;
+};
+
+const planTypes = new Set<PlanType>([
+  'free',
+  'go',
+  'plus',
+  'pro',
+  'prolite',
+  'team',
+  'self_serve_business_usage_based',
+  'business',
+  'enterprise_cbp_usage_based',
+  'enterprise',
+  'edu',
+  'unknown',
+]);
+const authModes = new Set<AuthMode>([
+  'apikey',
+  'chatgpt',
+  'chatgptAuthTokens',
+  'headers',
+  'agentIdentity',
+  'personalAccessToken',
+  'bedrockApiKey',
+]);
+
+function accountSnapshot(response: GetAccountResponse): CodexAccountSnapshot {
+  const account = response.account;
+  if (!account)
+    return {
+      connected: false,
+      requiresOpenaiAuth: response.requiresOpenaiAuth,
+      authMode: null,
+      planType: null,
+      accountLabel: null,
+    };
+  if (account.type === 'chatgpt') {
+    if (
+      (account.email !== null && typeof account.email !== 'string') ||
+      !planTypes.has(account.planType)
+    )
+      throw new Error('Codex App Server returned an invalid ChatGPT account');
+    return {
+      connected: true,
+      requiresOpenaiAuth: response.requiresOpenaiAuth,
+      authMode: 'chatgpt',
+      planType: account.planType,
+      accountLabel: account.email,
+    };
+  }
+  if (account.type !== 'apiKey' && account.type !== 'amazonBedrock')
+    throw new Error('Codex App Server returned an unsupported account type');
+  return {
+    connected: true,
+    requiresOpenaiAuth: response.requiresOpenaiAuth,
+    authMode: account.type === 'apiKey' ? 'apikey' : 'bedrockApiKey',
+    planType: null,
+    accountLabel: null,
+  };
+}
 
 export class CodexAppServer {
   private process: ChildProcessWithoutNullStreams | null = null;
@@ -37,19 +156,27 @@ export class CodexAppServer {
     }
   >();
   private earlyTurns = new Map<string, { text: string; completed: boolean; error?: string }>();
+  private accountListeners = new Set<(event: CodexAccountEvent) => void>();
   private nextId = 1;
-  private threadId: string | null = null;
   private initialized: Promise<void> | null = null;
+  private latestAccount: CodexAccountSnapshot = {
+    connected: false,
+    requiresOpenaiAuth: true,
+    authMode: null,
+    planType: null,
+    accountLabel: null,
+  };
 
   constructor(
-    private command = 'codex',
-    private model?: string,
+    private command = pinnedCodexCommand(),
+    private model = DEFAULT_CODEX_MODEL,
     private spawnProcess: SpawnFactory = spawn,
+    private effort: ReasoningEffort = DEFAULT_CODEX_EFFORT,
   ) {}
 
   private start() {
     if (this.initialized) return this.initialized;
-    this.initialized = new Promise<void>((resolve, reject) => {
+    this.initialized = new Promise<void>((resolveStart, rejectStart) => {
       const child = this.spawnProcess(this.command, ['app-server', '--stdio'], {
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: false,
@@ -67,18 +194,22 @@ export class CodexAppServer {
         }
       });
       child.stderr.on('data', () => {
-        // Deliberately avoid logging stderr because prompts contain design-document slices.
+        // Never log stderr: it may contain prompt or account context.
       });
-      child.once('error', (error) => {
+      let stopped = false;
+      const stop = (error: Error) => {
+        if (stopped) return;
+        stopped = true;
         this.failAll(error);
-        reject(error);
+        if (this.process === child) this.process = null;
+        this.initialized = null;
+      };
+      child.once('error', (error) => {
+        stop(error);
+        rejectStart(error);
       });
       child.once('exit', () => {
-        const error = new Error('Codex App Server stopped unexpectedly');
-        this.failAll(error);
-        this.process = null;
-        this.initialized = null;
-        this.threadId = null;
+        stop(new Error('Codex App Server stopped unexpectedly'));
       });
       this.request(
         'initialize',
@@ -90,9 +221,13 @@ export class CodexAppServer {
       )
         .then(() => {
           this.notify('initialized', {});
-          resolve();
+          resolveStart();
         })
-        .catch(reject);
+        .catch((error) => {
+          stop(error instanceof Error ? error : new Error('Codex App Server failed to initialize'));
+          child.kill('SIGTERM');
+          rejectStart(error);
+        });
     });
     return this.initialized;
   }
@@ -104,24 +239,38 @@ export class CodexAppServer {
 
   private request(method: string, params: unknown, timeout = 15_000) {
     const id = this.nextId++;
-    return new Promise<unknown>((resolve, reject) => {
+    return new Promise<unknown>((resolveRequest, rejectRequest) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`${method} timed out`));
+        rejectRequest(new AppServerRpcError(method, undefined, `${method} timed out`));
       }, timeout);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { method, resolve: resolveRequest, reject: rejectRequest, timer });
       try {
         this.write({ id, method, params: params as Record<string, unknown> });
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(id);
-        reject(error);
+        rejectRequest(error);
       }
     });
   }
 
   private notify(method: string, params: Record<string, unknown>) {
     this.write({ method, params });
+  }
+
+  private emitAccount(event: CodexAccountEvent) {
+    for (const listener of this.accountListeners)
+      try {
+        listener(event);
+      } catch {
+        // One UI subscriber must not disrupt App Server protocol handling.
+      }
+  }
+
+  onAccountEvent(listener: (event: CodexAccountEvent) => void) {
+    this.accountListeners.add(listener);
+    return () => this.accountListeners.delete(listener);
   }
 
   private replyToServerRequest(message: RpcMessage) {
@@ -156,6 +305,39 @@ export class CodexAppServer {
     }
   }
 
+  private handleAccountNotification(message: RpcMessage) {
+    const params = message.params ?? {};
+    if (message.method === 'account/updated') {
+      const authMode = authModes.has(params.authMode as AuthMode)
+        ? (params.authMode as AuthMode)
+        : null;
+      const planType = planTypes.has(params.planType as PlanType)
+        ? (params.planType as PlanType)
+        : null;
+      this.latestAccount = {
+        ...this.latestAccount,
+        connected: authMode !== null,
+        authMode,
+        planType,
+        accountLabel: authMode ? this.latestAccount.accountLabel : null,
+      };
+      this.emitAccount({ type: 'account-updated', account: { ...this.latestAccount } });
+      return true;
+    }
+    if (message.method === 'account/login/completed') {
+      const success = params.success === true;
+      const failure = success ? null : asProviderFailure(params.error);
+      this.emitAccount({
+        type: 'login-completed',
+        loginId: typeof params.loginId === 'string' ? params.loginId : null,
+        success,
+        failureCategory: failure?.category ?? null,
+      });
+      return true;
+    }
+    return false;
+  }
+
   private handle(message: RpcMessage) {
     if (message.id !== undefined && !message.method) {
       const pending = this.pending.get(message.id);
@@ -163,11 +345,18 @@ export class CodexAppServer {
       clearTimeout(pending.timer);
       this.pending.delete(message.id);
       if (message.error)
-        pending.reject(new Error(message.error.message ?? 'Codex App Server request failed'));
+        pending.reject(
+          new AppServerRpcError(
+            pending.method,
+            message.error.code,
+            message.error.message ?? 'Codex App Server request failed',
+          ),
+        );
       else pending.resolve(message.result);
       return;
     }
     if (this.replyToServerRequest(message)) return;
+    if (this.handleAccountNotification(message)) return;
 
     const params = message.params ?? {};
     const turnId =
@@ -222,11 +411,10 @@ export class CodexAppServer {
     this.earlyTurns.clear();
   }
 
-  private async ensureThread() {
+  private async createThread(model: string) {
     await this.start();
-    if (this.threadId) return this.threadId;
     const params: ThreadStartParams = {
-      model: this.model || null,
+      model,
       cwd: process.cwd(),
       approvalPolicy: 'never',
       sandbox: 'read-only',
@@ -238,11 +426,64 @@ export class CodexAppServer {
       thread?: { id?: string };
     };
     if (!response.thread?.id) throw new Error('Codex App Server did not return a thread ID');
-    this.threadId = response.thread.id;
-    return this.threadId;
+    return response.thread.id;
   }
 
-  async proposeCandidate(prompt: string, signal?: AbortSignal, visualInput?: TrustedVisualInput) {
+  async readAccount(refreshToken = false) {
+    await this.start();
+    const response = (await this.request('account/read', { refreshToken }, 8_000)) as
+      GetAccountResponse | undefined;
+    if (!response || typeof response.requiresOpenaiAuth !== 'boolean' || !('account' in response))
+      throw new Error('Codex App Server returned an invalid account response');
+    this.latestAccount = accountSnapshot(response);
+    return { ...this.latestAccount };
+  }
+
+  async startChatgptLogin(): Promise<CodexLoginStart> {
+    await this.start();
+    const response = (await this.request(
+      'account/login/start',
+      {
+        type: 'chatgpt',
+        codexStreamlinedLogin: true,
+        useHostedLoginSuccessPage: true,
+        appBrand: 'codex',
+      },
+      15_000,
+    )) as LoginAccountResponse;
+    if (response.type !== 'chatgpt' || !response.loginId || !response.authUrl)
+      throw new Error('Codex App Server did not return a ChatGPT login URL');
+    let protocol = '';
+    try {
+      protocol = new URL(response.authUrl).protocol;
+    } catch {
+      throw new Error('Codex App Server returned an invalid login URL');
+    }
+    if (protocol !== 'https:' && protocol !== 'http:')
+      throw new Error('Codex App Server returned an unsupported login URL');
+    return { loginId: response.loginId, authUrl: response.authUrl };
+  }
+
+  async logout() {
+    await this.start();
+    await this.request('account/logout', undefined, 8_000);
+    this.latestAccount = {
+      connected: false,
+      requiresOpenaiAuth: true,
+      authMode: null,
+      planType: null,
+      accountLabel: null,
+    };
+    this.emitAccount({ type: 'account-updated', account: { ...this.latestAccount } });
+    return { ...this.latestAccount };
+  }
+
+  async proposeCandidate(
+    prompt: string,
+    signal?: AbortSignal,
+    visualInput?: TrustedVisualInput,
+    options: CodexGenerationOptions = {},
+  ) {
     if (signal?.aborted) throw new Error('Codex generation cancelled');
     if (visualInput?.type === 'image') {
       let protocol = '';
@@ -259,7 +500,11 @@ export class CodexAppServer {
       (!isAbsolute(visualInput.path) || visualInput.path.includes('\0'))
     )
       throw new Error('Trusted local image input must use an absolute server path');
-    const threadId = await this.ensureThread();
+
+    const model = options.model?.trim() || this.model || DEFAULT_CODEX_MODEL;
+    const effort = options.effort || this.effort || DEFAULT_CODEX_EFFORT;
+    const threadId = await this.createThread(model);
+    if (signal?.aborted) throw new Error('Codex generation cancelled');
     const input: UserInput[] = [{ type: 'text', text: prompt, text_elements: [] }];
     if (visualInput) input.push(visualInput);
     const params: TurnStartParams = {
@@ -267,7 +512,9 @@ export class CodexAppServer {
       input,
       approvalPolicy: 'never',
       sandboxPolicy: { type: 'readOnly', networkAccess: false },
-      model: this.model || null,
+      model,
+      effort,
+      summary: 'none',
       outputSchema: candidateBatchOutputSchema as TurnStartParams['outputSchema'],
     };
     const response = (await this.request('turn/start', params, 15_000)) as {
@@ -279,44 +526,67 @@ export class CodexAppServer {
       this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
       throw new Error('Codex generation cancelled');
     }
-    return new Promise<string>((resolve, reject) => {
+    return new Promise<string>((resolveTurn, rejectTurn) => {
       const early = this.earlyTurns.get(turnId);
       if (early?.completed) {
         this.earlyTurns.delete(turnId);
-        early.error ? reject(new Error(early.error)) : resolve(early.text);
+        early.error ? rejectTurn(new Error(early.error)) : resolveTurn(early.text);
         return;
       }
+      let settled = false;
+      const finish = (kind: 'resolve' | 'reject', value: string | Error) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', abort);
+        if (kind === 'resolve') resolveTurn(value as string);
+        else rejectTurn(value as Error);
+      };
       const timer = setTimeout(() => {
         this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
         this.turns.delete(turnId);
-        reject(new Error('Codex generation timed out'));
+        finish('reject', new Error('Codex generation timed out'));
       }, 45_000);
-      this.turns.set(turnId, { text: early?.text ?? '', resolve, reject, timer });
+      const abort = () => {
+        clearTimeout(timer);
+        this.turns.delete(turnId);
+        this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
+        finish('reject', new Error('Codex generation cancelled'));
+      };
+      this.turns.set(turnId, {
+        text: early?.text ?? '',
+        resolve: (text) => finish('resolve', text),
+        reject: (error) => finish('reject', error),
+        timer,
+      });
       this.earlyTurns.delete(turnId);
-      signal?.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          this.turns.delete(turnId);
-          this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
-          reject(new Error('Codex generation cancelled'));
-        },
-        { once: true },
-      );
+      signal?.addEventListener('abort', abort, { once: true });
     });
   }
 
   shutdown() {
+    this.failAll(new Error('Codex App Server shut down'));
     this.process?.kill('SIGTERM');
     this.process = null;
     this.initialized = null;
-    this.threadId = null;
   }
 }
 
 declare global {
-  var __codesignCodex: CodexAppServer | undefined;
+  var __codesignCodexClients: Map<string, CodexAppServer> | undefined;
 }
-export function getCodexClient(command: string, model?: string) {
-  return (globalThis.__codesignCodex ??= new CodexAppServer(command, model));
+
+export function getCodexClient(
+  advancedCommandOverride?: string,
+  model = DEFAULT_CODEX_MODEL,
+  effort: ReasoningEffort = DEFAULT_CODEX_EFFORT,
+) {
+  const command = resolveCodexCommand(advancedCommandOverride);
+  const clients = (globalThis.__codesignCodexClients ??= new Map());
+  const key = JSON.stringify([command, model, effort]);
+  let client = clients.get(key);
+  if (!client) {
+    client = new CodexAppServer(command, model, spawn, effort);
+    clients.set(key, client);
+  }
+  return client;
 }

@@ -5,9 +5,11 @@ import { blankDocument, defaultStyle, type DesignDocument } from '$lib/model/typ
 import {
   CANDIDATE_SCHEMA_VERSION,
   CandidateValidationError,
+  candidateToDocumentCoordinates,
   createGenerationRun,
   generationRequestSchema,
   normalizeCandidateBatch,
+  operationToSceneCoordinates,
   type GenerationRequest,
 } from './candidate';
 import { localCandidateBatch } from './local';
@@ -32,10 +34,19 @@ function sourceDocument() {
 
 function requestFor(document: DesignDocument): GenerationRequest {
   return {
+    projectId: 'test-project',
     action: 'complete',
     requestedFidelity: 'component',
-    observationScope: { kind: 'frame', nodeIds: ['region'] },
-    mutationScopeIds: ['region'],
+    target: {
+      focusNodeIds: ['region'],
+      observationScope: { kind: 'screen', nodeIds: ['region'] },
+      mutationScope: {
+        existingNodeIds: ['region'],
+        insertionParentIds: [],
+        regions: [{ ...document.nodes.region.bounds }],
+        allowCreate: true,
+      },
+    },
     pinnedNodeIds: [],
     pinnedAtomicChanges: [],
     visualSnapshot: {
@@ -43,13 +54,17 @@ function requestFor(document: DesignDocument): GenerationRequest {
       mimeType: 'image/png',
       width: 720,
       height: 560,
-      sha256: 'a'.repeat(64),
+      data: 'a'.repeat(16),
     },
     document: {
       currentRevisionId: document.currentRevisionId,
       activeScreenId: document.activeScreenId,
+      screenName: document.screens[0].name,
+      screenRootIds: [...document.screens[0].rootIds],
       knownNodeIds: Object.keys(document.nodes),
       nodes: structuredClone(document.nodes),
+      frameFidelity: structuredClone(document.frameFidelity),
+      nodeFidelityOverrides: structuredClone(document.nodeFidelityOverrides),
     },
   };
 }
@@ -63,6 +78,37 @@ function runFor(request: GenerationRequest, id = 'generation-test') {
 }
 
 describe('Codesign candidate backend contract', () => {
+  it('restores relative create and resize bounds to document coordinates without mutating input', () => {
+    const request = requestFor(sourceDocument());
+    const run = runFor(request);
+    const wire = localCandidateBatch(request, run);
+    const create = wire.candidate.atomicChanges.find(
+      (change) => change.operation.type === 'create',
+    )!.operation;
+    if (create.type !== 'create') throw new Error('Expected create operation');
+    const before = { ...create.node.bounds };
+
+    const restored = candidateToDocumentCoordinates(wire, { x: 100, y: 50 });
+    const restoredCreate = restored.candidate.atomicChanges.find(
+      (change) => change.operation.type === 'create',
+    )!.operation;
+    if (restoredCreate.type !== 'create') throw new Error('Expected create operation');
+    expect(restoredCreate.node.bounds).toMatchObject({ x: before.x + 100, y: before.y + 50 });
+    expect(create.node.bounds).toEqual(before);
+
+    const persisted = normalizeCandidateBatch(request, run, wire).atomicChanges.find(
+      (change) => change.operation.type === 'create',
+    )!.operation;
+    if (persisted.type !== 'create') throw new Error('Expected persisted create operation');
+    const persistedBefore = structuredClone(persisted.node.bounds);
+    const relative = operationToSceneCoordinates(persisted, { x: 100, y: 50 });
+    expect(relative.type === 'create' ? relative.node.bounds : null).toMatchObject({
+      x: persistedBefore.x - 100,
+      y: persistedBefore.y - 50,
+    });
+    expect(persisted.node.bounds).toEqual(persistedBefore);
+  });
+
   it('produces a structured four-change local completion that stages in the model', () => {
     const document = sourceDocument();
     const request = requestFor(document);
@@ -85,8 +131,10 @@ describe('Codesign candidate backend contract', () => {
     expect(candidate.atomicChanges[1].before.nodes['generation-test-node-heading']).toBeNull();
     expect(candidate.atomicChanges[1].after.nodes['generation-test-node-heading']).toMatchObject({
       kind: 'text',
-      parentId: 'region',
     });
+    expect(
+      candidate.atomicChanges[1].after.nodes['generation-test-node-heading']?.parentId,
+    ).toBeUndefined();
     expect(candidate.atomicChanges[3].after.nodes['generation-test-node-action']).toMatchObject({
       kind: 'instance',
       componentBinding: { componentId: 'Button', props: { variant: 'primary', size: 'small' } },
@@ -116,7 +164,13 @@ describe('Codesign candidate backend contract', () => {
     const pinned = first.atomicChanges.find((change) => change.operation.type === 'create')!;
     if (pinned.operation.type !== 'create') throw new Error('Expected a generated create change');
     const pinnedNodeName = pinned.operation.node.name;
-    const rerollRequest = { ...requestFor(document), pinnedAtomicChanges: [pinned] };
+    const dependency = first.atomicChanges.find((change) =>
+      pinned.dependencyIds.includes(change.id),
+    );
+    const rerollRequest = {
+      ...requestFor(document),
+      pinnedAtomicChanges: dependency ? [dependency, pinned] : [pinned],
+    };
     const rerollRun = runFor(rerollRequest, 'generation-reroll');
     const rerolled = normalizeCandidateBatch(
       rerollRequest,
@@ -124,10 +178,12 @@ describe('Codesign candidate backend contract', () => {
       localCandidateBatch(rerollRequest, rerollRun),
     );
 
-    const preserved = rerolled.atomicChanges[0];
-    expect(preserved.id).toBe('generation-reroll-pinned-change-1');
+    const preserved = rerolled.atomicChanges.find(
+      (change) => change.preservedFromAtomicChangeId === pinned.id,
+    )!;
+    expect(preserved.id).toBe('generation-reroll-pinned-change-2');
     expect(preserved.preservedFromAtomicChangeId).toBe(pinned.id);
-    expect(preserved.operation.id).toBe('generation-reroll-pinned-operation-1');
+    expect(preserved.operation.id).toBe('generation-reroll-pinned-operation-2');
     expect(preserved.operation).toMatchObject({
       type: 'create',
       node: {
@@ -194,12 +250,47 @@ describe('Codesign candidate backend contract', () => {
     const candidate = normalizeCandidateBatch(request, run, wire);
     const pinnedRequest = {
       ...request,
-      pinnedAtomicChanges: [candidate.atomicChanges[1]],
+      pinnedAtomicChanges: [candidate.atomicChanges[0]],
     };
     const pinnedRun = runFor(pinnedRequest, 'generation-pinned');
     const omitted = localCandidateBatch({ ...pinnedRequest, pinnedAtomicChanges: [] }, pinnedRun);
     expect(() => normalizeCandidateBatch(pinnedRequest, pinnedRun, omitted)).toThrow(
       'omitted a pinned atomic change',
+    );
+  });
+
+  it('requires later mutations of generated nodes to depend on their creation', () => {
+    const document = sourceDocument();
+    const request = requestFor(document);
+    const run = runFor(request);
+    const wire = localCandidateBatch(request, run);
+    const heading = wire.candidate.atomicChanges[1];
+    const later = wire.candidate.atomicChanges[2];
+    if (heading.operation.type !== 'create') throw new Error('Expected generated heading');
+    later.operation = {
+      id: later.operation.id,
+      type: 'style',
+      actor: 'agent',
+      targetIds: [heading.operation.node.id],
+      patch: {
+        fill: '#ffffff',
+        stroke: null,
+        strokeWidth: null,
+        opacity: null,
+        radius: null,
+        padding: null,
+        textColor: null,
+        fontSize: null,
+        fontWeight: null,
+        textAlign: null,
+        lineHeight: null,
+        density: null,
+      },
+    };
+    later.trace.affectedNodeIds = [heading.operation.node.id];
+
+    expect(() => normalizeCandidateBatch(request, run, wire)).toThrow(
+      'depend on its creation change',
     );
   });
 

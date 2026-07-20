@@ -22,6 +22,23 @@ const clone = <T>(value: T): T => structuredClone(value);
 
 export class CodesignError extends Error {}
 
+export function recordGenerationOutcome(
+  input: DesignDocument,
+  type: 'generation-failed' | 'generation-cancelled',
+  details: Record<string, string | number | boolean | null | string[]> = {},
+  timestamp = Date.now(),
+) {
+  const document = clone(input);
+  appendProcessEvent(document, {
+    type,
+    actor: type === 'generation-cancelled' ? 'user' : 'system',
+    timestamp,
+    revisionId: document.currentRevisionId,
+    details,
+  });
+  return document;
+}
+
 export type CandidateDraft = {
   id: string;
   fidelity: Fidelity;
@@ -51,6 +68,19 @@ function operationMutationIds(operation: DesignOperation) {
   if (operation.type === 'transition') return [operation.transition.sourceNodeId];
   if (operation.type === 'create') return operation.node.parentId ? [operation.node.parentId] : [];
   return [];
+}
+
+function boundsInsideMutationRegion(
+  bounds: DesignNode['bounds'],
+  regions: GenerationRun['target']['mutationScope']['regions'],
+) {
+  return regions.some(
+    (region) =>
+      bounds.x >= region.x &&
+      bounds.y >= region.y &&
+      bounds.x + bounds.width <= region.x + region.width &&
+      bounds.y + bounds.height <= region.y + region.height,
+  );
 }
 
 function dependencyOrder(changes: AtomicChange[], selectedIds?: string[]) {
@@ -89,14 +119,8 @@ function same(value: unknown, expected: unknown): boolean {
     return false;
   const valueRecord = value as Record<string, unknown>;
   const expectedRecord = expected as Record<string, unknown>;
-  const keys = Object.keys(valueRecord);
-  const expectedKeys = Object.keys(expectedRecord);
-  return (
-    keys.length === expectedKeys.length &&
-    keys.every(
-      (key) => Object.hasOwn(expectedRecord, key) && same(valueRecord[key], expectedRecord[key]),
-    )
-  );
+  const keys = new Set([...Object.keys(valueRecord), ...Object.keys(expectedRecord)]);
+  return [...keys].every((key) => same(valueRecord[key], expectedRecord[key]));
 }
 
 function assertStateSlice(
@@ -107,7 +131,7 @@ function assertStateSlice(
   for (const [id, expected] of Object.entries(change[side].nodes)) {
     const actual = document.nodes[id] ?? null;
     if (!same(actual, expected))
-      throw new CodesignError(`Atomic change ${side} state does not match node ${id}`);
+      throw new CodesignError(`Atomic change ${change.id} ${side} state does not match node ${id}`);
   }
   for (const [screenId, expected] of Object.entries(change[side].screenRootIds ?? {})) {
     const actual = document.screens.find((screen) => screen.id === screenId)?.rootIds;
@@ -122,14 +146,54 @@ function assertBoundary(
   change: AtomicChange,
   additionalMutableIds: ReadonlySet<string> = new Set(),
 ) {
-  const mutable = new Set([...run.mutationScopeIds, ...additionalMutableIds]);
+  const mutable = new Set([...run.target.mutationScope.existingNodeIds, ...additionalMutableIds]);
   const targets = operationMutationIds(change.operation);
-  if (targets.some((id) => !mutable.has(id)))
-    throw new CodesignError('Atomic change exceeds the mutation scope');
+  if (change.operation.type === 'create') {
+    if (!run.target.mutationScope.allowCreate)
+      throw new CodesignError('Atomic creation is disabled for this generation target');
+    const parentId = change.operation.node.parentId;
+    if (
+      parentId &&
+      !run.target.mutationScope.insertionParentIds.includes(parentId) &&
+      !additionalMutableIds.has(parentId)
+    )
+      throw new CodesignError('Atomic creation exceeds the insertion scope');
+    if (
+      !parentId &&
+      (run.target.mutationScope.insertionParentIds.length > 0 ||
+        run.target.observationScope.kind !== 'screen')
+    )
+      throw new CodesignError('Atomic root creation exceeds the insertion scope');
+    if (!boundsInsideMutationRegion(change.operation.node.bounds, run.target.mutationScope.regions))
+      throw new CodesignError('Atomic creation exceeds the editable region');
+  } else if (targets.some((id) => !mutable.has(id)))
+    throw new CodesignError('Atomic change exceeds the existing-node mutation scope');
+  if (
+    change.operation.type === 'resize' &&
+    !boundsInsideMutationRegion(change.operation.bounds, run.target.mutationScope.regions)
+  )
+    throw new CodesignError('Atomic resize exceeds the editable region');
+  if (change.operation.type === 'move') {
+    for (const id of change.operation.targetIds) {
+      const node = document.nodes[id];
+      if (
+        !node ||
+        !boundsInsideMutationRegion(
+          {
+            ...node.bounds,
+            x: node.bounds.x + change.operation.dx,
+            y: node.bounds.y + change.operation.dy,
+          },
+          run.target.mutationScope.regions,
+        )
+      )
+        throw new CodesignError('Atomic move exceeds the editable region');
+    }
+  }
   if (targets.some((id) => run.pinnedNodeIds.includes(id) || document.pinnedNodeIds.includes(id)))
     throw new CodesignError('Atomic change targets a pinned node');
   for (const id of change.trace.evidenceNodeIds)
-    if (!run.observationScope.nodeIds.includes(id))
+    if (!run.target.observationScope.nodeIds.includes(id))
       throw new CodesignError('Derivation evidence exceeds the observation scope');
   for (const id of change.trace.affectedNodeIds)
     if (
@@ -169,17 +233,37 @@ export function stageGenerationRun(
     throw new CodesignError('Generation source is stale');
   const source = input.revisions[run.sourceRevisionId]?.snapshot;
   if (!source) throw new CodesignError('Generation source revision does not exist');
-  assertUnique(run.observationScope.nodeIds, 'Observation scope IDs');
-  assertUnique(run.mutationScopeIds, 'Mutation scope IDs');
+  assertUnique(run.target.focusNodeIds, 'Focus node IDs');
+  assertUnique(run.target.observationScope.nodeIds, 'Observation scope IDs');
+  assertUnique(run.target.mutationScope.existingNodeIds, 'Existing mutation IDs');
+  assertUnique(run.target.mutationScope.insertionParentIds, 'Insertion parent IDs');
   assertUnique(run.pinnedNodeIds, 'Pinned node IDs');
-  if (run.observationScope.nodeIds.some((id) => !source.nodes[id]))
+  if (run.target.observationScope.nodeIds.some((id) => !source.nodes[id]))
     throw new CodesignError('Observation scope contains an unknown node');
-  if (run.mutationScopeIds.some((id) => !source.nodes[id]))
+  if (run.target.focusNodeIds.some((id) => !source.nodes[id]))
+    throw new CodesignError('Focus contains an unknown node');
+  if (run.target.mutationScope.existingNodeIds.some((id) => !source.nodes[id]))
     throw new CodesignError('Mutation scope contains an unknown node');
-  if (run.mutationScopeIds.some((id) => !run.observationScope.nodeIds.includes(id)))
+  if (
+    run.target.mutationScope.existingNodeIds.some(
+      (id) => !run.target.observationScope.nodeIds.includes(id),
+    )
+  )
     throw new CodesignError('Mutation scope must be observable');
+  if (
+    run.target.mutationScope.insertionParentIds.some(
+      (id) => !source.nodes[id] || !run.target.observationScope.nodeIds.includes(id),
+    )
+  )
+    throw new CodesignError('Insertion parents must be observable');
   if (run.pinnedNodeIds.some((id) => !source.nodes[id]))
     throw new CodesignError('Pinned scope contains an unknown node');
+  if (
+    run.target.mutationScope.insertionParentIds.some(
+      (id) => run.pinnedNodeIds.includes(id) || input.pinnedNodeIds.includes(id),
+    )
+  )
+    throw new CodesignError('Pinned nodes cannot be insertion parents');
 
   const document = clone(input);
   document.generationRuns[run.id] = clone(run);
@@ -196,7 +280,31 @@ export function stageGenerationRun(
     timestamp,
     revisionId: run.sourceRevisionId,
     generationRunId: run.id,
-    details: { action: run.action, requestedFidelity: run.requestedFidelity },
+    details: {
+      action: run.action,
+      requestedFidelity: run.requestedFidelity,
+      provider: run.provider,
+      model: run.model ?? 'deterministic-local',
+      reasoningEffort: run.reasoningEffort ?? 'none',
+      focusNodeIds: run.target.focusNodeIds,
+      observationKind: run.target.observationScope.kind,
+      observationNodeCount: run.target.observationScope.nodeIds.length,
+      mutationNodeCount: run.target.mutationScope.existingNodeIds.length,
+      insertionParentIds: run.target.mutationScope.insertionParentIds,
+      editableRegionCount: run.target.mutationScope.regions.length,
+      contextSnapshotId: run.contextSnapshotId ?? 'none',
+      contextRootId: run.contextRootId ?? 'screen',
+      contextNodeIds: run.contextNodeIds,
+      contextSummarized: run.contextSummarized,
+      contextSchemaVersion: run.contextSchemaVersion,
+      promptVersion: run.promptVersion,
+      schemaVersion: run.schemaVersion,
+      snapshotMimeType: run.snapshot?.mimeType ?? 'none',
+      snapshotWidth: run.snapshot?.width ?? 0,
+      snapshotHeight: run.snapshot?.height ?? 0,
+      snapshotSha256: run.snapshot?.sha256 ?? 'none',
+      fallback: run.fallback,
+    },
   });
   return document;
 }
@@ -228,6 +336,7 @@ export function stageCandidates(
     const ordered = dependencyOrder(draft.atomicChanges);
     let preview = snapshotDocument(input, run.sourceRevisionId, sourceRevision.snapshot);
     const generatedNodeIds = new Set<string>();
+    const generatedBy = new Map<string, string>();
     for (const change of ordered) {
       const parsed = atomicChangeSchema.safeParse(change);
       if (!parsed.success)
@@ -238,6 +347,13 @@ export function stageCandidates(
         throw new CodesignError('Atomic change ID already exists');
       if (change.operation.actor !== 'agent')
         throw new CodesignError('Candidate operations must be agent-authored');
+      if (
+        change.operation.type === 'create' &&
+        change.operation.node.parentId &&
+        generatedBy.has(change.operation.node.parentId) &&
+        !change.dependencyIds.includes(generatedBy.get(change.operation.node.parentId)!)
+      )
+        throw new CodesignError('Nested creation must declare its parent dependency');
       assertBoundary(preview, run, change, generatedNodeIds);
       assertStateSlice(preview, change, 'before');
       preview = applyOperationBatch(preview, [change.operation], {
@@ -248,7 +364,10 @@ export function stageCandidates(
         origin: 'ai',
       });
       assertStateSlice(preview, change, 'after');
-      if (change.operation.type === 'create') generatedNodeIds.add(change.operation.node.id);
+      if (change.operation.type === 'create') {
+        generatedNodeIds.add(change.operation.node.id);
+        generatedBy.set(change.operation.node.id, change.id);
+      }
     }
 
     const candidatePreview = applyOperationBatch(
@@ -459,7 +578,7 @@ function acceptChanges(
     base = snapshotDocument(input, candidate.sourceRevisionId, source);
   }
   base = clone(base);
-  for (const nodeId of run.mutationScopeIds) {
+  for (const nodeId of run.target.mutationScope.existingNodeIds) {
     const node = base.nodes[nodeId];
     if (!node) continue;
     if (node.kind === 'frame') base.frameFidelity[nodeId] = candidate.fidelity;
@@ -484,7 +603,7 @@ function acceptChanges(
     candidateId,
     eventType: false,
   });
-  for (const nodeId of run.mutationScopeIds) {
+  for (const nodeId of run.target.mutationScope.existingNodeIds) {
     const node = document.nodes[nodeId];
     if (!node) continue;
     node.entityId ??= `entity-${node.id}`;

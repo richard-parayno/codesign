@@ -19,6 +19,7 @@
     activateRevision,
     compareWithSource,
     effectiveFidelity,
+    recordGenerationOutcome,
     recordReroll,
     rejectCandidate,
     replayCandidate,
@@ -61,6 +62,8 @@
     type SpacingGuide,
   } from '$lib/editor/geometry';
   import { logAction } from '$lib/debug/action-log';
+  import { deriveGenerationTarget } from '$lib/agent/generation-target';
+  import { captureSceneSnapshot } from '$lib/agent/visual-snapshot.client';
   import { componentRegistry } from '$lib/design-system/registry';
   import CodesignPanel, {
     type CandidateView,
@@ -132,7 +135,11 @@
   let connectSource = '';
   let backend: 'local' | 'codex' = 'local';
   let agentStatus = 'Local rules ready';
+  let providerConnected = true;
+  let providerAccount = '';
+  let providerPlan = '';
   let loadingCandidate = false;
+  let generationController: AbortController | null = null;
   let idCounter = 0;
   let viewportLogTimer: ReturnType<typeof setTimeout> | undefined;
   let generationRequestId = 0;
@@ -155,6 +162,20 @@
   $: currentScreen =
     document.screens.find((screen) => screen.id === document.activeScreenId) ?? document.screens[0];
   $: visibleNodes = currentScreen ? orderedScreenNodes(document, currentScreen.id) : [];
+  $: generationTarget = selection.length ? deriveGenerationTarget(document, selection) : undefined;
+  $: mutationLabels = (generationTarget?.mutationScope.existingNodeIds ?? [])
+    .map((id) => document.nodes[id]?.name)
+    .filter((name): name is string => Boolean(name));
+  $: insertionLabels = (generationTarget?.mutationScope.insertionParentIds ?? [])
+    .map((id) => document.nodes[id]?.name)
+    .filter((name): name is string => Boolean(name));
+  $: generationCanGenerate = Boolean(
+    generationTarget &&
+    (generationTarget.mutationScope.existingNodeIds.length > 0 ||
+      (generationTarget.mutationScope.allowCreate &&
+        (generationTarget.mutationScope.insertionParentIds.length > 0 ||
+          generationTarget.observationScope.kind === 'screen'))),
+  );
   $: layerRows = currentScreen
     ? screenLayerRows(document, currentScreen.id, collapsedLayerIds)
     : [];
@@ -164,12 +185,10 @@
   );
   $: contextNode = contextMenu?.nodeId ? document.nodes[contextMenu.nodeId] : undefined;
   $: code = generateSvelte(document);
-  $: observationScope = makeObservationScope(
-    observationKind,
-    selection,
-    selectedNodes,
-    visibleNodes,
-  );
+  $: observationScope =
+    observationKind === 'frame' && generationTarget
+      ? generationTarget.observationScope
+      : makeObservationScope(observationKind, selection, selectedNodes, visibleNodes);
   $: observationScopes = makeObservationScopeOptions(selection, selectedNodes, visibleNodes);
   $: latestRun = activeCandidateId
     ? document.generationRuns[document.candidates[activeCandidateId]?.generationRunId]
@@ -180,10 +199,10 @@
           const run = document.generationRuns[candidate.generationRunId];
           return (
             candidate.sourceRevisionId === latestRun.sourceRevisionId &&
-            run?.mutationScopeIds.slice().sort().join(':') ===
-              latestRun.mutationScopeIds.slice().sort().join(':') &&
-            run?.observationScope.nodeIds.slice().sort().join(':') ===
-              latestRun.observationScope.nodeIds.slice().sort().join(':')
+            run?.target.focusNodeIds.slice().sort().join(':') ===
+              latestRun.target.focusNodeIds.slice().sort().join(':') &&
+            run?.target.observationScope.nodeIds.slice().sort().join(':') ===
+              latestRun.target.observationScope.nodeIds.slice().sort().join(':')
           );
         })
         .sort((a, b) => a.createdAt - b.createdAt)
@@ -242,20 +261,24 @@
     } catch {
       // The editor still works when browser storage is unavailable.
     }
-    fetch('/api/agent/status')
-      .then((response) => response.json())
-      .then((value) => {
-        backend = value.backend;
-        agentStatus = value.message;
-      })
-      .catch(() => {
-        agentStatus = 'Local fallback active';
-      });
+    void refreshProviderStatus();
     const keydown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
-      if (target.matches('input, select, textarea, [contenteditable="true"]')) return;
+      if (
+        target.matches('input, select, textarea, [contenteditable="true"]') ||
+        target.closest('dialog, [role="dialog"]')
+      )
+        return;
       const key = event.key.toLowerCase();
       const command = event.metaKey || event.ctrlKey;
+      if (command && key === 'enter') {
+        event.preventDefault();
+        if (!loadingCandidate && generationCanGenerate) {
+          setEditorMode('codesign');
+          void generateCandidates('complete');
+        }
+        return;
+      }
       if (key === '/' && !command && !event.altKey) {
         event.preventDefault();
         shortcutsOpen ? closeShortcuts('keyboard') : openShortcuts('keyboard');
@@ -432,6 +455,49 @@
     }
     logAction('mode.changed', { mode: nextMode });
   }
+  async function refreshProviderStatus() {
+    try {
+      const response = await fetch('/api/agent/status');
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.error?.message ?? 'Provider status unavailable');
+      backend = value.backend;
+      agentStatus = value.message;
+      providerConnected = Boolean(value.connected);
+      providerAccount = value.status?.accountLabel ?? '';
+      providerPlan = value.status?.planType ?? '';
+    } catch (cause) {
+      providerConnected = false;
+      agentStatus = cause instanceof Error ? cause.message : 'Provider status unavailable';
+    }
+  }
+  async function signInToCodex() {
+    try {
+      const response = await fetch('/api/agent/provider/login', { method: 'POST' });
+      const value = await response.json();
+      if (!response.ok || !value.login?.authUrl)
+        throw new Error(value.error?.message ?? 'Codex sign-in could not start');
+      const opened = window.open(value.login.authUrl, '_blank', 'noopener,noreferrer');
+      notice = opened
+        ? 'Complete ChatGPT sign-in in the new tab, then refresh provider status.'
+        : `Open this sign-in URL: ${value.login.authUrl}`;
+      logAction('codesign.provider-login-started', { provider: 'codex' });
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : 'Codex sign-in could not start';
+      logAction('codesign.provider-login-failed', { provider: 'codex', message: error });
+    }
+  }
+  async function signOutOfCodex() {
+    try {
+      const response = await fetch('/api/agent/provider/logout', { method: 'POST' });
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.error?.message ?? 'Codex sign-out failed');
+      await refreshProviderStatus();
+      notice = 'Signed out of Codex.';
+      logAction('codesign.provider-logout', { provider: 'codex' });
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : 'Codex sign-out failed';
+    }
+  }
   function undo(source: 'toolbar' | 'keyboard') {
     const revision = document.revision;
     documentStore.undo();
@@ -466,6 +532,8 @@
     error = '';
     notice = '';
     loadingCandidate = false;
+    generationController?.abort();
+    generationController = null;
     generationRequestId += 1;
     activeCandidateId = '';
     selectedAtomicIds = [];
@@ -800,8 +868,22 @@
     nodes: DesignNode[],
     screenNodes: DesignNode[],
   ): ObservationScope {
-    if (kind === 'selection') return { kind, nodeIds: uniqueIds(mutationIds) };
-    if (kind === 'page')
+    if (kind === 'selection') {
+      const insertionIds = mutationIds.length
+        ? deriveGenerationTarget(document, mutationIds).mutationScope.insertionParentIds
+        : [];
+      return {
+        kind,
+        rootId:
+          insertionIds.length === 1
+            ? insertionIds[0]
+            : mutationIds.length === 1
+              ? mutationIds[0]
+              : undefined,
+        nodeIds: uniqueIds([...insertionIds, ...mutationIds]),
+      };
+    }
+    if (kind === 'screen')
       return { kind, nodeIds: uniqueIds([...mutationIds, ...screenNodes.map((node) => node.id)]) };
     const regionIds = uniqueIds(
       kind === 'parent'
@@ -816,7 +898,11 @@
     const contextIds = screenNodes
       .filter((node) => regions.some((region) => belongsToRegion(node, region, screenNodes)))
       .map((node) => node.id);
-    return { kind, nodeIds: uniqueIds([...mutationIds, ...contextIds]) };
+    return {
+      kind,
+      rootId: regions.length === 1 ? regions[0].id : undefined,
+      nodeIds: uniqueIds([...mutationIds, ...contextIds]),
+    };
   }
   function makeObservationScopeOptions(
     mutationIds: string[],
@@ -826,12 +912,12 @@
     const selectionScope = makeObservationScope('selection', mutationIds, nodes, screenNodes);
     const parentScope = makeObservationScope('parent', mutationIds, nodes, screenNodes);
     const frameScope = makeObservationScope('frame', mutationIds, nodes, screenNodes);
-    const pageScope = makeObservationScope('page', mutationIds, nodes, screenNodes);
+    const pageScope = makeObservationScope('screen', mutationIds, nodes, screenNodes);
     return [
       {
         scope: selectionScope,
         label: 'Selection',
-        description: 'Reference only the layers Codesign may change.',
+        description: 'Reference the selection and its insertion container, not its other children.',
       },
       {
         scope: parentScope,
@@ -854,7 +940,7 @@
       },
       {
         scope: pageScope,
-        label: 'Page',
+        label: 'Screen',
         description: 'Reference every visible layer on this screen.',
       },
     ];
@@ -926,9 +1012,9 @@
         .filter(
           (candidate) =>
             candidate.status === 'candidate' &&
-            sourceDocument.generationRuns[candidate.generationRunId]?.mutationScopeIds.includes(
-              selected?.id ?? '',
-            ),
+            sourceDocument.generationRuns[
+              candidate.generationRunId
+            ]?.target.mutationScope.existingNodeIds.includes(selected?.id ?? ''),
         )
         .map((candidate) => candidate.fidelity),
     );
@@ -1692,7 +1778,15 @@
       logAction('codesign.request-rejected', { action, message: error });
       return;
     }
+    if (!generationCanGenerate) {
+      error = 'The selection is pinned or has no editable insertion region';
+      logAction('codesign.request-rejected', { action, message: error });
+      return;
+    }
     loadingCandidate = true;
+    generationController?.abort();
+    const controller = new AbortController();
+    generationController = controller;
     const requestId = ++generationRequestId;
     const requestProjectId = activeProjectId;
     error = '';
@@ -1708,6 +1802,9 @@
       rerollCandidateId: rerollCandidateId ?? '',
     });
     try {
+      const baseTarget = deriveGenerationTarget(document, selection);
+      const target = { ...baseTarget, observationScope };
+      const visualSnapshot = await captureSceneSnapshot(document, target);
       const pinnedChanges = rerollCandidateId
         ? pinnedAtomicIds
             .filter((id) => document.candidates[rerollCandidateId]?.atomicChangeIds.includes(id))
@@ -1717,21 +1814,37 @@
       const response = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
+          projectId: activeProjectId,
           action,
           requestedFidelity,
-          observationScope,
-          mutationScopeIds: selection,
+          target,
           pinnedNodeIds: document.pinnedNodeIds,
           pinnedAtomicChanges: pinnedChanges,
+          visualSnapshot,
           document: {
             currentRevisionId: document.currentRevisionId,
             activeScreenId: document.activeScreenId,
+            screenName: currentScreen?.name ?? 'Screen',
+            screenRootIds: currentScreen?.rootIds ?? [],
             knownNodeIds: Object.keys(document.nodes),
             nodes: Object.fromEntries(
               observationScope.nodeIds
                 .map((id) => [id, document.nodes[id]])
                 .filter(([, node]) => node),
+            ),
+            frameFidelity: Object.fromEntries(
+              observationScope.nodeIds.flatMap((id) =>
+                document.frameFidelity[id] ? [[id, document.frameFidelity[id]]] : [],
+              ),
+            ),
+            nodeFidelityOverrides: Object.fromEntries(
+              observationScope.nodeIds.flatMap((id) =>
+                document.nodeFidelityOverrides[id]
+                  ? [[id, document.nodeFidelityOverrides[id]]]
+                  : [],
+              ),
             ),
           },
         }),
@@ -1779,15 +1892,37 @@
       });
     } catch (cause) {
       if (requestId !== generationRequestId) return;
+      if (controller.signal.aborted) return;
       error = cause instanceof Error ? cause.message : 'Codesign generation failed';
       codesignStatus = error;
+      documentStore.replaceMetadata(
+        recordGenerationOutcome(document, 'generation-failed', { action, message: error }),
+      );
       logAction('codesign.failed', {
         action,
         message: error,
       });
     } finally {
-      if (requestId === generationRequestId) loadingCandidate = false;
+      if (requestId === generationRequestId) {
+        loadingCandidate = false;
+        generationController = null;
+      }
     }
+  }
+  function cancelGeneration() {
+    if (!loadingCandidate || !generationController) return;
+    generationController.abort();
+    generationRequestId += 1;
+    generationController = null;
+    loadingCandidate = false;
+    codesignStatus = 'Generation cancelled. Your selection and design are unchanged.';
+    documentStore.replaceMetadata(
+      recordGenerationOutcome(document, 'generation-cancelled', {
+        action: 'complete',
+        focusNodeIds: selection,
+      }),
+    );
+    logAction('codesign.cancelled', { focusNodeIds: selection });
   }
   function selectCandidate(candidateId: string) {
     const candidate = document.candidates[candidateId];
@@ -1822,11 +1957,21 @@
     logAction('codesign.atomic-toggled', { changeId, selected });
   }
   function toggleAtomicPin(changeId: string, pinned: boolean) {
-    documentStore.replaceMetadata(setAtomicChangePinned(document, changeId, pinned));
+    let next = document;
+    const changedIds: string[] = [];
+    const visit = (id: string) => {
+      const change = next.atomicChanges[id];
+      if (!change || changedIds.includes(id)) return;
+      if (pinned) change.dependencyIds.forEach(visit);
+      next = setAtomicChangePinned(next, id, pinned);
+      changedIds.push(id);
+    };
+    visit(changeId);
+    documentStore.replaceMetadata(next);
     codesignStatus = pinned
       ? 'Pinned change will be preserved on the next reroll.'
       : 'Change unpinned.';
-    logAction('codesign.atomic-pin-changed', { changeId, pinned });
+    logAction('codesign.atomic-pin-changed', { changeId, pinned, changedIds });
   }
   function acceptCandidate(candidateId: string, acceptAll: boolean) {
     const candidate = document.candidates[candidateId];
@@ -2125,9 +2270,25 @@
     <div class="top-actions">
       <span class="status" title={agentStatus}
         ><i aria-hidden="true" class:online={backend === 'codex'}></i>{backend === 'codex'
-          ? 'Codex'
+          ? providerConnected
+            ? `Codex${providerPlan ? ` · ${providerPlan}` : ''}`
+            : 'Codex · signed out'
           : 'Local'}</span
       >
+      {#if backend === 'codex'}
+        {#if providerConnected}
+          <button title={providerAccount || agentStatus} onclick={signOutOfCodex}
+            ><span class="button-icon" aria-hidden="true">◎</span>Sign out</button
+          >
+        {:else}
+          <button title={agentStatus} onclick={signInToCodex}
+            ><span class="button-icon" aria-hidden="true">◎</span>Sign in to Codex</button
+          >
+        {/if}
+        <button title="Refresh Codex connection status" onclick={refreshProviderStatus}
+          ><span class="button-icon" aria-hidden="true">↻</span>Refresh provider</button
+        >
+      {/if}
       <button title="Undo · Ctrl/⌘ Z" onclick={() => undo('toolbar')}
         ><span class="button-icon" aria-hidden="true">↶</span>Undo</button
       ><button title="Redo · Ctrl/⌘ Shift Z" onclick={() => redo('toolbar')}
@@ -2359,7 +2520,7 @@
       {preview
         ? 'Click a connected object to navigate · Esc to exit'
         : editorMode === 'codesign'
-          ? 'Solid outline: can change · Dashed outline: can reference · Candidate ghosts never block the canvas'
+          ? 'Blue: can change · Amber: focus only · Gray dashed: can reference · Purple: insertion parent · Green: editable region · Candidate ghosts never block the canvas'
           : tool === 'frame'
             ? `${framePresetById(framePresetId)?.name ?? 'Custom frame'} · ${frameSize.width}×${frameSize.height} · Drag custom or place preset`
             : `${tool[0].toUpperCase() + tool.slice(1)} tool · Scroll to pan · Pinch to zoom · Right-click for actions`}
@@ -2407,6 +2568,31 @@
               document.nodes[transition.sourceNodeId].bounds.height / 2 -
               7}>→ state</text
           >{/each}
+        {#if editorMode === 'codesign' && generationTarget}
+          {#each generationTarget.mutationScope.regions as region}
+            <rect
+              class="editable-region-boundary"
+              x={region.x}
+              y={region.y}
+              width={region.width}
+              height={region.height}
+              rx="3"
+            />
+          {/each}
+          {#each generationTarget.mutationScope.insertionParentIds as parentId}
+            {@const parent = document.nodes[parentId]}
+            {#if parent}
+              <rect
+                class="insertion-parent-boundary"
+                x={parent.bounds.x - 3 / zoom}
+                y={parent.bounds.y - 3 / zoom}
+                width={parent.bounds.width + 6 / zoom}
+                height={parent.bounds.height + 6 / zoom}
+                rx={Math.max(parent.style.radius, 3)}
+              />
+            {/if}
+          {/each}
+        {/if}
         {#each renderedNodes as node (node.id)}
           {@const bounds = transientBounds[node.id] ?? node.bounds}
           {@const textLayout = textPosition(node, bounds)}
@@ -2424,14 +2610,32 @@
             ondblclick={(event) => startTextEditing(event, node)}
             oncontextmenu={(event) => openContextMenu(event, node)}
           >
-            {#if editorMode === 'codesign' && observationScope.nodeIds.includes(node.id)}
+            {#if editorMode === 'codesign' && observationScope.nodeIds.includes(node.id) && (observationScope.rootId === node.id || (!observationScope.rootId && (!node.parentId || !observationScope.nodeIds.includes(node.parentId))))}
               <rect
-                class:mutation-boundary={selection.includes(node.id)}
-                class:observation-boundary={!selection.includes(node.id)}
+                class="observation-boundary"
                 x={bounds.x - 6 / zoom}
                 y={bounds.y - 6 / zoom}
                 width={bounds.width + 12 / zoom}
                 height={bounds.height + 12 / zoom}
+                rx={Math.max(node.style.radius, 3)}
+              />
+            {/if}
+            {#if editorMode === 'codesign' && generationTarget?.mutationScope.existingNodeIds.includes(node.id)}
+              <rect
+                class="mutation-boundary"
+                x={bounds.x - 9 / zoom}
+                y={bounds.y - 9 / zoom}
+                width={bounds.width + 18 / zoom}
+                height={bounds.height + 18 / zoom}
+                rx={Math.max(node.style.radius, 3)}
+              />
+            {:else if editorMode === 'codesign' && selection.includes(node.id)}
+              <rect
+                class="focus-boundary"
+                x={bounds.x - 9 / zoom}
+                y={bounds.y - 9 / zoom}
+                width={bounds.width + 18 / zoom}
+                height={bounds.height + 18 / zoom}
                 rx={Math.max(node.style.radius, 3)}
               />
             {/if}
@@ -2726,8 +2930,13 @@
       </g>
     </svg>
     {#if selection.length && !preview}<div class="context-bar">
-        <span>{selection.length} selected</span><button onclick={() => setEditorMode('codesign')}
-          >Open in Co-design</button
+        <span>{selection.length} selected</span><button
+          disabled={loadingCandidate || !generationCanGenerate}
+          title={`Complete with Codesign · ${commandLabel}+Enter`}
+          onclick={() => {
+            setEditorMode('codesign');
+            void generateCandidates('complete');
+          }}>Complete with Codesign</button
         >{#if selectedNodes[0]?.componentBinding}<button onclick={generalize}
             >Apply style to matching components</button
           >{/if}
@@ -2972,6 +3181,10 @@
                   <dt>Edit text</dt>
                   <dd><kbd>Double-click</kbd></dd>
                 </div>
+                <div>
+                  <dt>Complete with Codesign</dt>
+                  <dd><kbd>{commandLabel}+Enter</kbd></dd>
+                </div>
               </dl>
             </section>
           </div>
@@ -3045,7 +3258,9 @@
     </div>
     {#if inspectorTab === 'trace'}
       <CodesignPanel
-        mutationLabels={selectedNodes.map((node) => node.name)}
+        {mutationLabels}
+        {insertionLabels}
+        canGenerate={generationCanGenerate}
         observationSummary={observationScopes.find(
           (item) => item.scope.kind === observationScope.kind,
         )?.label ?? 'Selection'}
@@ -3066,6 +3281,7 @@
           : undefined}
         onObservationScopeChange={selectObservationScope}
         onGenerate={generateCandidates}
+        onCancel={cancelGeneration}
         onNavigateFidelity={navigateRepresentation}
         onStageFidelity={stageFidelity}
         onInspectFidelityCandidate={inspectFidelityCandidate}
@@ -3971,7 +4187,10 @@
     pointer-events: none;
   }
   .mutation-boundary,
-  .observation-boundary {
+  .focus-boundary,
+  .observation-boundary,
+  .editable-region-boundary,
+  .insertion-parent-boundary {
     fill: none;
     vector-effect: non-scaling-stroke;
     pointer-events: none;
@@ -3980,10 +4199,26 @@
     stroke: #125f99;
     stroke-width: 3;
   }
+  .focus-boundary {
+    stroke: #a66008;
+    stroke-width: 2.5;
+    stroke-dasharray: 6 4;
+  }
   .observation-boundary {
     stroke: #667783;
     stroke-width: 1.5;
     stroke-dasharray: 7 5;
+  }
+  .editable-region-boundary {
+    fill: #176b3a12;
+    stroke: #176b3a;
+    stroke-width: 2;
+    stroke-dasharray: 2 3;
+  }
+  .insertion-parent-boundary {
+    stroke: #7a3db8;
+    stroke-width: 2;
+    stroke-dasharray: 10 4;
   }
   .evidence-highlight {
     fill: #f3b94218;

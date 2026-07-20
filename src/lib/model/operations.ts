@@ -11,6 +11,14 @@ export class OperationError extends Error {}
 const clone = <T>(value: T): T => structuredClone(value);
 const present = (document: DesignDocument, ids: string[]) => ids.every((id) => document.nodes[id]);
 
+function applyStylePatch(node: DesignNode, patch: Partial<DesignNode['style']>) {
+  node.style = { ...node.style, ...patch };
+  if (!patch.density || !node.componentBinding) return;
+  const props = { ...node.componentBinding.props, density: patch.density };
+  if (validateComponentBinding(node.componentBinding.componentId, props).ok)
+    node.componentBinding = { ...node.componentBinding, props };
+}
+
 function summary(operation: DesignOperation) {
   const count = 'targetIds' in operation ? operation.targetIds.length : 1;
   const labels: Record<DesignOperation['type'], string> = {
@@ -221,13 +229,13 @@ export function applyOperation(
       break;
     case 'style':
       for (const id of operation.targetIds) {
-        document.nodes[id].style = { ...document.nodes[id].style, ...operation.patch };
+        applyStylePatch(document.nodes[id], operation.patch);
         touch(document.nodes[id]);
       }
       break;
     case 'generalize':
       for (const id of operation.targetIds) {
-        document.nodes[id].style = { ...document.nodes[id].style, ...operation.patch };
+        applyStylePatch(document.nodes[id], operation.patch);
         touch(document.nodes[id]);
       }
       break;

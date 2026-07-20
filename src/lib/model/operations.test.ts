@@ -86,6 +86,34 @@ describe('design operations', () => {
     ).toThrow('not valid');
   });
 
+  it('keeps supported component density in sync with direct style edits', () => {
+    let document = applyOperation(blankDocument(), {
+      id: 'create-row',
+      type: 'create',
+      actor: 'user',
+      node: node('row', 0, 0),
+    });
+    document = applyOperation(document, {
+      id: 'promote-row',
+      type: 'promote',
+      actor: 'agent',
+      targetIds: ['row'],
+      componentId: 'DataRow',
+      props: { density: 'comfortable', interactive: true },
+    });
+
+    const compact = applyOperation(document, {
+      id: 'compact-row',
+      type: 'style',
+      actor: 'user',
+      targetIds: ['row'],
+      patch: { density: 'compact', padding: 8 },
+    });
+
+    expect(compact.nodes.row.style).toMatchObject({ density: 'compact', padding: 8 });
+    expect(compact.nodes.row.componentBinding?.props).toMatchObject({ density: 'compact' });
+  });
+
   it('keeps a source screen isolated when a branch is changed', () => {
     let document = applyOperation(blankDocument(), {
       id: 'create-a',

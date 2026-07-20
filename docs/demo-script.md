@@ -16,6 +16,8 @@
 
 **2:02–2:23 — Inspect intent.** Open Intent. Show Ambiguous, Inferred, and Confirmed totals, then select a node to show its semantic role, commitment, binding, provenance, operation ID, and protection status.
 
+Use **Why this intent** to make the source explicit: spatial patterns begin as inference; accepted proposals, assigned roles, and connections confirm intent; promotion resolves it against the registered component contract.
+
 **2:23–2:42 — Show shared IR.** Expand **Operation history**, then **Svelte projection**. Point out agent versus user attribution, registered imports for promoted content, and greybox placeholders for unresolved content. The projection is generated from the same document as the canvas.
 
 **2:42–2:57 — Explore safely.** Choose **Branch current screen**, change the alternative, then select the Accepted branch’s original screen in the left panel. The original remains unchanged. Alternatively, switch the agency envelope to Explore and accept a proposal; Malleable creates the branch before applying it.

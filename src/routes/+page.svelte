@@ -379,6 +379,36 @@
       y: (event.clientY - rect.top - pan.y) / zoom,
     };
   }
+  function contentInset(node: DesignNode) {
+    return Math.max(
+      4,
+      Math.min(node.style.padding, (node.bounds.width - 8) / 2, (node.bounds.height - 8) / 2),
+    );
+  }
+  function intentEvidence(node: DesignNode) {
+    const evidence: string[] = [];
+    for (const hypothesis of document.hypotheses)
+      if (hypothesis.status === 'accepted' && hypothesis.targetIds.includes(node.id))
+        evidence.push(
+          hypothesis.kind === 'repetition'
+            ? `Repeated geometry: ${hypothesis.evidence.join(', ')}`
+            : `${hypothesis.kind}: ${hypothesis.evidence.join(', ')}`,
+        );
+    if (node.semantics?.role)
+      evidence.push(
+        `${node.semantics.commitment === 'confirmed' ? 'Confirmed' : 'Inferred'} role: ${node.semantics.role}`,
+      );
+    if (node.componentBinding)
+      evidence.push(`Promoted to the registered ${node.componentBinding.componentId} contract`);
+    const transition = document.transitions.find((item) => item.sourceNodeId === node.id);
+    if (transition) {
+      const target = document.screens.find((screen) => screen.id === transition.targetScreenId);
+      evidence.push(`Connected interaction: opens ${target?.name ?? 'another screen'}`);
+    }
+    if (!evidence.length)
+      evidence.push('No intent has been committed yet; this remains an ambiguous canvas object');
+    return evidence;
+  }
   function canvasDown(event: PointerEvent) {
     contextMenu = null;
     if (preview) return;
@@ -1024,6 +1054,14 @@
               fill={node.style.fill}
               stroke={node.style.stroke}
             />
+            {#if node.componentBinding || selection.includes(node.id)}<rect
+                class="content-area"
+                x={node.bounds.x + contentInset(node)}
+                y={node.bounds.y + contentInset(node)}
+                width={Math.max(0, node.bounds.width - contentInset(node) * 2)}
+                height={Math.max(0, node.bounds.height - contentInset(node) * 2)}
+                rx={Math.max(0, node.style.radius - 2)}
+              />{/if}
             {#if node.componentBinding}<rect
                 class="component-accent"
                 x={node.bounds.x}
@@ -1031,13 +1069,20 @@
                 width="4"
                 height={node.bounds.height}
                 rx="2"
-              /><text class="component-name" x={node.bounds.x + 14} y={node.bounds.y + 21}
-                >{node.componentBinding.componentId}</text
+              /><text
+                class="component-name"
+                x={node.bounds.x + contentInset(node)}
+                y={node.bounds.y + Math.min(contentInset(node) + 11, node.bounds.height - 8)}
+                >{node.componentBinding.componentId} · {node.style.density ?? 'comfortable'}</text
               >{/if}
             {#if node.text || node.semantics}<text
                 class="node-label"
-                x={node.bounds.x + 12}
-                y={node.bounds.y + (node.componentBinding ? 42 : 24)}
+                x={node.bounds.x + contentInset(node)}
+                y={node.bounds.y +
+                  Math.min(
+                    contentInset(node) + (node.componentBinding ? 28 : node.style.fontSize),
+                    node.bounds.height - 7,
+                  )}
                 style={`font-size:${node.style.fontSize}px;fill:${node.style.textColor}`}
                 >{node.text ?? node.semantics?.role}</text
               >{/if}
@@ -1265,6 +1310,16 @@
             >{/if}
         </section>
         <section>
+          <h3>Why this intent</h3>
+          <p class="intent-origin">
+            Intent comes from canvas structure and actions you explicitly accept—not from an
+            invisible rewrite.
+          </p>
+          <ul class="intent-evidence">
+            {#each intentEvidence(node) as evidence}<li>{evidence}</li>{/each}
+          </ul>
+        </section>
+        <section>
           <h3>Provenance</h3>
           <dl>
             <dt>Actor</dt>
@@ -1316,8 +1371,11 @@
               ></select
             ></label
           ><label
-            >Corner radius<input
+            ><span class="control-label"
+              ><span>Corner radius</span><output>{node.style.radius}px</output></span
+            ><input
               type="range"
+              aria-label="Corner radius"
               min="0"
               max="12"
               step="4"
@@ -1325,8 +1383,11 @@
               oninput={(event) => changeStyle({ radius: Number(event.currentTarget.value) })}
             /></label
           ><label
-            >Padding<input
+            ><span class="control-label"
+              ><span>Padding</span><output>{node.style.padding}px</output></span
+            ><input
               type="range"
+              aria-label="Padding"
               min="4"
               max="24"
               step="4"
@@ -1347,6 +1408,11 @@
       </div>
       <section>
         <h3>Document intent</h3>
+        <p class="intent-origin">
+          Intent is accumulated from your layout and actions: aligned shapes suggest patterns;
+          accepted proposals, roles, and connections confirm them; promotion binds them to a
+          registered component contract.
+        </p>
         <div class="intent-counts">
           <div>
             <strong
@@ -1880,6 +1946,14 @@
     font-weight: 700;
     fill: #285e8f;
   }
+  .content-area {
+    fill: #397eb808;
+    stroke: #397eb855;
+    stroke-width: 1;
+    stroke-dasharray: 3 2;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+  }
   .node-label {
     pointer-events: none;
   }
@@ -2251,6 +2325,15 @@
     color: #636b75;
     margin: 9px 0;
   }
+  .control-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .control-label output {
+    color: #303944;
+    font-variant-numeric: tabular-nums;
+  }
   .inspector input,
   .inspector select {
     width: 100%;
@@ -2278,6 +2361,21 @@
   .muted {
     color: #737a84;
     line-height: 1.45;
+  }
+  .intent-origin {
+    margin: 0 0 10px;
+    color: #646d78;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .intent-evidence {
+    display: grid;
+    gap: 7px;
+    margin: 0;
+    padding-left: 17px;
+    color: #3f4a56;
+    font-size: 11px;
+    line-height: 1.4;
   }
   .wide {
     width: 100%;

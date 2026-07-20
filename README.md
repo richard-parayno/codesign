@@ -44,7 +44,7 @@ Malleable never reads or forwards `~/.codex/auth.json`. App Server runs read-onl
 
 - `src/lib/model/types.ts` defines the source-of-truth document, nodes, operations, proposal, and Zod schemas.
 - `src/lib/model/operations.ts` validates and deterministically reduces create, move, resize, delete, repeat, semantic bind, transition, promotion, style, generalize, duplicate-screen, and branch operations.
-- `src/lib/model/store.ts` adds transaction-level snapshot undo/redo and versioned local persistence.
+- `src/lib/model/store.ts` adds per-project snapshot undo/redo and versioned local project persistence.
 - `src/lib/design-system/registry.ts` is the component/token allowlist shared by promotion validation and projection.
 - `src/lib/model/codegen.ts` produces the read-only Svelte projection from the same document used by the canvas.
 - `src/lib/agent/local.ts` provides offline interpretation.
@@ -56,6 +56,7 @@ The three agency envelopes are deliberately different: Protect always leaves age
 
 ## Editor controls
 
+- Use the labeled **Project** picker in the left sidebar to switch local projects; **New project**, **Rename**, and **Delete** manage them
 - `V` Select, `F` Frame, `R` Rectangle, `T` Text, `C` Connect
 - Shift-click for multi-selection
 - Drag a selected object to move it; drag the lower-right handle to resize
@@ -69,7 +70,7 @@ The three agency envelopes are deliberately different: Protect always leaves age
 
 ## Development action logs
 
-While `pnpm dev` is running, meaningful browser actions are forwarded to the SvelteKit terminal as one-line JSON records prefixed with `[malleable:action]`. The stream includes labeled control clicks, validated operations, proposal lifecycle events, screen navigation, canvas preferences, and debounced viewport changes. Debug logging is disabled in production and does not send the full design document.
+While `pnpm dev` is running, meaningful browser actions are forwarded to the SvelteKit terminal as one-line JSON records prefixed with `[malleable:action]`. The stream includes labeled control clicks, project creation lifecycle events, validated operations, proposal lifecycle events, screen navigation, canvas preferences, and debounced viewport changes. Debug logging is disabled in production and does not send the full design document.
 
 ## Verification
 
@@ -80,10 +81,10 @@ devenv shell -- pnpm test
 devenv shell -- pnpm build
 ```
 
-Tests cover reducer invariants, registry rejection, branch isolation, deterministic Svelte compilation, and the App Server lifecycle through a fake JSON-RPC process. Tests never make a real Codex turn or consume credits.
+Tests cover reducer invariants, project migration and persistence, registry rejection, branch isolation, deterministic Svelte compilation, and the App Server lifecycle through a fake JSON-RPC process. Tests never make a real Codex turn or consume credits.
 
 ## MVP limitations
 
-The editor uses bounded axis-aligned objects rather than arbitrary vectors; hierarchy is semantic rather than a complete auto-layout engine; multi-selection resize is intentionally omitted; the projection is deterministic export, not arbitrary bidirectional source editing; persistence is one local browser document; App Server keeps one ephemeral thread per development server and does not yet expose thread/branch management controls. This is a local hackathon prototype, not a hosted multi-user service.
+The editor uses bounded axis-aligned objects rather than arbitrary vectors; hierarchy is semantic rather than a complete auto-layout engine; multi-selection resize is intentionally omitted; the projection is deterministic export, not arbitrary bidirectional source editing; projects exist only in the current browser’s local storage; App Server keeps one ephemeral thread per development server and does not yet expose thread/branch management controls. This is a local hackathon prototype, not a hosted multi-user service.
 
 See [docs/demo-script.md](docs/demo-script.md) for the timed demo path.

@@ -62,9 +62,14 @@ The three agency envelopes are deliberately different: Protect always leaves age
 - Scroll or use a two-finger touchpad gesture to pan in either axis
 - Pinch on a touchpad to zoom around the pointer; middle-drag remains available for mouse panning
 - Right-click an object for relevant element actions, or right-click empty canvas for canvas actions
+- Use **Canvas color** in the canvas toolbar to choose a solid workspace color; the preference persists locally
 - Arrow keys nudge by 1 px; Shift+arrow nudges by 10 px
 - Ctrl/⌘+Z undo; Ctrl/⌘+Shift+Z or Ctrl/⌘+Y redo
 - Delete/Backspace removes selected objects; Escape cancels a proposal or exits Preview
+
+## Development action logs
+
+While `pnpm dev` is running, meaningful browser actions are forwarded to the SvelteKit terminal as one-line JSON records prefixed with `[malleable:action]`. The stream includes labeled control clicks, validated operations, proposal lifecycle events, screen navigation, canvas preferences, and debounced viewport changes. Debug logging is disabled in production and does not send the full design document.
 
 ## Verification
 

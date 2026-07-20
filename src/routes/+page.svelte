@@ -13,6 +13,7 @@
   import { demoCheckpoint } from '$lib/model/checkpoint';
   import { generateSvelte } from '$lib/model/codegen';
   import { componentRegistry } from '$lib/design-system/registry';
+  import { logAction } from '$lib/debug/action-log';
 
   type Tool = 'select' | 'frame' | 'rectangle' | 'text' | 'connect';
   const DEFAULT_CANVAS_BACKGROUND = '#edf0f3';
@@ -48,6 +49,7 @@
   let idCounter = 0;
   let restored = false;
   let lastGuidedSelection = '';
+  let viewportLogTimer: ReturnType<typeof setTimeout> | undefined;
 
   $: document = $documentStore.present;
   $: currentScreen =
@@ -71,6 +73,13 @@
     ) {
       lastGuidedSelection = guidedSelection;
       proposal = localProposal(document, selection, 'interpret');
+      logAction('proposal.ready', {
+        intent: 'interpret',
+        source: proposal.source,
+        operationType: proposal.operation.type,
+        targetIds: proposal.targetIds,
+        automatic: true,
+      });
     } else if (selection.length < 2) lastGuidedSelection = '';
   }
 
@@ -99,12 +108,12 @@
       const key = event.key.toLowerCase();
       if ((event.metaKey || event.ctrlKey) && key === 'z') {
         event.preventDefault();
-        event.shiftKey ? documentStore.redo() : documentStore.undo();
+        event.shiftKey ? redo('keyboard') : undo('keyboard');
         return;
       }
       if ((event.metaKey || event.ctrlKey) && key === 'y') {
         event.preventDefault();
-        documentStore.redo();
+        redo('keyboard');
         return;
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
@@ -119,6 +128,7 @@
         contextMenu = null;
         draft = null;
         gesture = null;
+        logAction('editor.escape', { revision: document.revision });
       }
       const shortcuts: Record<string, Tool> = {
         v: 'select',
@@ -127,7 +137,7 @@
         t: 'text',
         c: 'connect',
       };
-      if (shortcuts[key]) tool = shortcuts[key];
+      if (shortcuts[key]) setTool(shortcuts[key], 'keyboard');
       if (event.key.startsWith('Arrow') && selection.length) {
         event.preventDefault();
         const step = event.shiftKey ? 10 : 1;
@@ -148,6 +158,7 @@
     window.addEventListener('keydown', keydown);
     window.addEventListener('pointerdown', dismissContextMenu);
     return () => {
+      if (viewportLogTimer) clearTimeout(viewportLogTimer);
       window.removeEventListener('keydown', keydown);
       window.removeEventListener('pointerdown', dismissContextMenu);
     };
@@ -157,7 +168,90 @@
     idCounter += 1;
     return `${prefix}-${Date.now().toString(36)}-${idCounter}`;
   }
-  function setCanvasBackground(value: string) {
+  function controlArea(control: Element) {
+    if (control.closest('.topbar')) return 'topbar';
+    if (control.closest('.tools')) return 'tools';
+    if (control.closest('.outline')) return 'sidebar';
+    if (control.closest('.canvas-toolbar')) return 'canvas-toolbar';
+    if (control.closest('.context-menu')) return 'context-menu';
+    if (control.closest('.context-bar')) return 'selection-toolbar';
+    if (control.closest('.proposal-card')) return 'proposal';
+    if (control.closest('.bottom-panel')) return 'bottom-panel';
+    if (control.closest('.inspector')) return 'inspector';
+    return 'editor';
+  }
+  function logControlClick(event: MouseEvent) {
+    const control = event.target instanceof Element ? event.target.closest('button') : null;
+    if (!(control instanceof HTMLButtonElement) || control.disabled) return;
+    const label =
+      control.getAttribute('aria-label') ||
+      control.textContent?.replace(/\s+/g, ' ').trim() ||
+      'Unlabelled control';
+    logAction('control.clicked', { label, area: controlArea(control) });
+  }
+  function setTool(nextTool: Tool, source: 'toolbar' | 'keyboard' | 'context-menu') {
+    if (tool === nextTool) return;
+    tool = nextTool;
+    logAction('tool.changed', { tool: nextTool, source });
+  }
+  function setEditorMode(nextPreview: boolean) {
+    if (preview === nextPreview) return;
+    preview = nextPreview;
+    logAction('mode.changed', { mode: nextPreview ? 'preview' : 'edit' });
+  }
+  function setAgencyMode(nextAgency: Agency) {
+    if (agency === nextAgency) return;
+    agency = nextAgency;
+    logAction('agency.changed', { agency: nextAgency });
+  }
+  function undo(source: 'toolbar' | 'keyboard') {
+    const revision = document.revision;
+    documentStore.undo();
+    logAction('history.undo', { source, fromRevision: revision });
+  }
+  function redo(source: 'toolbar' | 'keyboard') {
+    const revision = document.revision;
+    documentStore.redo();
+    logAction('history.redo', { source, fromRevision: revision });
+  }
+  function resetDocument() {
+    const nodeCount = Object.keys(document.nodes).length;
+    documentStore.reset();
+    selection = [];
+    logAction('document.reset', { fromRevision: document.revision, nodeCount });
+  }
+  function loadDemoCheckpoint() {
+    documentStore.replace(demoCheckpoint());
+    selection = [];
+    logAction('document.demo-loaded', { fromRevision: document.revision });
+  }
+  function navigateToScreen(screenId: string, branchId?: string, source = 'sidebar') {
+    const fromScreenId = document.activeScreenId;
+    documentStore.navigate(screenId, branchId);
+    selection = [];
+    logAction('screen.navigated', { fromScreenId, screenId, branchId: branchId ?? '', source });
+  }
+  function scheduleViewportLog(source: string) {
+    if (viewportLogTimer) clearTimeout(viewportLogTimer);
+    viewportLogTimer = setTimeout(() => {
+      logAction('viewport.changed', {
+        source,
+        zoom: Number(zoom.toFixed(3)),
+        panX: Math.round(pan.x),
+        panY: Math.round(pan.y),
+      });
+    }, 180);
+  }
+  function setZoom(nextZoom: number, source: string) {
+    zoom = Math.min(2, Math.max(0.35, nextZoom));
+    scheduleViewportLog(source);
+  }
+  function resetViewport(source: string) {
+    zoom = 1;
+    pan = { x: 0, y: 0 };
+    scheduleViewportLog(source);
+  }
+  function setCanvasBackground(value: string, source = 'picker') {
     if (!/^#[0-9a-f]{6}$/i.test(value)) return;
     canvasBackground = value;
     try {
@@ -165,14 +259,40 @@
     } catch {
       // Keep the in-memory preference when browser storage is unavailable.
     }
+    logAction('canvas.background-changed', { value, source });
   }
   function apply(operation: DesignOperation) {
+    const baseRevision = document.revision;
+    const targetIds =
+      'targetIds' in operation
+        ? operation.targetIds
+        : 'targetId' in operation
+          ? [operation.targetId]
+          : operation.type === 'transition'
+            ? [operation.transition.sourceNodeId]
+            : [];
     try {
       documentStore.apply(operation);
       error = '';
       notice = operation.type.replaceAll('-', ' ') + ' applied';
+      logAction('operation.applied', {
+        type: operation.type,
+        actor: operation.actor,
+        operationId: operation.id,
+        baseRevision,
+        nextRevision: baseRevision + 1,
+        targetIds: targetIds.slice(0, 30),
+        targetCount: targetIds.length,
+      });
     } catch (cause) {
       error = cause instanceof Error ? cause.message : 'That operation could not be applied';
+      logAction('operation.failed', {
+        type: operation.type,
+        actor: operation.actor,
+        operationId: operation.id,
+        baseRevision,
+        message: error,
+      });
     }
   }
   function point(event: PointerEvent) {
@@ -193,6 +313,7 @@
     if (event.button !== 0) return;
     if (event.target !== event.currentTarget) return;
     const p = point(event);
+    if (selection.length) logAction('selection.cleared', { source: 'canvas' });
     selection = [];
     proposal = null;
     if (tool === 'frame' || tool === 'rectangle' || tool === 'text') {
@@ -233,6 +354,7 @@
   }
   function canvasUp(event: PointerEvent) {
     if (!gesture) return;
+    const completedGesture = gesture.mode;
     const p = gesture.mode === 'pan' ? null : point(event);
     if (gesture.mode === 'draw' && draft && draft.width > 8 && draft.height > 8) {
       const nodeId = uid('node');
@@ -271,6 +393,7 @@
       });
     gesture = null;
     draft = null;
+    if (completedGesture === 'pan') scheduleViewportLog('middle-drag');
   }
   function nodeDown(event: PointerEvent, node: DesignNode) {
     event.stopPropagation();
@@ -278,12 +401,13 @@
     if (event.button !== 0) return;
     if (preview) {
       const transition = document.transitions.find((item) => item.sourceNodeId === node.id);
-      if (transition) documentStore.navigate(transition.targetScreenId);
+      if (transition) navigateToScreen(transition.targetScreenId, undefined, 'preview-transition');
       return;
     }
     if (tool === 'connect') {
       connectSource = node.id;
       notice = `Connection starts at ${node.name}. Choose a destination screen.`;
+      logAction('connection.started', { nodeId: node.id, source: 'canvas' });
       return;
     }
     selection = event.shiftKey
@@ -291,6 +415,11 @@
         ? selection.filter((id) => id !== node.id)
         : [...selection, node.id]
       : [node.id];
+    logAction('selection.changed', {
+      source: 'canvas',
+      nodeIds: selection,
+      additive: event.shiftKey,
+    });
     proposal = null;
     const p = point(event);
     gesture = { mode: 'move', startX: p.x, startY: p.y, lastX: p.x, lastY: p.y };
@@ -341,6 +470,7 @@
         y: pointer.y - world.y * nextZoom,
       };
       zoom = nextZoom;
+      scheduleViewportLog('pinch');
       return;
     }
     const unit =
@@ -352,6 +482,7 @@
     const horizontal = event.deltaX || (event.shiftKey ? event.deltaY : 0);
     const vertical = event.shiftKey && !event.deltaX ? 0 : event.deltaY;
     pan = { x: pan.x - horizontal * unit, y: pan.y - vertical * unit };
+    scheduleViewportLog('scroll');
   }
   async function openContextMenu(event: MouseEvent, node?: DesignNode) {
     event.preventDefault();
@@ -365,6 +496,11 @@
       y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
       nodeId: node?.id,
     };
+    logAction('context-menu.opened', {
+      target: node ? 'node' : 'canvas',
+      nodeId: node?.id ?? '',
+      selectionCount: selection.length,
+    });
     await tick();
     contextMenuElement?.querySelector<HTMLButtonElement>('button')?.focus();
   }
@@ -372,8 +508,9 @@
     if (!contextNode) return;
     selection = [contextNode.id];
     connectSource = contextNode.id;
-    tool = 'connect';
+    setTool('connect', 'context-menu');
     notice = `Connection starts at ${contextNode.name}. Choose a destination screen.`;
+    logAction('connection.started', { nodeId: contextNode.id, source: 'context-menu' });
     contextMenu = null;
   }
   function promoteFromContext() {
@@ -399,10 +536,18 @@
   async function interpret(intent: 'interpret' | 'promote') {
     if (!selection.length) {
       error = 'Select objects to interpret';
+      logAction('proposal.rejected', { intent, message: error });
       return;
     }
     loadingProposal = true;
     error = '';
+    logAction('proposal.requested', {
+      intent,
+      agency,
+      backend,
+      targetIds: selection,
+      revision: document.revision,
+    });
     try {
       if (backend === 'codex') {
         const response = await fetch('/api/agent', {
@@ -426,10 +571,25 @@
           ? 'Codex unavailable · local fallback'
           : 'Codex App Server ready';
       } else proposal = localProposal(document, selection, intent);
+      if (proposal) {
+        logAction('proposal.ready', {
+          intent,
+          source: proposal.source,
+          operationType: proposal.operation.type,
+          targetIds: proposal.targetIds,
+          automatic: false,
+        });
+      }
     } catch (cause) {
       proposal = localProposal(document, selection, intent);
       agentStatus = 'Local fallback active';
       error = cause instanceof Error ? cause.message : 'Agent unavailable';
+      logAction('proposal.fallback', {
+        intent,
+        message: error,
+        operationType: proposal.operation.type,
+        targetIds: proposal.targetIds,
+      });
     } finally {
       loadingProposal = false;
     }
@@ -438,9 +598,21 @@
     if (!proposal) return;
     if (proposal.baseRevision !== document.revision) {
       error = 'Selection changed—interpret again';
+      logAction('proposal.stale', {
+        proposalId: proposal.id,
+        baseRevision: proposal.baseRevision,
+        currentRevision: document.revision,
+      });
       proposal = null;
       return;
     }
+    logAction('proposal.accepted', {
+      proposalId: proposal.id,
+      operationType: proposal.operation.type,
+      source: proposal.source,
+      agency,
+      targetIds: proposal.targetIds,
+    });
     if (agency !== 'explore') {
       apply(proposal.operation);
       proposal = null;
@@ -459,6 +631,15 @@
     apply({ id: uid('op'), type: 'create-branch', actor: 'agent', sourceScreenId, branchId });
     const branchOperation = { ...original, id: uid('op'), targetIds: mapped } as DesignOperation;
     queueMicrotask(() => apply(branchOperation));
+    proposal = null;
+  }
+  function dismissProposal() {
+    if (!proposal) return;
+    logAction('proposal.dismissed', {
+      proposalId: proposal.id,
+      operationType: proposal.operation.type,
+      source: proposal.source,
+    });
     proposal = null;
   }
   function duplicateScreen() {
@@ -553,6 +734,8 @@
   /></svelte:head
 >
 
+<svelte:window onclick={logControlClick} />
+
 <div class="app" class:preview>
   <header class="topbar">
     <div class="brand">
@@ -561,9 +744,9 @@
       >
     </div>
     <div class="mode-switch" aria-label="Editor mode">
-      <button class:active={!preview} onclick={() => (preview = false)}>Edit</button><button
+      <button class:active={!preview} onclick={() => setEditorMode(false)}>Edit</button><button
         class:active={preview}
-        onclick={() => (preview = true)}>Preview</button
+        onclick={() => setEditorMode(true)}>Preview</button
       >
     </div>
     <div class="top-actions">
@@ -580,29 +763,22 @@
               : mode === 'guide'
                 ? 'Stage safe contextual suggestions for local confirmation'
                 : 'Accept broader suggestions only on a new branch'}
-            onclick={() => (agency = mode as Agency)}>{mode}</button
+            onclick={() => setAgencyMode(mode as Agency)}>{mode}</button
           >{/each}
       </div>
-      <button title="Undo · Ctrl/⌘ Z" onclick={() => documentStore.undo()}
+      <button title="Undo · Ctrl/⌘ Z" onclick={() => undo('toolbar')}
         ><span class="button-icon" aria-hidden="true">↶</span>Undo</button
-      ><button title="Redo · Ctrl/⌘ Shift Z" onclick={() => documentStore.redo()}
+      ><button title="Redo · Ctrl/⌘ Shift Z" onclick={() => redo('toolbar')}
         ><span class="button-icon" aria-hidden="true">↷</span>Redo</button
       >
       <button
         onclick={() => {
           if (confirm('Reset the design to a blank canvas?')) {
-            documentStore.reset();
-            selection = [];
+            resetDocument();
           }
         }}>Reset to blank</button
       >
-      <button
-        class="checkpoint"
-        onclick={() => {
-          documentStore.replace(demoCheckpoint());
-          selection = [];
-        }}>Load demo checkpoint</button
-      >
+      <button class="checkpoint" onclick={loadDemoCheckpoint}>Load demo checkpoint</button>
     </div>
   </header>
 
@@ -611,7 +787,7 @@
       {#each [{ id: 'select', label: 'Select', icon: '↖', key: 'V' }, { id: 'frame', label: 'Frame', icon: '▣', key: 'F' }, { id: 'rectangle', label: 'Rectangle', icon: '□', key: 'R' }, { id: 'text', label: 'Text', icon: 'T', key: 'T' }, { id: 'connect', label: 'Connect', icon: '↗', key: 'C' }] as item}<button
           class:active={tool === item.id}
           title={`${item.label} tool · ${item.key}`}
-          onclick={() => (tool = item.id as Tool)}
+          onclick={() => setTool(item.id as Tool, 'toolbar')}
           ><span class="tool-icon" aria-hidden="true">{item.icon}</span><span class="tool-label"
             >{item.label}</span
           ><kbd>{item.key}</kbd></button
@@ -629,8 +805,7 @@
           <div class:active={screen.id === document.activeScreenId} class="screen-row">
             <button
               onclick={() => {
-                documentStore.navigate(screen.id, branchItem.id);
-                selection = [];
+                navigateToScreen(screen.id, branchItem.id);
               }}>{screen.name}</button
             >{#if connectSource && screen.id !== document.activeScreenId}<button
                 class="connect-dest"
@@ -647,6 +822,11 @@
             class:selected={selection.includes(node.id)}
             onclick={(event) => {
               selection = event.shiftKey ? [...new Set([...selection, node.id])] : [node.id];
+              logAction('selection.changed', {
+                source: 'layers',
+                nodeIds: selection,
+                additive: event.shiftKey,
+              });
             }}
             ><span class="layer-kind"
               >{node.componentBinding
@@ -667,14 +847,11 @@
 
   <main class="workspace">
     <div class="canvas-toolbar">
-      <button onclick={() => (zoom = Math.max(0.35, zoom - 0.1))}
+      <button onclick={() => setZoom(zoom - 0.1, 'zoom-out-button')}
         ><span aria-hidden="true">−</span>Zoom out</button
-      ><button
-        onclick={() => {
-          zoom = 1;
-          pan = { x: 0, y: 0 };
-        }}>Reset zoom <span class="zoom-value">{Math.round(zoom * 100)}%</span></button
-      ><button onclick={() => (zoom = Math.min(2, zoom + 0.1))}
+      ><button onclick={() => resetViewport('reset-zoom-button')}
+        >Reset zoom <span class="zoom-value">{Math.round(zoom * 100)}%</span></button
+      ><button onclick={() => setZoom(zoom + 0.1, 'zoom-in-button')}
         ><span aria-hidden="true">＋</span>Zoom in</button
       ><label class="canvas-color-control"
         ><span>Canvas color</span><input
@@ -686,7 +863,8 @@
       ><button
         class="reset-canvas-color"
         disabled={canvasBackground === DEFAULT_CANVAS_BACKGROUND}
-        onclick={() => setCanvasBackground(DEFAULT_CANVAS_BACKGROUND)}>Reset color</button
+        onclick={() => setCanvasBackground(DEFAULT_CANVAS_BACKGROUND, 'reset-button')}
+        >Reset color</button
       >
     </div>
     <div class="canvas-help">
@@ -828,7 +1006,7 @@
         </div>
         <button class="accept" onclick={acceptProposal}
           >Accept{agency === 'explore' ? ' on branch' : ''}</button
-        ><button onclick={() => (proposal = null)}>Dismiss</button>
+        ><button onclick={dismissProposal}>Dismiss</button>
       </div>{/if}
 
     {#if contextMenu}<div
@@ -850,7 +1028,7 @@
         {#if preview}<button
             role="menuitem"
             onclick={() => {
-              preview = false;
+              setEditorMode(false);
               contextMenu = null;
             }}>Exit preview to edit</button
           >{:else if contextNode}<button role="menuitem" onclick={promoteFromContext}
@@ -864,8 +1042,7 @@
           >{:else}<button
             role="menuitem"
             onclick={() => {
-              zoom = 1;
-              pan = { x: 0, y: 0 };
+              resetViewport('context-menu');
               contextMenu = null;
             }}>Reset canvas view</button
           ><button

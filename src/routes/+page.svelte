@@ -113,7 +113,9 @@
   let collapsedLayerIds = new Set<string>();
   let editingLayerId = '';
   let editingLayerName = '';
+  let editingLayerSource: 'layers' | 'canvas' = 'layers';
   let layerNameInput: HTMLInputElement;
+  let canvasNameInput: HTMLInputElement;
   let gesture: {
     mode: 'draw' | 'move' | 'duplicate' | 'resize' | 'pan' | 'marquee';
     startX: number;
@@ -456,6 +458,7 @@
     collapsedLayerIds = new Set();
     editingLayerId = '';
     editingLayerName = '';
+    editingLayerSource = 'layers';
     contextMenu = null;
     draft = null;
     gesture = null;
@@ -1584,15 +1587,22 @@
       childCount: node.childIds.length,
     });
   }
-  async function startLayerRename(event: MouseEvent, node: DesignNode) {
+  async function startLayerRename(
+    event: MouseEvent | KeyboardEvent,
+    node: DesignNode,
+    source: 'layers' | 'canvas' = 'layers',
+  ) {
+    event.preventDefault();
     event.stopPropagation();
     selection = [node.id];
     editingLayerId = node.id;
     editingLayerName = node.name;
-    logAction('layer.rename-opened', { nodeId: node.id, name: node.name });
+    editingLayerSource = source;
+    logAction('layer.rename-opened', { nodeId: node.id, name: node.name, source });
     await tick();
-    layerNameInput?.focus();
-    layerNameInput?.select();
+    const input = source === 'canvas' ? canvasNameInput : layerNameInput;
+    input?.focus();
+    input?.select();
   }
   function finishLayerRename(commit: boolean) {
     const nodeId = editingLayerId;
@@ -1600,6 +1610,7 @@
     const name = editingLayerName.trim();
     editingLayerId = '';
     editingLayerName = '';
+    editingLayerSource = 'layers';
     if (!commit || !nodeId) return;
     if (!name) {
       error = 'Layer names cannot be empty';
@@ -1615,6 +1626,21 @@
       patch: { name },
     });
     logAction('layer.renamed', { nodeId, fromName: previousName ?? '', name });
+  }
+  function showCanvasNodeName(
+    node: DesignNode,
+    currentZoom: number,
+    isPreview: boolean,
+    currentSelection: string[],
+  ) {
+    if (isPreview) return false;
+    return (
+      node.kind === 'frame' ||
+      node.kind === 'group' ||
+      !node.parentId ||
+      currentSelection.includes(node.id) ||
+      currentZoom >= 1.75
+    );
   }
   function layerDragStart(event: DragEvent, nodeId: string) {
     layerDrag = { sourceId: nodeId };
@@ -2242,9 +2268,15 @@
             {#if layerCanCollapse(row.node)}<button
                 class="layer-action layer-collapse"
                 aria-expanded={!collapsedLayerIds.has(row.node.id)}
+                aria-label={`${collapsedLayerIds.has(row.node.id) ? 'Expand' : 'Collapse'} ${row.node.name}`}
+                title={collapsedLayerIds.has(row.node.id) ? 'Expand' : 'Collapse'}
                 onclick={(event) => toggleLayerCollapse(event, row.node)}
-                >{collapsedLayerIds.has(row.node.id) ? 'Expand' : 'Collapse'}</button
-              >{/if}{#if editingLayerId === row.node.id}<div class="layer-select">
+                ><span aria-hidden="true">{collapsedLayerIds.has(row.node.id) ? '▶' : '▼'}</span
+                ></button
+              >{:else}<span class="layer-disclosure-spacer" aria-hidden="true"
+              ></span>{/if}{#if editingLayerId === row.node.id && editingLayerSource === 'layers'}<div
+                class="layer-select"
+              >
                 <span class="layer-kind"
                   >{row.node.componentBinding
                     ? 'Component'
@@ -2290,9 +2322,6 @@
                       ? 'Shape'
                       : row.node.kind}</span
                 ><span class="layer-name">{row.node.name}</span></button
-              ><button
-                class="layer-action layer-rename"
-                onclick={(event) => startLayerRename(event, row.node)}>Rename</button
               >{/if}
           </div>{/each}
       </div>
@@ -2494,6 +2523,61 @@
               >{/if}
           </g>
         {/each}
+        <g class="canvas-node-names">
+          {#each renderedNodes.filter( (node) => showCanvasNodeName(node, zoom, preview, selection) ) as node (node.id)}
+            {@const bounds = transientBounds[node.id] ?? node.bounds}
+            {#if editingLayerId === node.id && editingLayerSource === 'canvas'}
+              <foreignObject
+                class="canvas-name-editor"
+                x={bounds.x - 2 / zoom}
+                y={bounds.y - 25 / zoom}
+                width={180 / zoom}
+                height={22 / zoom}
+              >
+                <input
+                  bind:this={canvasNameInput}
+                  bind:value={editingLayerName}
+                  maxlength="120"
+                  aria-label={`Rename ${node.name}`}
+                  style={`font-size:${11 / zoom}px`}
+                  onpointerdown={(event) => event.stopPropagation()}
+                  ondblclick={(event) => event.stopPropagation()}
+                  onblur={() => finishLayerRename(true)}
+                  onkeydown={(event) => {
+                    event.stopPropagation();
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      finishLayerRename(true);
+                    } else if (event.key === 'Escape') {
+                      event.preventDefault();
+                      finishLayerRename(false);
+                    }
+                  }}
+                />
+              </foreignObject>
+            {:else}
+              <text
+                class:selected-name={selection.includes(node.id)}
+                class="canvas-node-name"
+                role="button"
+                tabindex="0"
+                aria-label={`Rename ${node.name}`}
+                x={bounds.x}
+                y={bounds.y - 7 / zoom}
+                style={`font-size:${11 / zoom}px;stroke-width:${3 / zoom}px`}
+                onpointerdown={(event) => {
+                  event.stopPropagation();
+                  selection = [node.id];
+                }}
+                ondblclick={(event) => startLayerRename(event, node, 'canvas')}
+                onkeydown={(event) => {
+                  if (event.key === 'Enter' || event.key === 'F2')
+                    void startLayerRename(event, node, 'canvas');
+                }}>{node.name}</text
+              >
+            {/if}
+          {/each}
+        </g>
         {#if selectionBounds && !preview && editingTextId === ''}
           <g class="collective-selection">
             <rect
@@ -3632,10 +3716,19 @@
   }
   .layer-action {
     flex: none;
+    width: 24px;
+    height: 30px;
+    display: inline-grid;
+    place-items: center;
     border-radius: 3px;
-    padding: 4px;
-    color: #5e6873;
-    font-size: 9px;
+    padding: 0;
+    color: #4e5965;
+    font-size: 11px;
+    line-height: 1;
+  }
+  .layer-disclosure-spacer {
+    flex: none;
+    width: 24px;
   }
   .layer-action:hover,
   .layer-action:focus-visible {
@@ -3842,6 +3935,33 @@
   }
   .node-label {
     pointer-events: none;
+  }
+  .canvas-node-name {
+    fill: #505b67;
+    stroke: #f7f8fa;
+    stroke-linejoin: round;
+    paint-order: stroke;
+    font-weight: 600;
+    cursor: text;
+    user-select: none;
+  }
+  .canvas-node-name.selected-name {
+    fill: #176ca8;
+  }
+  .canvas-name-editor {
+    overflow: visible;
+  }
+  .canvas-name-editor input {
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    border: 1px solid #2672ad;
+    border-radius: 2px;
+    background: #fff;
+    padding: 0 4px;
+    color: #202832;
+    font-family: inherit;
+    outline: none;
   }
   .selection-box {
     fill: none;

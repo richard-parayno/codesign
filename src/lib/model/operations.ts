@@ -149,7 +149,9 @@ export function validateOperation(document: DesignDocument, candidate: unknown):
     throw new OperationError('One or more targets no longer exist');
   if (operation.actor === 'agent') {
     const affected =
-      operation.type === 'delete' ? descendants(document, targets) : new Set(targets);
+      operation.type === 'delete' || operation.type === 'move'
+        ? descendants(document, targets)
+        : new Set(targets);
     if (
       [...affected].some(
         (id) => document.pinnedNodeIds.includes(id) || document.nodes[id]?.semantics?.protected,
@@ -219,7 +221,7 @@ function mutateOperation(document: DesignDocument, operation: DesignOperation) {
       break;
     }
     case 'move':
-      for (const id of operation.targetIds) {
+      for (const id of descendants(document, operation.targetIds)) {
         document.nodes[id].bounds.x += operation.dx;
         document.nodes[id].bounds.y += operation.dy;
         touch(document.nodes[id]);

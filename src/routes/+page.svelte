@@ -30,6 +30,12 @@
   import type { CandidateDraft } from '$lib/model/codesign';
   import { demoCheckpoint } from '$lib/model/checkpoint';
   import { generateSvelte } from '$lib/model/codegen';
+  import {
+    containingFrameForBounds,
+    descendantNodeIds,
+    orderedScreenNodes,
+    screenLayerRows,
+  } from '$lib/model/layers';
   import { logAction } from '$lib/debug/action-log';
   import CodesignPanel, {
     type CandidateView,
@@ -64,6 +70,7 @@
     lastX: number;
     lastY: number;
     original?: Bounds;
+    previewIds?: string[];
   } | null = null;
   let connectSource = '';
   let backend: 'local' | 'codex' = 'local';
@@ -90,9 +97,8 @@
   $: activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0];
   $: currentScreen =
     document.screens.find((screen) => screen.id === document.activeScreenId) ?? document.screens[0];
-  $: visibleNodes = Object.values(document.nodes).filter(
-    (node) => node.screenId === currentScreen?.id,
-  );
+  $: visibleNodes = currentScreen ? orderedScreenNodes(document, currentScreen.id) : [];
+  $: layerRows = currentScreen ? screenLayerRows(document, currentScreen.id) : [];
   $: selectedNodes = selection.map((id) => document.nodes[id]).filter(Boolean);
   $: contextNode = contextMenu?.nodeId ? document.nodes[contextMenu.nodeId] : undefined;
   $: code = generateSvelte(document);
@@ -130,9 +136,7 @@
     : undefined;
   $: renderedNodes =
     compareSourceActive && sourceSnapshot
-      ? Object.values(sourceSnapshot.nodes).filter(
-          (node) => node.screenId === document.activeScreenId,
-        )
+      ? orderedScreenNodes(sourceSnapshot, document.activeScreenId)
       : visibleNodes;
   $: ghostSnapshot = activeCandidateSnapshot;
   $: ghostNodes = ghostSnapshot
@@ -691,6 +695,11 @@
     }
     return [...pins];
   }
+  function startDraw(event: PointerEvent) {
+    const p = point(event);
+    gesture = { mode: 'draw', startX: p.x, startY: p.y, lastX: p.x, lastY: p.y };
+    draft = { x: p.x, y: p.y, width: 1, height: 1 };
+  }
   function canvasDown(event: PointerEvent) {
     contextMenu = null;
     if (preview) return;
@@ -701,13 +710,9 @@
     }
     if (event.button !== 0) return;
     if (event.target !== event.currentTarget) return;
-    const p = point(event);
     if (selection.length) logAction('selection.cleared', { source: 'canvas' });
     selection = [];
-    if (tool === 'frame' || tool === 'rectangle' || tool === 'text') {
-      gesture = { mode: 'draw', startX: p.x, startY: p.y, lastX: p.x, lastY: p.y };
-      draft = { x: p.x, y: p.y, width: 1, height: 1 };
-    }
+    if (tool === 'frame' || tool === 'rectangle' || tool === 'text') startDraw(event);
   }
   function canvasMove(event: PointerEvent) {
     if (!gesture) return;
@@ -728,7 +733,7 @@
     if (gesture.mode === 'move') {
       const dx = p.x - gesture.lastX,
         dy = p.y - gesture.lastY;
-      for (const id of selection) {
+      for (const id of gesture.previewIds ?? selection) {
         const element = window.document.getElementById(`node-${id}`);
         if (element) element.setAttribute('transform', `translate(${dx} ${dy})`);
       }
@@ -747,11 +752,13 @@
     if (gesture.mode === 'draw' && draft && draft.width > 8 && draft.height > 8) {
       const nodeId = uid('node');
       const opId = uid('op');
+      const parentFrame = containingFrameForBounds(visibleNodes, draft);
       const node: DesignNode = {
         id: nodeId,
         name: tool === 'text' ? 'Text label' : tool === 'frame' ? 'Frame' : 'Rectangle',
         kind: tool as 'frame' | 'rectangle' | 'text',
         screenId: document.activeScreenId,
+        parentId: parentFrame?.id,
         childIds: [],
         bounds: draft,
         style: {
@@ -763,11 +770,17 @@
       };
       apply({ id: opId, type: 'create', actor: 'user', node });
       selection = [nodeId];
+      logAction('layer.created', {
+        nodeId,
+        kind: node.kind,
+        parentId: parentFrame?.id ?? null,
+        screenId: node.screenId,
+      });
       tool = 'select';
     } else if (gesture.mode === 'move' && p) {
       const dx = p.x - gesture.lastX,
         dy = p.y - gesture.lastY;
-      for (const id of selection)
+      for (const id of gesture.previewIds ?? selection)
         window.document.getElementById(`node-${id}`)?.removeAttribute('transform');
       if (dx || dy)
         apply({ id: uid('op'), type: 'move', actor: 'user', targetIds: selection, dx, dy });
@@ -798,6 +811,10 @@
       logAction('connection.started', { nodeId: node.id, source: 'canvas' });
       return;
     }
+    if (tool === 'frame' || tool === 'rectangle' || tool === 'text') {
+      startDraw(event);
+      return;
+    }
     selection = event.shiftKey
       ? selection.includes(node.id)
         ? selection.filter((id) => id !== node.id)
@@ -809,7 +826,14 @@
       additive: event.shiftKey,
     });
     const p = point(event);
-    gesture = { mode: 'move', startX: p.x, startY: p.y, lastX: p.x, lastY: p.y };
+    gesture = {
+      mode: 'move',
+      startX: p.x,
+      startY: p.y,
+      lastX: p.x,
+      lastY: p.y,
+      previewIds: descendantNodeIds(document, selection),
+    };
   }
   function resizeDown(event: PointerEvent, node: DesignNode) {
     event.stopPropagation();
@@ -1322,10 +1346,14 @@
         <span>Layers</span><small>{visibleNodes.length}</small>
       </div>
       <div class="layers">
-        {#each [...visibleNodes].reverse() as node (node.id)}<button
-            class:selected={selection.includes(node.id)}
+        {#each layerRows as row (row.node.id)}<button
+            class:selected={selection.includes(row.node.id)}
+            class:child-layer={row.depth > 0}
+            style={`--layer-indent:${5 + row.depth * 14}px`}
             onclick={(event) => {
-              selection = event.shiftKey ? [...new Set([...selection, node.id])] : [node.id];
+              selection = event.shiftKey
+                ? [...new Set([...selection, row.node.id])]
+                : [row.node.id];
               logAction('selection.changed', {
                 source: 'layers',
                 nodeIds: selection,
@@ -1333,12 +1361,12 @@
               });
             }}
             ><span class="layer-kind"
-              >{node.componentBinding
+              >{row.node.componentBinding
                 ? 'Component'
-                : node.kind === 'rectangle'
+                : row.node.kind === 'rectangle'
                   ? 'Shape'
-                  : node.kind}</span
-            ><span class="layer-name">{node.name}</span></button
+                  : row.node.kind}</span
+            ><span class="layer-name">{row.node.name}</span></button
           >{/each}
       </div>
       <button class="branch-action" onclick={branch}
@@ -2129,9 +2157,12 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    padding: 0 5px;
+    padding: 0 5px 0 var(--layer-indent, 5px);
     color: #676e78;
     cursor: pointer;
+  }
+  .layers button.child-layer {
+    border-left: 1px solid #d7dce2;
   }
   .layers .layer-kind {
     flex: none;

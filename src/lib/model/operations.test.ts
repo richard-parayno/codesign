@@ -58,6 +58,40 @@ describe('design operations', () => {
     ).toThrow('already applied');
   });
 
+  it('keeps child layers attached when their frame moves', () => {
+    let document = applyOperation(blankDocument(), {
+      id: 'create-frame',
+      type: 'create',
+      actor: 'user',
+      node: {
+        ...node('frame', 40, 50),
+        kind: 'frame',
+        bounds: { x: 40, y: 50, width: 400, height: 300 },
+      },
+    });
+    document = applyOperation(document, {
+      id: 'create-child',
+      type: 'create',
+      actor: 'user',
+      node: { ...node('child', 80, 90), parentId: 'frame' },
+    });
+
+    expect(document.screens[0].rootIds).toEqual(['frame']);
+    expect(document.nodes.frame.childIds).toEqual(['child']);
+
+    const moved = applyOperation(document, {
+      id: 'move-frame',
+      type: 'move',
+      actor: 'user',
+      targetIds: ['frame'],
+      dx: 25,
+      dy: -10,
+    });
+
+    expect(moved.nodes.frame.bounds).toMatchObject({ x: 65, y: 40 });
+    expect(moved.nodes.child.bounds).toMatchObject({ x: 105, y: 80 });
+  });
+
   it('rejects unknown components and invalid registered props', () => {
     let document = applyOperation(blankDocument(), {
       id: 'create-a',

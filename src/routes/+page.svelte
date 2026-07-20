@@ -802,10 +802,6 @@
           />{/if}
       </g>
     </svg>
-    {#if !visibleNodes.length}<div class="empty-hint">
-        <strong>Draw a frame to begin</strong><span>Press F, then drag anywhere on the canvas.</span
-        >
-      </div>{/if}
     {#if selection.length && !preview}<div class="context-bar">
         <span>{selection.length} selected</span>{#if selection.length > 1}<button
             onclick={() => interpret('interpret')}
@@ -1608,21 +1604,6 @@
   }
   .clickable {
     cursor: pointer;
-  }
-  .empty-hint {
-    position: absolute;
-    left: 50%;
-    top: 44%;
-    transform: translate(-50%, -50%);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 7px;
-    color: #747b85;
-    pointer-events: none;
-  }
-  .empty-hint strong {
-    color: #4b535e;
   }
   .context-bar {
     position: absolute;

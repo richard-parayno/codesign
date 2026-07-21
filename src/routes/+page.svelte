@@ -3,6 +3,7 @@
   import { documentStore } from '$lib/model/store';
   import {
     defaultStyle,
+    layoutForNode,
     type Bounds,
     type CandidateRevision,
     type CodesignAction,
@@ -10,6 +11,7 @@
     type DesignOperation,
     type Fidelity,
     type GenerationRun,
+    type LayoutPatch,
     type ObservationScope,
     type ProcessEvent,
     type StylePatch,
@@ -3069,6 +3071,16 @@
     if (targetIds.length)
       apply({ id: uid('op'), type: 'update-node', actor: 'user', targetIds, patch: { text } });
   }
+  function updateSelectedLayout(patch: LayoutPatch) {
+    if (!selectedNodes.length) return;
+    apply({
+      id: uid('op'),
+      type: 'update-node',
+      actor: 'user',
+      targetIds: selectedNodes.map((item) => item.id),
+      patch: { layout: patch },
+    });
+  }
   function setSelectedFrameClipping(clipContent: boolean) {
     const targetIds = selectedNodes.filter((node) => node.kind === 'frame').map((node) => node.id);
     if (targetIds.length)
@@ -4527,6 +4539,109 @@
               ? 'repeater siblings'
               : 'same component on screen'}</button
           >{/if}
+      </section>
+      {@const nodeLayout = layoutForNode(node)}
+      <section>
+        <h3>Layout</h3>
+        {#if ['frame', 'group', 'instance'].includes(node.kind)}
+          <label
+            >Direction<select
+              value={nodeLayout.mode}
+              onchange={(event) =>
+                updateSelectedLayout({
+                  mode: event.currentTarget.value as LayoutPatch['mode'],
+                })}
+              ><option value="none">Freeform</option><option value="horizontal">Horizontal</option
+              ><option value="vertical">Vertical</option><option value="grid">Grid</option></select
+            ></label
+          >
+          {#if nodeLayout.mode !== 'none'}
+            <div class="field-grid">
+              <label
+                >Gap<input
+                  type="number"
+                  min="0"
+                  value={nodeLayout.gap}
+                  onchange={(event) =>
+                    updateSelectedLayout({ gap: Math.max(0, Number(event.currentTarget.value)) })}
+                /></label
+              ><label
+                >Padding<input
+                  type="number"
+                  min="0"
+                  value={typeof nodeLayout.padding === 'number' ? nodeLayout.padding : ''}
+                  placeholder={typeof nodeLayout.padding === 'number' ? undefined : 'Per side'}
+                  onchange={(event) =>
+                    updateSelectedLayout({
+                      padding: Math.max(0, Number(event.currentTarget.value)),
+                    })}
+                /></label
+              >
+              {#if nodeLayout.mode === 'grid'}
+                <label
+                  >Columns<input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={nodeLayout.gridColumns}
+                    onchange={(event) =>
+                      updateSelectedLayout({
+                        gridColumns: Math.max(1, Math.round(Number(event.currentTarget.value))),
+                      })}
+                  /></label
+                >
+              {/if}
+            </div>
+            <label
+              >Align items<select
+                value={nodeLayout.align}
+                onchange={(event) =>
+                  updateSelectedLayout({
+                    align: event.currentTarget.value as LayoutPatch['align'],
+                  })}
+                ><option value="start">Start</option><option value="center">Center</option><option
+                  value="end">End</option
+                ><option value="stretch">Stretch</option></select
+              ></label
+            ><label
+              >Distribute<select
+                value={nodeLayout.justify}
+                onchange={(event) =>
+                  updateSelectedLayout({
+                    justify: event.currentTarget.value as LayoutPatch['justify'],
+                  })}
+                ><option value="start">Start</option><option value="center">Center</option><option
+                  value="end">End</option
+                ><option value="space-between">Space between</option></select
+              ></label
+            >
+          {/if}
+        {/if}
+        <div class="field-grid">
+          <label
+            >Width<select
+              value={nodeLayout.widthMode}
+              onchange={(event) =>
+                updateSelectedLayout({
+                  widthMode: event.currentTarget.value as LayoutPatch['widthMode'],
+                })}
+              ><option value="fixed">Fixed</option><option value="hug">Hug contents</option><option
+                value="fill">Fill container</option
+              ></select
+            ></label
+          ><label
+            >Height<select
+              value={nodeLayout.heightMode}
+              onchange={(event) =>
+                updateSelectedLayout({
+                  heightMode: event.currentTarget.value as LayoutPatch['heightMode'],
+                })}
+              ><option value="fixed">Fixed</option><option value="hug">Hug contents</option><option
+                value="fill">Fill container</option
+              ></select
+            ></label
+          >
+        </div>
       </section>
       {#if selectedNodes.every(isEditableContentNode)}
         <section>

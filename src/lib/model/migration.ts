@@ -1,6 +1,7 @@
 import {
   atomicChangeSchema,
   candidateRevisionSchema,
+  defaultLayout,
   generationRunSchema,
   nodeSchema,
   operationSchema,
@@ -251,6 +252,7 @@ export function migrateDocumentV1(
     const legacySemantics = node.semantics;
     delete node.semantics;
     node.entityId = `entity-v1-${node.id}`;
+    node.layout = clone(defaultLayout);
     nodes[node.id] = node;
     if (legacySemantics?.protected) pinnedNodeIds.push(node.id);
     if (node.kind === 'frame') frameFidelity[node.id] = 'wireframe';
@@ -478,9 +480,19 @@ export function recoverProjectEnvelopeV2(value: unknown): ProjectEnvelopeV2 | nu
   for (const project of envelope.projects ?? []) {
     const document = project.document;
     if (!document?.generationRuns || !document.revisions) continue;
+    const materializeLayouts = (nodes: Record<string, DesignNode>) => {
+      for (const node of Object.values(nodes)) node.layout = { ...defaultLayout, ...node.layout };
+    };
+    materializeLayouts(document.nodes);
     document.projectComponents ??= {};
-    for (const revision of Object.values(document.revisions))
+    for (const definition of Object.values(document.projectComponents))
+      materializeLayouts(definition.nodes);
+    for (const revision of Object.values(document.revisions)) {
+      materializeLayouts(revision.snapshot.nodes);
       revision.snapshot.projectComponents ??= {};
+      for (const definition of Object.values(revision.snapshot.projectComponents))
+        materializeLayouts(definition.nodes);
+    }
     for (const [runId, typedRun] of Object.entries(document.generationRuns)) {
       const run = typedRun as unknown as Record<string, unknown>;
       const sourceRevisionId = String(run.sourceRevisionId ?? '');

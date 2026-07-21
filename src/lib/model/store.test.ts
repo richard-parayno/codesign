@@ -28,7 +28,7 @@ class MemoryStorage implements ProjectStorage {
   }
 }
 
-function createRectangle(id: string): DesignOperation {
+function createRectangle(id: string): Extract<DesignOperation, { type: 'create' }> {
   return {
     id: `create-${id}`,
     type: 'create',
@@ -140,6 +140,7 @@ describe('project document store', () => {
       delete oldStyle.fontWeight;
       delete oldStyle.textAlign;
       delete oldStyle.lineHeight;
+      delete target.layout;
     }
     storage.setItem(
       PROJECT_STORAGE_KEY,
@@ -160,6 +161,11 @@ describe('project document store', () => {
       lineHeight: 1.4,
     });
     expect(get(store).present.nodes['legacy-style-node'].style.strokeWidth).toBeUndefined();
+    expect(get(store).present.nodes['legacy-style-node'].layout).toMatchObject({
+      mode: 'none',
+      widthMode: 'fixed',
+      heightMode: 'fixed',
+    });
     expect(
       get(store).present.revisions[document.currentRevisionId].snapshot.nodes['legacy-style-node']
         .style.opacity,
@@ -255,6 +261,42 @@ describe('project document store', () => {
     expect(Object.keys(get(store).present.nodes)).toEqual([]);
     store.redo();
     expect(Object.keys(get(store).present.nodes)).toEqual(['batch-a', 'batch-b']);
+  });
+
+  it('undoes and redoes layout reflow as one document operation', () => {
+    const store = createDocumentStore(new MemoryStorage());
+    store.restore();
+    store.apply({
+      id: 'create-layout-frame',
+      type: 'create',
+      actor: 'user',
+      node: {
+        ...createRectangle('layout-frame').node,
+        kind: 'frame',
+        bounds: { x: 10, y: 10, width: 400, height: 200 },
+      },
+    });
+    store.apply({
+      id: 'create-layout-child',
+      type: 'create',
+      actor: 'user',
+      node: { ...createRectangle('layout-child').node, parentId: 'layout-frame' },
+    });
+    const before = structuredClone(get(store).present.nodes['layout-child'].bounds);
+    store.apply({
+      id: 'set-layout',
+      type: 'update-node',
+      actor: 'user',
+      targetIds: ['layout-frame'],
+      patch: { layout: { mode: 'vertical', gap: 8, padding: 24 } },
+    });
+    const after = structuredClone(get(store).present.nodes['layout-child'].bounds);
+
+    expect(after).not.toEqual(before);
+    store.undo();
+    expect(get(store).present.nodes['layout-child'].bounds).toEqual(before);
+    store.redo();
+    expect(get(store).present.nodes['layout-child'].bounds).toEqual(after);
   });
 
   it('persists lifecycle metadata without clearing direct-edit undo history', () => {

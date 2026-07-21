@@ -4,7 +4,7 @@ import {
   validateComponentBinding,
   type ResolvedComponent,
 } from '$lib/design-system/registry';
-import type { DesignDocument, DesignNode } from './types';
+import { defaultLayout, layoutForNode, type DesignDocument, type DesignNode } from './types';
 
 const safeText = (value: string) =>
   value
@@ -35,6 +35,49 @@ function componentTag(resolved: ResolvedComponent) {
     ? resolved.part.exportName.slice(resolved.root.id.length)
     : resolved.part.exportName;
   return `${namespaceName(resolved)}.${shortExport || 'Root'}`;
+}
+
+function layoutStyle(node: DesignNode) {
+  const layout = layoutForNode(node);
+  if (JSON.stringify(layout) === JSON.stringify(defaultLayout)) return '';
+  const declarations: string[] = [];
+  if (layout.mode === 'horizontal' || layout.mode === 'vertical') {
+    declarations.push(
+      'display:flex',
+      `flex-direction:${layout.mode === 'horizontal' ? 'row' : 'column'}`,
+    );
+  } else if (layout.mode === 'grid') {
+    declarations.push(
+      'display:grid',
+      `grid-template-columns:repeat(${layout.gridColumns},minmax(0,1fr))`,
+    );
+  }
+  if (layout.mode !== 'none') {
+    const padding =
+      typeof layout.padding === 'number'
+        ? `${layout.padding}px`
+        : `${layout.padding.top}px ${layout.padding.right}px ${layout.padding.bottom}px ${layout.padding.left}px`;
+    const align = { start: 'flex-start', center: 'center', end: 'flex-end', stretch: 'stretch' }[
+      layout.align
+    ];
+    const justify = {
+      start: 'flex-start',
+      center: 'center',
+      end: 'flex-end',
+      'space-between': 'space-between',
+    }[layout.justify];
+    declarations.push(
+      `gap:${layout.gap}px`,
+      `padding:${padding}`,
+      `align-items:${align}`,
+      `justify-content:${justify}`,
+    );
+  }
+  if (layout.widthMode === 'fill') declarations.push('width:100%');
+  else if (layout.widthMode === 'hug') declarations.push('width:fit-content');
+  if (layout.heightMode === 'fill') declarations.push('height:100%');
+  else if (layout.heightMode === 'hug') declarations.push('height:fit-content');
+  return declarations.length ? ` style="${declarations.join(';')}"` : '';
 }
 
 function renderNode(
@@ -69,9 +112,9 @@ function renderNode(
       .map(([key, value]) => ` ${key}={${safeProp(value)}}`)
       .join('');
     const tag = componentTag(resolved);
-    return `${pad}<${tag}${props}>${content}</${tag}>`;
+    return `${pad}<${tag}${props}${layoutStyle(node)}>${content}</${tag}>`;
   }
-  return `${pad}<div class="greybox" data-kind="${node.kind}">${content}</div>`;
+  return `${pad}<div class="greybox" data-kind="${node.kind}"${layoutStyle(node)}>${content}</div>`;
 }
 
 function importsFor(nodes: DesignNode[]) {

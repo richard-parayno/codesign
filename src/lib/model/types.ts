@@ -15,6 +15,18 @@ export type CandidateStatus = 'candidate' | 'partially-accepted' | 'accepted' | 
 export type AtomicDecision = 'pending' | 'accepted' | 'rejected';
 
 export type Bounds = { x: number; y: number; width: number; height: number };
+export type LayoutPadding = number | { top: number; right: number; bottom: number; left: number };
+export type LayoutProperties = {
+  mode: 'none' | 'horizontal' | 'vertical' | 'grid';
+  gap: number;
+  padding: LayoutPadding;
+  align: 'start' | 'center' | 'end' | 'stretch';
+  justify: 'start' | 'center' | 'end' | 'space-between';
+  widthMode: 'fixed' | 'hug' | 'fill';
+  heightMode: 'fixed' | 'hug' | 'fill';
+  gridColumns: number;
+};
+export type LayoutPatch = Partial<LayoutProperties>;
 export type StyleProperties = {
   fill: string;
   stroke?: string;
@@ -51,6 +63,8 @@ export type DesignNode = {
   childIds: string[];
   bounds: Bounds;
   style: StyleProperties;
+  /** Explicit container/item layout. Missing values are read as defaultLayout for old v2 data. */
+  layout?: LayoutProperties;
   text?: string;
   clipContent?: boolean;
   /** Stable identity is assigned by the reducer when an older caller omits it. */
@@ -143,7 +157,7 @@ export type DesignOperation =
       type: 'update-node';
       actor: Actor;
       targetIds: string[];
-      patch: { name?: string; text?: string; clipContent?: boolean };
+      patch: { name?: string; text?: string; clipContent?: boolean; layout?: LayoutPatch };
     }
   | {
       id: string;
@@ -406,6 +420,24 @@ export const boundsSchema = z.object({
   width: finite.positive(),
   height: finite.positive(),
 });
+const layoutPaddingSidesSchema = z.object({
+  top: finite.nonnegative(),
+  right: finite.nonnegative(),
+  bottom: finite.nonnegative(),
+  left: finite.nonnegative(),
+});
+const layoutObjectSchema = z.object({
+  mode: z.enum(['none', 'horizontal', 'vertical', 'grid']),
+  gap: finite.nonnegative(),
+  padding: z.union([finite.nonnegative(), layoutPaddingSidesSchema]),
+  align: z.enum(['start', 'center', 'end', 'stretch']),
+  justify: z.enum(['start', 'center', 'end', 'space-between']),
+  widthMode: z.enum(['fixed', 'hug', 'fill']),
+  heightMode: z.enum(['fixed', 'hug', 'fill']),
+  gridColumns: z.number().int().positive(),
+});
+export const layoutSchema: z.ZodType<LayoutProperties> = layoutObjectSchema;
+const layoutPatchSchema: z.ZodType<LayoutPatch> = layoutObjectSchema.partial();
 export const styleSchema = z.object({
   fill: z.string(),
   stroke: z.string().optional(),
@@ -443,6 +475,7 @@ export const nodeSchema: z.ZodType<DesignNode> = z.object({
   childIds: z.array(z.string()),
   bounds: boundsSchema,
   style: styleSchema,
+  layout: layoutSchema.optional(),
   text: z.string().optional(),
   clipContent: z.boolean().optional(),
   entityId: z.string().min(1).optional(),
@@ -545,6 +578,7 @@ export const operationSchema: z.ZodType<DesignOperation> = z.discriminatedUnion(
         name: z.string().min(1).max(120).optional(),
         text: z.string().max(10000).optional(),
         clipContent: z.boolean().optional(),
+        layout: layoutPatchSchema.optional(),
       })
       .refine((patch) => Object.keys(patch).length > 0, 'Node patch cannot be empty'),
   }),
@@ -743,6 +777,21 @@ export const defaultStyle: StyleProperties = {
   lineHeight: 1.4,
   density: 'comfortable',
 };
+
+export const defaultLayout: LayoutProperties = {
+  mode: 'none',
+  gap: 0,
+  padding: 0,
+  align: 'start',
+  justify: 'start',
+  widthMode: 'fixed',
+  heightMode: 'fixed',
+  gridColumns: 2,
+};
+
+export function layoutForNode(node: Pick<DesignNode, 'layout'>): LayoutProperties {
+  return { ...defaultLayout, ...node.layout };
+}
 
 export function blankDocument(): DesignDocument {
   const branch: Branch = { id: 'branch-main', name: 'Accepted', screenIds: ['screen-1'] };

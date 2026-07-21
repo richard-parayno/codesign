@@ -1,85 +1,152 @@
 # Codesign
 
-Codesign is a local-first visual-autocomplete prototype. You draw and manipulate a design directly, select the exact layers that may change, choose how much surrounding context the generator may reference, and explicitly request a structured candidate. Selection alone never generates or mutates the canvas.
+**Codesign is visual autocomplete for interface design.** It helps interface designers, design engineers, and product teams turn rough canvas intent into editable UI without surrendering control to an opaque prompt-to-page generator.
 
-Candidates are native scene-graph changes rather than screenshots. They remain ghosted above the source until you accept all changes or a dependency-safe subset. Rejected candidates, rerolls, source comparisons, and decisions remain in process history.
+Prompt-to-UI tools tend to jump straight to a finished result. The output may look polished, but it is often difficult to understand, revise, or combine with the designer's existing work. Codesign keeps the designer's selection, context boundary, candidate changes, and final decision explicit.
 
-## Setup on NixOS
+> Prototype status: Codesign is an active local-first hackathon prototype, not a hosted or production-ready design tool.
+
+## How it works
+
+1. Sketch an interface with frames, groups, text, and primitive layers, or select existing work. A Codesign target must be a group or frame, or a layer contained by one.
+2. Open **Codesign with AI**, choose **AI Draft** or **AI Hi-Fi**, and confirm generation. **Base** is the live canvas and never starts generation.
+3. Choose an observation scope:
+   - **Selection** lets Codex inspect the selected layer and its children.
+   - **Same parent frame** also lets Codex consider the other layers in the shared containing frame.
+     In both cases, only the explicit mutation target may change.
+4. Codesign starts the separately installed Codex CLI in App Server mode and runs GPT-5.6. Codex uses canvas-native tools to inspect the scene, discover compatible components, render source or candidate views when useful, apply atomic changes to a copy-on-write candidate, validate it, and submit it for review.
+5. The suggestion appears as native, editable canvas layers. **AI Draft** fills in structure with primitives; **AI Hi-Fi** can use compatible checked-in shadcn-svelte components and creates or refreshes a reusable local component definition when accepted.
+6. Accept all changes, accept a dependency-safe subset, reject the candidate, reroll the same fidelity, compare with the starting canvas, or continue editing. **Element History** keeps prior variations available.
+
+Selection and slider movement alone do not run AI or mutate the canvas.
+
+## Five-minute quickstart
+
+### Prerequisites
+
+- macOS or Linux. Windows is not part of the currently tested prototype path.
+- Node.js 22.x.
+- Corepack and pnpm 10.15.0 (the version declared in `package.json`).
+- A separately installed Codex CLI compatible with the currently tested 0.144.x line.
+- A Codex account authenticated through ChatGPT or another Codex-supported sign-in method.
+
+Install Codex separately; it is deliberately not a Codesign dependency:
 
 ```sh
-devenv shell -- pnpm install
-devenv shell -- pnpm dev --host 0.0.0.0
+npm install --global @openai/codex
+codex login
 ```
 
-Open `http://localhost:5173`. `devenv.nix` pins Node 22, pnpm, git, and the Codex package used by the checked-in App Server bindings.
+See OpenAI's [Codex CLI quickstart](https://developers.openai.com/codex/cli/) and [authentication guide](https://developers.openai.com/codex/auth/) for the current installation and sign-in options.
 
-## Codesign AI
+Then clone and start Codesign:
 
-Codex App Server is the only generation path. Codesign never fabricates a candidate when the runtime is unavailable or the user is signed out.
+```sh
+git clone https://github.com/richard-parayno/codesign.git
+cd codesign
+corepack enable
+pnpm install --frozen-lockfile
+pnpm doctor
+pnpm dev --open
+```
+
+`pnpm doctor` is a read-only preflight. It checks Node and pnpm expectations, finds the Codex executable, verifies the CLI and App Server compatibility, initializes App Server far enough to inspect the required capabilities and authentication status, and exits without starting a login flow or making an AI generation request.
+
+If Codex is missing, authentication is unavailable, or a compatibility check fails, the editor still starts and remains explorable; only AI completion is unavailable. Resolve the reported issue and rerun `pnpm doctor`.
+
+## Bring your own Codex
+
+Codesign owns the editor and local App Server integration. You own the Codex installation and authentication.
+
+- The project does not bundle, download, or install the Codex CLI.
+- The local SvelteKit server starts `codex app-server` directly with argument-safe process spawning, not through a shell.
+- App Server reuses the normal authentication state managed by Codex.
+- Codesign does not read, copy, or forward Codex credential files.
+- The generated TypeScript protocol bindings under `.generated/codex-app-server/` are checked-in compile-time contracts; they do not provide or require a Codex runtime.
+
+By default the server resolves the bare command `codex` through its process `PATH`. If Codex is installed somewhere that is not on that `PATH`, create a local `.env` and set an absolute executable path:
 
 ```dotenv
-CODESIGN_CODEX_MODEL=gpt-5.6-luna
-CODESIGN_CODEX_EFFORT=high
+CODESIGN_CODEX_COMMAND=/absolute/path/to/codex
 ```
 
-Codesign uses the project-pinned Codex App Server and the user's existing ChatGPT/Codex login. If needed, use the visible **Sign in to Codex** action; App Server owns the official browser login, token persistence, and refresh. `CODESIGN_CODEX_COMMAND` remains an advanced explicit runtime override.
+Quote a path that contains spaces:
 
-Codesign never reads or forwards `~/.codex/auth.json`. App Server runs read-only with approvals disabled. Each generation gets an isolated ephemeral thread with `gpt-5.6-luna`, high reasoning effort, and no reasoning summary. Codesign supplies a clean raster of the observation root together with a versioned structured scene manifest. Browser image bytes are validated, hashed, written to a process-owned temporary file, and removed after the turn. Output is schema-constrained and semantically revalidated before it can be staged. Provider failures are shown directly and leave the source design unchanged.
+```dotenv
+CODESIGN_CODEX_COMMAND="/absolute/path with spaces/codex"
+```
 
-## Core flow
+All supported overrides are optional:
 
-1. Draw a frame or click **Load demo checkpoint**.
-2. Select the frame or exact layers Codesign may change.
-3. Choose **Scope** beside the selection, then pick **Selection**, **Parent**, **Containing frame**, or **Screen**. The lighter dashed boundary is observational only; the solid boundary marks what may change.
-4. Choose **Complete with Codesign** or press Ctrl/⌘+Enter. Nothing on the source canvas changes while generation runs; use **Cancel** to stop a request.
-5. Switch candidates, highlight evidence, inspect each derivation trace, compare with the source, and select atomic changes.
-6. **Accept all**, accept a dependency-safe subset, **Reject**, or pin a proposed change and **Reroll**.
-7. Open **Process history** to revisit rejected candidates, source comparisons, decisions, and replayable changes.
+```dotenv
+# Defaults shown below
+CODESIGN_CODEX_MODEL=gpt-5.6-luna
+CODESIGN_CODEX_EFFORT=high
+CODESIGN_AGENT_TIMEOUT_MS=180000
+```
 
-Only **Complete with Codesign** is exposed because it is the action implemented end to end. The shared request vocabulary also reserves Refine, Vary, and Resolve; the UI does not present them as dead controls.
-
-## Editor controls
-
-- Use the labeled **Project** picker to switch local files; **New project**, **Rename**, and **Delete** manage them.
-- `V` Select, `F` Frame, `R` Rectangle, `T` Text.
-- Shift-click for multi-selection.
-- Drag selected objects to move them; drag the lower-right handle to resize.
-- Scroll or two-finger drag to pan. Pinch to zoom around the pointer. Middle-drag also pans.
-- Right-click an object or empty canvas for a relevant text-labelled context menu.
-- **Canvas color** changes the solid workspace background and persists locally.
-- **Settings** manages canvas appearance, viewport recovery, new-frame defaults, local project diagnostics, and the Codesign AI integration. Fidelity is controlled from the selected frame or element in the editor. Model and reasoning-effort choices persist in this browser and apply to new generations and rerolls.
-- Arrow keys nudge by 1 px; Shift+arrow nudges by 10 px.
-- Ctrl/⌘+Z undo; Ctrl/⌘+Shift+Z or Ctrl/⌘+Y redo.
-- Delete/Backspace removes selected objects; Escape exits Preview or dismisses contextual UI.
+`CODESIGN_AGENT_TIMEOUT_MS` accepts 1,000 through 600,000 milliseconds. Local `.env` files are ignored by Git and should not contain Codex credentials or API keys.
 
 ## Architecture
 
-- `src/lib/model/types.ts` defines the v2 document, stable entities/representations, revisions, generation runs, candidates, atomic changes, and process events.
-- `src/lib/model/operations.ts` validates direct operations and transactional operation batches.
-- `src/lib/model/codesign.ts` stages, views, rejects, compares, accepts, rerolls, replays, pins, and resolves fidelity inheritance.
-- `src/lib/model/migration.ts` recoverably imports v1 documents while retaining the legacy source.
-- `src/lib/model/store.ts` provides per-project undo/redo and versioned v2 local persistence.
-- `src/lib/agent/codex-client.server.ts` provides the constrained App Server transport.
-- `src/lib/codesign/` contains the inline candidate, component-library, fidelity, and process-history surfaces.
-- `src/routes/+page.svelte` remains the direct-manipulation SVG canvas and page controller.
+- **Editor:** SvelteKit, Svelte 5, Vite, and an SVG direct-manipulation canvas. Projects, revisions, candidates, decisions, fidelity metadata, and reusable local components persist in browser storage.
+- **Document model:** `src/lib/model/` defines the versioned scene graph, validates atomic operations and transactions, stages copy-on-write candidates, and applies dependency-safe acceptance decisions.
+- **Codesign host:** server routes under `src/routes/api/agent/` validate generation requests, report provider status, manage cancellation, and create an isolated canvas session for each request.
+- **Codex transport:** `src/lib/agent/codex-client.server.ts` speaks JSON-RPC over stdio to the user-installed `codex app-server`. Checked-in bindings in `.generated/codex-app-server/` keep the TypeScript integration aligned with the tested protocol.
+- **Canvas agent tools:** `src/lib/agent/harness/` exposes bounded tools for scene overview and node inspection, source/candidate rendering, shadcn-svelte component search and description, candidate state, atomic changes, validation, and submission.
+- **Review UI:** `src/lib/codesign/` and `src/routes/+page.svelte` present scope and fidelity controls, candidate review, partial acceptance, rerolls, source comparison, local components, and process history.
 
-## Development action logs
+At runtime GPT-5.6 operates only through the local Codex App Server and its scoped canvas tools. During project development, Codex and GPT-5.6 were also used to implement, test, review, and iterate on the editor; the checked-in `prompts/` and `docs/` directories record much of that design and engineering work.
 
-During `pnpm dev`, meaningful browser actions appear in the SvelteKit terminal as one-line JSON records prefixed with `[codesign:action]`. The stream includes labelled controls, project lifecycle events, direct operations, Co-design request/candidate/decision events, navigation, canvas preferences, and debounced viewport changes. Logging is disabled in production and never sends the full design document.
+## Development and verification
 
-## Verification
+Run the full repository verification pipeline:
 
 ```sh
-devenv shell -- pnpm format:check
-devenv shell -- pnpm check
-devenv shell -- pnpm test
-devenv shell -- pnpm build
+pnpm verify
 ```
 
-Fixture and fake-transport tests do not make real Codex turns or consume credits.
+Or run the checks separately:
+
+```sh
+pnpm format:check
+pnpm check
+pnpm test
+pnpm build
+```
+
+The automated test suite uses fake transports and fixtures; it does not depend on a developer's real Codex installation, authentication state, or credits.
+
+During `pnpm dev`, meaningful browser actions and Codesign activity are logged as concise JSON records in the SvelteKit terminal. Production builds do not enable the development action stream.
+
+## Optional devenv / NixOS setup
+
+The standard Node/pnpm quickstart above is the primary setup path. Contributors who already use [devenv](https://devenv.sh/) can instead enter the checked-in Node 22 and pnpm environment:
+
+```sh
+devenv shell
+pnpm doctor
+pnpm dev --open
+```
+
+The devenv shell intentionally does not install Codex. Install and authenticate the CLI separately, then make sure `codex` is on the shell's `PATH` or set `CODESIGN_CODEX_COMMAND`.
+
+## Local server security
+
+`pnpm dev` uses Vite's loopback-only development-server default. Codesign can control a locally authenticated Codex process, so do not run it with `--host 0.0.0.0` or expose it to a LAN, tunnel, container ingress, or public interface. Advanced users can deliberately override the host, but they are responsible for adding an appropriate trusted access boundary.
 
 ## Current limitations
 
-The canvas uses bounded axis-aligned objects; projects remain in browser local storage; and the Codex transport keeps an ephemeral thread per development server. Simple shadcn controls and validated Card, Alert, Avatar, Table, Tabs, Dialog, Sheet, Select, Dropdown Menu, and Navigation Menu compositions mount the real checked-in source. Context-heavy or headless entries without a validated default tree remain visible, editable manifest-backed fallbacks rather than mounting invalid standalone parts. Legacy v1 operations remain readable and migratable, but old intent hypotheses are archived rather than treated as evidence.
+- The setup and Codex compatibility path is currently tested against Node 22, pnpm 10.15.0, and Codex CLI 0.144.x on Linux; macOS is a supported target but should receive additional clean-machine coverage.
+- Projects are stored in the browser rather than synchronized to a backend.
+- App Server sessions are ephemeral and scoped to the local development server.
+- The canvas uses bounded, axis-aligned objects and the current AI action is visual autocomplete at AI Draft or AI Hi-Fi fidelity—not production code round-tripping.
+- AI Hi-Fi component generation is limited to compatible entries in the checked-in shadcn-svelte manifest; unsupported compositions remain editable canvas layers.
+- This repository does not currently include a license file.
 
-See [docs/demo-script.md](docs/demo-script.md) for the demo path and [docs/new-interaction-plan.md](docs/new-interaction-plan.md) for the migration decisions.
+## Demo
+
+- Public demo video: _coming soon_
+- Screenshots: _coming soon_
+
+For the current walkthrough, see [docs/demo-script.md](docs/demo-script.md). For design and migration context, see [docs/new-interaction-plan.md](docs/new-interaction-plan.md) and [docs/inline-ai-shadcn-migration.md](docs/inline-ai-shadcn-migration.md).

@@ -132,8 +132,9 @@
   let editingLayerSource: 'layers' | 'canvas' = 'layers';
   let layerNameInput: HTMLInputElement;
   let canvasNameInput: HTMLInputElement;
-  let gesture: {
+  type CanvasGesture = {
     mode: 'draw' | 'move' | 'duplicate' | 'resize' | 'pan' | 'marquee';
+    pointerId: number;
     startX: number;
     startY: number;
     lastX: number;
@@ -144,7 +145,9 @@
     handle?: ResizeHandle;
     additive?: boolean;
     duplicatePayload?: CodesignClipboardPayload;
-  } | null = null;
+  };
+  let canvasElement: SVGSVGElement;
+  let gesture: CanvasGesture | null = null;
   let connectSource = '';
   let backend: 'local' | 'codex' = 'local';
   let agentStatus = 'Local rules ready';
@@ -387,11 +390,7 @@
       }
       if (key === 'escape') {
         if (gesture || draft || marquee || Object.keys(transientBounds).length) {
-          gesture = null;
-          draft = null;
-          marquee = null;
-          transientBounds = {};
-          smartGuides = [];
+          cancelCanvasGesture();
         } else if (contextMenu) contextMenu = null;
         else if (tool !== 'select') tool = 'select';
         else if (selection.length) selection = [];
@@ -673,14 +672,13 @@
     logAction('document.demo-loaded', { fromRevision: document.revision });
   }
   function clearProjectTransientState() {
+    cancelCanvasGesture();
     selection = [];
     collapsedLayerIds = new Set();
     editingLayerId = '';
     editingLayerName = '';
     editingLayerSource = 'layers';
     contextMenu = null;
-    draft = null;
-    gesture = null;
     connectSource = '';
     error = '';
     notice = '';
@@ -976,6 +974,34 @@
       y: (event.clientY - rect.top - pan.y) / zoom,
     };
   }
+
+  function beginCanvasGesture(event: PointerEvent, next: Omit<CanvasGesture, 'pointerId'>) {
+    gesture = { ...next, pointerId: event.pointerId };
+    try {
+      canvasElement.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture can fail if the pointer was released before this handler completed.
+    }
+  }
+
+  function releaseCanvasPointer(pointerId: number) {
+    try {
+      if (canvasElement?.hasPointerCapture(pointerId))
+        canvasElement.releasePointerCapture(pointerId);
+    } catch {
+      // The browser may already have released capture after pointerup or pointercancel.
+    }
+  }
+
+  function cancelCanvasGesture(event?: PointerEvent) {
+    if (event && gesture?.pointerId !== event.pointerId) return;
+    const pointerId = gesture?.pointerId;
+    gesture = null;
+    draft = null;
+    marquee = null;
+    resetGesturePreview();
+    if (pointerId !== undefined) releaseCanvasPointer(pointerId);
+  }
   function contentInset(node: DesignNode) {
     return Math.max(
       4,
@@ -1244,7 +1270,13 @@
   }
   function startDraw(event: PointerEvent) {
     const p = point(event);
-    gesture = { mode: 'draw', startX: p.x, startY: p.y, lastX: p.x, lastY: p.y };
+    beginCanvasGesture(event, {
+      mode: 'draw',
+      startX: p.x,
+      startY: p.y,
+      lastX: p.x,
+      lastY: p.y,
+    });
     draft = { x: p.x, y: p.y, width: 1, height: 1 };
   }
   function persistFrameSize() {
@@ -1433,7 +1465,13 @@
     if (preview) return;
     if (event.button === 1 || (event.button === 0 && spacePressed)) {
       const p = { x: event.clientX, y: event.clientY };
-      gesture = { mode: 'pan', startX: p.x, startY: p.y, lastX: p.x, lastY: p.y };
+      beginCanvasGesture(event, {
+        mode: 'pan',
+        startX: p.x,
+        startY: p.y,
+        lastX: p.x,
+        lastY: p.y,
+      });
       return;
     }
     if (event.button !== 0) return;
@@ -1446,19 +1484,19 @@
     }
     if (tool === 'select') {
       const p = point(event);
-      gesture = {
+      beginCanvasGesture(event, {
         mode: 'marquee',
         startX: p.x,
         startY: p.y,
         lastX: p.x,
         lastY: p.y,
         additive: event.shiftKey,
-      };
+      });
       marquee = { x: p.x, y: p.y, width: 1, height: 1 };
     }
   }
   function canvasMove(event: PointerEvent) {
-    if (!gesture) return;
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
     if (gesture.mode === 'pan') {
       pan = { x: pan.x + event.clientX - gesture.lastX, y: pan.y + event.clientY - gesture.lastY };
       gesture.lastX = event.clientX;
@@ -1510,7 +1548,7 @@
     }
   }
   function canvasUp(event: PointerEvent) {
-    if (!gesture) return;
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
     const completedGesture = gesture.mode;
     const p = gesture.mode === 'pan' ? null : point(event);
     if (gesture.mode === 'draw' && draft && draft.width > 8 && draft.height > 8) {
@@ -1619,10 +1657,12 @@
         'resize-selection',
       );
     }
+    const pointerId = gesture.pointerId;
     gesture = null;
     draft = null;
     marquee = null;
     resetGesturePreview();
+    releaseCanvasPointer(pointerId);
     if (completedGesture === 'pan') scheduleViewportLog('middle-drag');
   }
   function nodeDown(event: PointerEvent, node: DesignNode) {
@@ -1631,7 +1671,13 @@
     if (event.button !== 0) return;
     if (spacePressed) {
       const p = { x: event.clientX, y: event.clientY };
-      gesture = { mode: 'pan', startX: p.x, startY: p.y, lastX: p.x, lastY: p.y };
+      beginCanvasGesture(event, {
+        mode: 'pan',
+        startX: p.x,
+        startY: p.y,
+        lastX: p.x,
+        lastY: p.y,
+      });
       return;
     }
     if (preview) {
@@ -1668,7 +1714,7 @@
     const selectedBounds = collectiveSelectionBounds(
       selectionRootIds().map((id) => document.nodes[id]),
     );
-    gesture = {
+    beginCanvasGesture(event, {
       mode: event.altKey ? 'duplicate' : 'move',
       startX: p.x,
       startY: p.y,
@@ -1678,13 +1724,13 @@
       originalBounds,
       previewIds,
       duplicatePayload: event.altKey ? createClipboardPayload(document, selection) : undefined,
-    };
+    });
   }
   function resizeDown(event: PointerEvent, handle: ResizeHandle) {
     event.stopPropagation();
     const p = point(event);
     if (!selectionBounds) return;
-    gesture = {
+    beginCanvasGesture(event, {
       mode: 'resize',
       startX: p.x,
       startY: p.y,
@@ -1695,7 +1741,7 @@
         selectedNodes.map((node) => [node.id, structuredClone(node.bounds)]),
       ),
       handle,
-    };
+    });
     draft = { ...selectionBounds };
   }
   function resizeKeydown(event: KeyboardEvent, node: DesignNode) {
@@ -2683,6 +2729,7 @@
             : `${tool[0].toUpperCase() + tool.slice(1)} tool · Scroll to pan · Pinch to zoom · Right-click for actions`}
     </div>
     <svg
+      bind:this={canvasElement}
       class="canvas"
       role="application"
       aria-label="Design canvas"
@@ -2690,11 +2737,9 @@
       onpointerdown={canvasDown}
       onpointermove={canvasMove}
       onpointerup={canvasUp}
-      onpointercancel={() => {
-        gesture = null;
-        draft = null;
-        marquee = null;
-        resetGesturePreview();
+      onpointercancel={cancelCanvasGesture}
+      onlostpointercapture={(event) => {
+        if (gesture?.pointerId === event.pointerId) cancelCanvasGesture(event);
       }}
       onwheel={wheel}
       oncontextmenu={(event) => openContextMenu(event)}

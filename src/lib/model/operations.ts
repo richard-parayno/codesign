@@ -42,6 +42,7 @@ export function canvasSnapshot(document: DesignDocument): CanvasSnapshot {
     pinnedNodeIds: document.pinnedNodeIds,
     frameFidelity: document.frameFidelity,
     nodeFidelityOverrides: document.nodeFidelityOverrides,
+    projectComponents: document.projectComponents ?? {},
   });
 }
 
@@ -94,6 +95,7 @@ function summary(operation: DesignOperation) {
     duplicate: `Duplicated ${count} node${count === 1 ? '' : 's'}`,
     'duplicate-screen': 'Duplicated screen',
     'create-branch': 'Created alternative branch',
+    'create-project-component': 'Created reusable project component',
   };
   return labels[operation.type];
 }
@@ -181,6 +183,8 @@ function cloneScreen(
     cloned.parentId = node.parentId ? idMap[node.parentId] : undefined;
     cloned.childIds = node.childIds.map((id) => idMap[id]);
     cloned.provenance = { actor: 'agent', operationId };
+    if (cloned.projectComponent?.role === 'main')
+      cloned.projectComponent = { ...cloned.projectComponent, role: 'instance' };
     document.nodes[cloned.id] = cloned;
   }
   const screen = {
@@ -369,6 +373,21 @@ export function validateOperation(document: DesignDocument, candidate: unknown):
     document.branches.some((branch) => branch.id === operation.branchId)
   )
     throw new OperationError('Branch ID already exists');
+  if (operation.type === 'create-project-component') {
+    const target = document.nodes[operation.targetId];
+    if (target.kind !== 'frame')
+      throw new OperationError('Create a component from one selected frame');
+    if (target.projectComponent)
+      throw new OperationError('This frame is already linked to a project component');
+    if (document.projectComponents?.[operation.definition.id])
+      throw new OperationError('Project component ID already exists');
+    if (
+      operation.definition.rootId !== operation.targetId ||
+      operation.definition.sourceNodeId !== operation.targetId ||
+      !operation.definition.nodes[operation.targetId]
+    )
+      throw new OperationError('Project component definition does not match its source frame');
+  }
   return operation;
 }
 
@@ -603,6 +622,8 @@ function mutateOperation(document: DesignDocument, operation: DesignOperation) {
         duplicate.bounds.x += operation.dx;
         duplicate.bounds.y += operation.dy;
         duplicate.provenance = { actor: operation.actor, operationId: operation.id };
+        if (duplicate.projectComponent?.role === 'main')
+          duplicate.projectComponent = { ...duplicate.projectComponent, role: 'instance' };
         document.nodes[duplicate.id] = duplicate;
         if (document.frameFidelity[sourceId])
           document.frameFidelity[duplicate.id] = document.frameFidelity[sourceId];
@@ -656,6 +677,16 @@ function mutateOperation(document: DesignDocument, operation: DesignOperation) {
       document.activeScreenId = screen.id;
       break;
     }
+    case 'create-project-component': {
+      document.projectComponents ??= {};
+      document.projectComponents[operation.definition.id] = clone(operation.definition);
+      document.nodes[operation.targetId].projectComponent = {
+        componentId: operation.definition.id,
+        role: 'main',
+      };
+      touch(document.nodes[operation.targetId]);
+      break;
+    }
   }
 }
 
@@ -674,7 +705,7 @@ function representationFidelity(document: DesignDocument, node: DesignNode): Fid
   return (
     document.nodeFidelityOverrides[node.id] ??
     closestFrameFidelity(document, node) ??
-    (node.componentBinding ? 'component' : 'wireframe')
+    (node.componentBinding || node.projectComponent ? 'component' : 'wireframe')
   );
 }
 

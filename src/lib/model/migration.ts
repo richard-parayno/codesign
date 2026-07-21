@@ -5,6 +5,7 @@ import {
   nodeSchema,
   operationSchema,
   processEventSchema,
+  projectComponentDefinitionSchema,
   type CanvasSnapshot,
   type DesignDocument,
   type DesignEntity,
@@ -93,6 +94,16 @@ function validCanvas(value: Partial<CanvasSnapshot>) {
   const screenIds = new Set(value.screens!.map((screen) => screen.id));
   const nodeEntries = Object.entries(value.nodes);
   const fidelities = new Set(['structure', 'wireframe', 'component', 'visual', 'production']);
+  if (
+    value.projectComponents &&
+    Object.entries(value.projectComponents).some(
+      ([id, definition]) =>
+        id !== definition.id ||
+        !projectComponentDefinitionSchema.safeParse(definition).success ||
+        !definition.nodes[definition.rootId],
+    )
+  )
+    return false;
   if (
     nodeEntries.some(
       ([id, node]) =>
@@ -276,6 +287,7 @@ export function migrateDocumentV1(
     pinnedNodeIds,
     frameFidelity,
     nodeFidelityOverrides,
+    projectComponents: {},
   };
   const createdAt = source.operations.at(-1)?.timestamp ?? 0;
   const revision: DesignRevision = {
@@ -430,6 +442,7 @@ export function isDesignDocumentV2(value: unknown): value is DesignDocument {
       pinnedNodeIds: document.pinnedNodeIds,
       frameFidelity: document.frameFidelity,
       nodeFidelityOverrides: document.nodeFidelityOverrides,
+      projectComponents: document.projectComponents ?? {},
     })
   );
 }
@@ -465,6 +478,9 @@ export function recoverProjectEnvelopeV2(value: unknown): ProjectEnvelopeV2 | nu
   for (const project of envelope.projects ?? []) {
     const document = project.document;
     if (!document?.generationRuns || !document.revisions) continue;
+    document.projectComponents ??= {};
+    for (const revision of Object.values(document.revisions))
+      revision.snapshot.projectComponents ??= {};
     for (const [runId, typedRun] of Object.entries(document.generationRuns)) {
       const run = typedRun as unknown as Record<string, unknown>;
       const sourceRevisionId = String(run.sourceRevisionId ?? '');

@@ -79,7 +79,18 @@
   } from '$lib/design-system/registry';
   import ComponentLibrary from '$lib/codesign/ComponentLibrary.svelte';
   import ComponentCanvasRenderer from '$lib/codesign/ComponentCanvasRenderer.svelte';
-  import { COMPONENT_DRAG_MIME, readDraggedComponent } from '$lib/codesign/component-drag';
+  import {
+    COMPONENT_DRAG_MIME,
+    PROJECT_COMPONENT_DRAG_MIME,
+    readDraggedComponent,
+    readDraggedProjectComponent,
+  } from '$lib/codesign/component-drag';
+  import ProjectComponentLibrary from '$lib/codesign/ProjectComponentLibrary.svelte';
+  import {
+    captureProjectComponent,
+    currentProjectComponentTemplate,
+    instantiateProjectComponent,
+  } from '$lib/editor/project-components';
   import CodesignActivity from '$lib/codesign/CodesignActivity.svelte';
   import InlineCodesignToolbar, {
     type CandidateView,
@@ -198,6 +209,9 @@
   $: currentScreen =
     document.screens.find((screen) => screen.id === document.activeScreenId) ?? document.screens[0];
   $: visibleNodes = currentScreen ? orderedScreenNodes(document, currentScreen.id) : [];
+  $: projectComponents = Object.values(document.projectComponents ?? {}).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
   $: eligibleGenerationSelection = selection.filter(
     (id) => document.nodes[id]?.screenId === document.activeScreenId,
   );
@@ -440,6 +454,11 @@
       if (command && key === 'd') {
         event.preventDefault();
         duplicateSelection();
+        return;
+      }
+      if (command && event.altKey && key === 'k') {
+        event.preventDefault();
+        createProjectComponent();
         return;
       }
       if (command && key === 'g') {
@@ -1275,6 +1294,7 @@
       duplicate: 'Duplicate selection',
       'duplicate-screen': 'Duplicate screen',
       'create-branch': 'Create branch',
+      'create-project-component': 'Create reusable component',
     };
     return labels[type];
   }
@@ -1588,8 +1608,87 @@
       placement: dropCenter ? 'drag-drop' : 'insert-button',
     });
   }
+  function createProjectComponent() {
+    const source = selectedNodes.length === 1 ? selectedNodes[0] : undefined;
+    if (!source || source.kind !== 'frame') {
+      error = 'Select one frame to create a reusable project component.';
+      return;
+    }
+    if (source.projectComponent) {
+      error = 'This frame is already linked to a project component.';
+      return;
+    }
+    const name = window.prompt('Component name', source.name)?.trim();
+    if (!name) return;
+    const componentId = uid('project-component');
+    const definition = captureProjectComponent(document, source.id, {
+      id: componentId,
+      name,
+    });
+    apply({
+      id: uid('op'),
+      type: 'create-project-component',
+      actor: 'user',
+      targetId: source.id,
+      definition,
+    });
+    logAction('project-component.created', {
+      componentId,
+      sourceNodeId: source.id,
+      name,
+      nodeCount: Object.keys(definition.nodes).length,
+      projectId: activeProjectId,
+    });
+  }
+  function insertProjectComponent(componentId: string, dropCenter?: { x: number; y: number }) {
+    const stored = document.projectComponents?.[componentId];
+    if (!stored) return;
+    const definition = currentProjectComponentTemplate(document, stored);
+    const root = definition.nodes[definition.rootId];
+    if (!root) return;
+    const viewport = canvasElement.getBoundingClientRect();
+    const center = dropCenter ?? {
+      x: (viewport.width / 2 - pan.x) / zoom,
+      y: (viewport.height / 2 - pan.y) / zoom,
+    };
+    const bounds = {
+      x: center.x - root.bounds.width / 2,
+      y: center.y - root.bounds.height / 2,
+      width: root.bounds.width,
+      height: root.bounds.height,
+    };
+    const parent = dropCenter ? containingFrameForBounds(visibleNodes, bounds) : undefined;
+    const materialized = instantiateProjectComponent(definition, {
+      screenId: document.activeScreenId,
+      origin: { x: bounds.x, y: bounds.y },
+      parentId: parent?.id,
+      makeNodeId: () => uid('node'),
+      makeOperationId: () => uid('op'),
+    });
+    const operations = materialized.nodes.map((node): DesignOperation => ({
+      id: node.provenance.operationId,
+      type: 'create',
+      actor: 'user',
+      node,
+    }));
+    if (!applyBatch(operations, 'insert-project-component')) return;
+    selection = [materialized.rootId];
+    tool = 'select';
+    logAction('project-component.inserted', {
+      componentId,
+      rootId: materialized.rootId,
+      nodeCount: operations.length,
+      parentId: parent?.id ?? '',
+      placement: dropCenter ? 'drag-drop' : 'insert-button',
+      projectId: activeProjectId,
+    });
+  }
   function componentDragOver(event: DragEvent) {
-    if (!event.dataTransfer?.types.includes(COMPONENT_DRAG_MIME)) return;
+    if (
+      !event.dataTransfer?.types.includes(COMPONENT_DRAG_MIME) &&
+      !event.dataTransfer?.types.includes(PROJECT_COMPONENT_DRAG_MIME)
+    )
+      return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
     componentDropActive = true;
@@ -1600,6 +1699,18 @@
     componentDropActive = false;
   }
   function dropComponent(event: DragEvent) {
+    const projectComponentId = readDraggedProjectComponent(event.dataTransfer);
+    if (projectComponentId && document.projectComponents?.[projectComponentId]) {
+      event.preventDefault();
+      componentDropActive = false;
+      const viewport = canvasElement.getBoundingClientRect();
+      const center = {
+        x: (event.clientX - viewport.left - pan.x) / zoom,
+        y: (event.clientY - viewport.top - pan.y) / zoom,
+      };
+      insertProjectComponent(projectComponentId, center);
+      return;
+    }
     const componentId = readDraggedComponent(event.dataTransfer);
     if (!componentCatalog.some((component) => component.id === componentId)) return;
     event.preventDefault();
@@ -1700,22 +1811,29 @@
           : bounds.y + bounds.height / 2,
     };
   }
-  async function startTextEditing(event: MouseEvent, node: DesignNode) {
+  function canEditNodeText(node: DesignNode) {
     const component = node.componentBinding
       ? resolveComponent(node.componentBinding.componentId)
       : undefined;
-    const editableComponentContent = Boolean(
-      component && (component.part?.editableContent || component.root.editableContent),
+    return Boolean(
+      node.kind === 'text' ||
+      (component && (component.part?.editableContent || component.root.editableContent)),
     );
-    if ((node.kind !== 'text' && !editableComponentContent) || preview) return;
-    event.preventDefault();
-    event.stopPropagation();
+  }
+  async function beginTextEditing(node: DesignNode) {
+    if (!canEditNodeText(node) || preview) return;
+    if (gesture) cancelCanvasGesture();
     editingTextId = node.id;
     editingTextDraft = node.text ?? '';
     selection = [node.id];
     await tick();
     inlineTextEditor?.focus();
     inlineTextEditor?.select();
+  }
+  function startTextEditing(event: MouseEvent, node: DesignNode) {
+    event.preventDefault();
+    event.stopPropagation();
+    void beginTextEditing(node);
   }
   function finishTextEditing(commit: boolean) {
     const nodeId = editingTextId;
@@ -1837,6 +1955,7 @@
   function canvasUp(event: PointerEvent) {
     if (!gesture || event.pointerId !== gesture.pointerId) return;
     const completedGesture = gesture.mode;
+    let createdTextNode: DesignNode | undefined;
     const p = gesture.mode === 'pan' ? null : point(event);
     if (gesture.mode === 'draw' && draft && draft.width > 8 && draft.height > 8) {
       const nodeId = uid('node');
@@ -1876,6 +1995,7 @@
           // Keep the last-used frame size in memory.
         }
       }
+      if (node.kind === 'text') createdTextNode = node;
       tool = 'select';
     } else if (gesture.mode === 'marquee') {
       const picked = marquee
@@ -1951,6 +2071,7 @@
     resetGesturePreview();
     releaseCanvasPointer(pointerId);
     if (completedGesture === 'pan') scheduleViewportLog('middle-drag');
+    if (createdTextNode) void beginTextEditing(createdTextNode);
   }
   function nodeDown(event: PointerEvent, node: DesignNode) {
     event.stopPropagation();
@@ -2922,6 +3043,7 @@
       </section>
     {/if}
     <ComponentLibrary components={componentCatalog} onInsert={insertComponent} />
+    <ProjectComponentLibrary definitions={projectComponents} onInsert={insertProjectComponent} />
     <section class="outline">
       <div class="section-title">
         <span>Screens</span><button title="Duplicate screen" onclick={duplicateScreen}
@@ -3050,11 +3172,15 @@
                 }}
                 ondblclick={(event) => startLayerRename(event, row.node)}
                 ><span class="layer-kind"
-                  >{row.node.componentBinding
-                    ? 'Component'
-                    : row.node.kind === 'rectangle'
-                      ? 'Shape'
-                      : row.node.kind}</span
+                  >{row.node.projectComponent
+                    ? row.node.projectComponent.role === 'main'
+                      ? 'Main component'
+                      : 'Instance'
+                    : row.node.componentBinding
+                      ? 'Component'
+                      : row.node.kind === 'rectangle'
+                        ? 'Shape'
+                        : row.node.kind}</span
                 ><span class="layer-name">{row.node.name}</span></button
               >{/if}
           </div>{/each}
@@ -3240,6 +3366,17 @@
                 stroke-width={node.style.strokeWidth}
               />
             {/if}
+            {#if node.projectComponent}
+              <rect
+                class="project-component-boundary"
+                class:main={node.projectComponent.role === 'main'}
+                x={bounds.x - 2 / zoom}
+                y={bounds.y - 2 / zoom}
+                width={bounds.width + 4 / zoom}
+                height={bounds.height + 4 / zoom}
+                rx={Math.max(node.style.radius, 3)}
+              />
+            {/if}
             {#if node.componentBinding}
               {#if !preview}
                 <rect
@@ -3279,11 +3416,13 @@
               <foreignObject x={bounds.x} y={bounds.y} width={bounds.width} height={bounds.height}>
                 <textarea
                   bind:this={inlineTextEditor}
+                  bind:value={editingTextDraft}
                   class="inline-text-editor"
                   aria-label={`Edit ${node.name} text`}
-                  value={editingTextDraft}
                   style={`font-size:${node.style.fontSize}px;font-weight:${node.style.fontWeight};line-height:${node.style.lineHeight};text-align:${node.style.textAlign};color:${node.style.textColor}`}
-                  oninput={(event) => (editingTextDraft = event.currentTarget.value)}
+                  onpointerdown={(event) => event.stopPropagation()}
+                  onclick={(event) => event.stopPropagation()}
+                  ondblclick={(event) => event.stopPropagation()}
                   onblur={() => finishTextEditing(true)}
                   onkeydown={(event) => {
                     event.stopPropagation();
@@ -3577,7 +3716,7 @@
             >{preview
               ? 'Preview actions'
               : contextNode
-                ? `${selection.length > 1 ? `${selection.length} selected · ` : ''}${contextNode.componentBinding ? 'Component' : contextNode.kind}`
+                ? `${selection.length > 1 ? `${selection.length} selected · ` : ''}${contextNode.projectComponent ? (contextNode.projectComponent.role === 'main' ? 'Main component' : 'Component instance') : contextNode.componentBinding ? 'Component' : contextNode.kind}`
                 : 'Canvas actions'}</span
           >
         </div>
@@ -3631,6 +3770,13 @@
               role="menuitem"
               onclick={() => toggleFrameClip(contextNode)}
               >{contextNode.clipContent ? 'Disable Clip content' : 'Enable Clip content'}</button
+            >{/if}
+          {#if selection.length === 1 && contextNode.kind === 'frame' && !contextNode.projectComponent}<button
+              role="menuitem"
+              onclick={() => {
+                contextMenu = null;
+                createProjectComponent();
+              }}><span>Create component</span><kbd>{commandLabel}+Alt+K</kbd></button
             >{/if}
           <div class="menu-separator"></div>
           <button role="menuitem" onclick={promoteFromContext}>Complete with Codesign</button
@@ -3740,6 +3886,10 @@
                 <div>
                   <dt>Duplicate</dt>
                   <dd><kbd>{commandLabel}+D</kbd></dd>
+                </div>
+                <div>
+                  <dt>Create component from frame</dt>
+                  <dd><kbd>{commandLabel}+Alt+K</kbd></dd>
                 </div>
                 <div>
                   <dt>Delete</dt>
@@ -3925,7 +4075,11 @@
     {#if selectedNodes[0]}
       {@const node = selectedNodes[0]}
       <div class="selection-summary">
-        <span class="kind-icon" aria-hidden="true">{node.componentBinding ? '◆' : '□'}</span>
+        <span
+          class="kind-icon"
+          class:project-component={Boolean(node.projectComponent)}
+          aria-hidden="true">{node.projectComponent ? '◆' : node.componentBinding ? '◆' : '□'}</span
+        >
         <div>
           <strong>{selectedNodes.length > 1 ? `${selectedNodes.length} layers` : node.name}</strong
           ><small
@@ -3935,6 +4089,28 @@
           >
         </div>
       </div>
+      {#if node.projectComponent}
+        <section class="project-component-section">
+          <h3>Project component</h3>
+          <strong
+            >{document.projectComponents?.[node.projectComponent.componentId]?.name ??
+              node.name}</strong
+          >
+          <p class="muted">
+            {node.projectComponent.role === 'main'
+              ? 'Main component. New instances use the current contents of this frame.'
+              : 'Reusable instance from this project.'}
+          </p>
+        </section>
+      {:else if selectedNodes.length === 1 && node.kind === 'frame'}
+        <section class="project-component-section">
+          <h3>Reusable component</h3>
+          <p class="muted">Turn this frame and its layers into a component for this project.</p>
+          <button class="wide component-action" onclick={createProjectComponent}
+            >Create component <kbd>{commandLabel}+Alt+K</kbd></button
+          >
+        </section>
+      {/if}
       <section>
         <h3>Geometry {gesture ? '· Live' : ''}</h3>
         <div class="field-grid">
@@ -4926,6 +5102,18 @@
     vector-effect: non-scaling-stroke;
     pointer-events: none;
   }
+  .project-component-boundary {
+    fill: none;
+    stroke: #7655b5;
+    stroke-width: 1.5;
+    stroke-dasharray: 5 3;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
+  }
+  .project-component-boundary.main {
+    stroke-width: 2;
+    stroke-dasharray: none;
+  }
   .node-label {
     pointer-events: none;
   }
@@ -5443,6 +5631,21 @@
   .selection-summary small {
     color: #7e858e;
     margin-top: 2px;
+  }
+  .kind-icon.project-component {
+    border-color: #c9b9de;
+    background: #f0eafb;
+    color: #69479a;
+  }
+  .project-component-section > strong {
+    display: block;
+    margin-top: 8px;
+    color: #4e376f;
+  }
+  .component-action {
+    border-color: #a991c8 !important;
+    background: #f5f0fb !important;
+    color: #5f3d8b !important;
   }
   .inspector section {
     padding: 13px 14px;

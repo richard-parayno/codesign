@@ -38,6 +38,10 @@ export type LegacyNodeSemantics = {
   commitment: Commitment;
   protected?: boolean;
 };
+export type ProjectComponentLink = {
+  componentId: string;
+  role: 'main' | 'instance';
+};
 export type DesignNode = {
   id: string;
   name: string;
@@ -59,8 +63,19 @@ export type DesignNode = {
     /** Named manifest slot used when this component node is nested under another component. */
     slot?: string;
   };
+  /** Links a project-authored main component or one of its reusable instances. */
+  projectComponent?: ProjectComponentLink;
   repeaterId?: string;
   provenance: { actor: Actor; operationId: string };
+};
+export type ProjectComponentDefinition = {
+  id: string;
+  name: string;
+  rootId: string;
+  sourceNodeId: string;
+  nodes: Record<string, DesignNode>;
+  createdAt: number;
+  updatedAt: number;
 };
 export type Screen = {
   id: string;
@@ -165,7 +180,14 @@ export type DesignOperation =
       dy: number;
     }
   | { id: string; type: 'duplicate-screen'; actor: Actor; sourceScreenId: string; screenId: string }
-  | { id: string; type: 'create-branch'; actor: Actor; sourceScreenId: string; branchId: string };
+  | { id: string; type: 'create-branch'; actor: Actor; sourceScreenId: string; branchId: string }
+  | {
+      id: string;
+      type: 'create-project-component';
+      actor: Actor;
+      targetId: string;
+      definition: ProjectComponentDefinition;
+    };
 
 export type OperationRecord = DesignOperation & {
   timestamp: number;
@@ -310,6 +332,8 @@ export type CanvasSnapshot = {
   pinnedNodeIds: string[];
   frameFidelity: Record<string, Fidelity>;
   nodeFidelityOverrides: Record<string, Fidelity>;
+  /** Optional for compatibility with project files saved before local components existed. */
+  projectComponents?: Record<string, ProjectComponentDefinition>;
 };
 export type DesignRevision = {
   id: string;
@@ -436,6 +460,12 @@ export const nodeSchema: z.ZodType<DesignNode> = z.object({
       slot: z.string().min(1).optional(),
     })
     .optional(),
+  projectComponent: z
+    .object({
+      componentId: z.string().min(1),
+      role: z.enum(['main', 'instance']),
+    })
+    .optional(),
   repeaterId: z.string().optional(),
   provenance: z.object({ actor: z.enum(['user', 'agent']), operationId: z.string() }),
 });
@@ -444,6 +474,15 @@ const transitionSchema: z.ZodType<Transition> = z.object({
   sourceNodeId: z.string().min(1),
   targetScreenId: z.string().min(1),
   label: z.string(),
+});
+export const projectComponentDefinitionSchema: z.ZodType<ProjectComponentDefinition> = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1).max(120),
+  rootId: z.string().min(1),
+  sourceNodeId: z.string().min(1),
+  nodes: z.record(z.string(), nodeSchema),
+  createdAt: finite.nonnegative(),
+  updatedAt: finite.nonnegative(),
 });
 const operationBase = { id: z.string().min(1), actor: z.enum(['user', 'agent']) } as const;
 export const operationSchema: z.ZodType<DesignOperation> = z.discriminatedUnion('type', [
@@ -552,6 +591,12 @@ export const operationSchema: z.ZodType<DesignOperation> = z.discriminatedUnion(
     type: z.literal('create-branch'),
     sourceScreenId: z.string(),
     branchId: z.string(),
+  }),
+  z.object({
+    ...operationBase,
+    type: z.literal('create-project-component'),
+    targetId: z.string().min(1),
+    definition: projectComponentDefinitionSchema,
   }),
 ]);
 
@@ -713,6 +758,7 @@ export function blankDocument(): DesignDocument {
     pinnedNodeIds: [],
     frameFidelity: {},
     nodeFidelityOverrides: {},
+    projectComponents: {},
   };
   const initialRevision: DesignRevision = {
     id: 'revision-initial',

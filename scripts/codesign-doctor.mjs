@@ -359,7 +359,7 @@ export async function runDoctor(options = {}) {
   );
 
   const expectations = packageExpectations(projectRoot);
-  // `pnpm doctor` supplies this user agent on every supported platform. Reading it avoids
+  // `pnpm run doctor` supplies this user agent on every supported platform. Reading it avoids
   // invoking a platform-specific pnpm shim through a shell.
   const pnpmDetected = detectedPnpmVersion(environment);
   if (!expectations.packageManager || !expectations.pnpmVersion) {
@@ -376,7 +376,7 @@ export async function runDoctor(options = {}) {
       check(
         'warn',
         'pnpm version was not detectable',
-        `Run this command as pnpm doctor; expected ${expectations.packageManager}`,
+        `Run this command as pnpm run doctor; expected ${expectations.packageManager}`,
         false,
       ),
     );
@@ -474,7 +474,7 @@ export async function runDoctor(options = {}) {
         probe.timedOut
           ? 'Codex App Server initialization timed out'
           : 'Codex App Server initialization failed',
-        'Run codex app-server --help, then retry pnpm doctor',
+        'Run codex app-server --help, then retry pnpm run doctor',
       ),
     );
     return { exitCode: 1, checks, resolvedCommand, codexVersion: version.display };
@@ -485,7 +485,7 @@ export async function runDoctor(options = {}) {
     checks.push(check('pass', safeAuthLabel(probe.authMode), 'Existing Codex authentication'));
   } else {
     checks.push(
-      check('fail', 'Codex is not authenticated', 'Run codex login, then retry pnpm doctor'),
+      check('fail', 'Codex is not authenticated', 'Run codex login, then retry pnpm run doctor'),
     );
   }
   if (probe.capabilitiesAvailable) {
@@ -534,10 +534,10 @@ export function formatDoctorResult(result) {
         '',
         'Then authenticate and retry:',
         '  codex login',
-        '  pnpm doctor',
+        '  pnpm run doctor',
       );
     } else {
-      lines.push('', 'Codesign is not ready. Resolve the failed checks and retry pnpm doctor.');
+      lines.push('', 'Codesign is not ready. Resolve the failed checks and retry pnpm run doctor.');
     }
   }
   return `${lines.join('\n')}\n`;

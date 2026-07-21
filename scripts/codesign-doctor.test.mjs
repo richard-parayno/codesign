@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   formatDoctorResult,
   inspectCodexVersion,
@@ -14,7 +15,7 @@ import {
   runDoctor,
 } from './codesign-doctor.mjs';
 
-const projectRoot = new URL('..', import.meta.url).pathname;
+const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 
 function fakeCommandRunner({ version = 'codex-cli 0.144.1', versionResult, helpResult } = {}) {
   return async (command, args) => {

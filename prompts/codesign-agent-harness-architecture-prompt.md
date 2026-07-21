@@ -27,15 +27,15 @@ Images are still useful, but they should become an on-demand visual inspection t
 
 The coding-harness analogy is:
 
-| Coding harness | Codesign harness |
-|---|---|
-| Repository | Immutable source scene revision |
-| Files and AST | Layer tree, layout IR, and component instances |
-| Read/search tools | Scene inspection, rendering, and component search |
-| File edits | Candidate-only scene operations |
-| Type checker/tests | Scope, component, geometry, and layout validators |
-| Git diff | Ghost candidate overlay and atomic visual diff |
-| Commit | Designer accepts all or selected candidate changes |
+| Coding harness     | Codesign harness                                   |
+| ------------------ | -------------------------------------------------- |
+| Repository         | Immutable source scene revision                    |
+| Files and AST      | Layer tree, layout IR, and component instances     |
+| Read/search tools  | Scene inspection, rendering, and component search  |
+| File edits         | Candidate-only scene operations                    |
+| Type checker/tests | Scope, component, geometry, and layout validators  |
+| Git diff           | Ghost candidate overlay and atomic visual diff     |
+| Commit             | Designer accepts all or selected candidate changes |
 
 ## Mandatory worktree and subagent protocol
 

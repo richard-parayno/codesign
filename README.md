@@ -46,13 +46,13 @@ git clone https://github.com/richard-parayno/codesign.git
 cd codesign
 corepack enable
 pnpm install --frozen-lockfile
-pnpm doctor
+pnpm run doctor
 pnpm dev --open
 ```
 
-`pnpm doctor` is a read-only preflight. It checks Node and pnpm expectations, finds the Codex executable, verifies the CLI and App Server compatibility, initializes App Server far enough to inspect the required capabilities and authentication status, and exits without starting a login flow or making an AI generation request.
+`pnpm run doctor` is a read-only preflight. It checks Node and pnpm expectations, finds the Codex executable, verifies the CLI and App Server compatibility, initializes App Server far enough to inspect the required capabilities and authentication status, and exits without starting a login flow or making an AI generation request. The explicit `run` is required because pnpm 10 already reserves `pnpm doctor` for its own unrelated package-manager diagnostic.
 
-If Codex is missing, authentication is unavailable, or a compatibility check fails, the editor still starts and remains explorable; only AI completion is unavailable. Resolve the reported issue and rerun `pnpm doctor`.
+If Codex is missing, authentication is unavailable, or a compatibility check fails, the editor still starts and remains explorable; only AI completion is unavailable. Resolve the reported issue and rerun `pnpm run doctor`.
 
 ## Bring your own Codex
 
@@ -64,13 +64,18 @@ Codesign owns the editor and local App Server integration. You own the Codex ins
 - Codesign does not read, copy, or forward Codex credential files.
 - The generated TypeScript protocol bindings under `.generated/codex-app-server/` are checked-in compile-time contracts; they do not provide or require a Codex runtime.
 
-By default the server resolves the bare command `codex` through its process `PATH`. If Codex is installed somewhere that is not on that `PATH`, create a local `.env` and set an absolute executable path:
+By default the server resolves the bare command `codex` through its process `PATH`. If Codex is installed somewhere that is not on that `PATH`, export the override before running the preflight, and add the same value to a local `.env` for the development server:
+
+```sh
+export CODESIGN_CODEX_COMMAND=/absolute/path/to/codex
+pnpm run doctor
+```
 
 ```dotenv
 CODESIGN_CODEX_COMMAND=/absolute/path/to/codex
 ```
 
-Quote a path that contains spaces:
+Quote a `.env` value that contains spaces. In a shell, quote the value according to that shell's syntax:
 
 ```dotenv
 CODESIGN_CODEX_COMMAND="/absolute/path with spaces/codex"
@@ -125,7 +130,7 @@ The standard Node/pnpm quickstart above is the primary setup path. Contributors 
 
 ```sh
 devenv shell
-pnpm doctor
+pnpm run doctor
 pnpm dev --open
 ```
 

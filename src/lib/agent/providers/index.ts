@@ -66,18 +66,36 @@ export function applyProviderOptions(
   return { ...settings, model, effort };
 }
 
-function resolvedExecutable(command: string, environment: NodeJS.ProcessEnv) {
+function resolvedExecutable(
+  command: string,
+  environment: NodeJS.ProcessEnv,
+  platform = process.platform,
+) {
+  const extensions =
+    platform === 'win32'
+      ? (environment.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+          .split(';')
+          .filter(Boolean)
+          .map((extension) => extension.toLowerCase())
+      : [''];
+  const hasKnownExtension = extensions.some(
+    (extension) => extension && command.toLowerCase().endsWith(extension),
+  );
   const candidates =
     isAbsolute(command) || command.includes('/') || command.includes('\\')
       ? [command]
       : (environment.PATH ?? '')
           .split(delimiter)
           .filter(Boolean)
-          .map((directory) => join(directory, command));
+          .flatMap((directory) =>
+            hasKnownExtension
+              ? [join(directory, command)]
+              : extensions.map((extension) => join(directory, `${command}${extension}`)),
+          );
   return (
     candidates.find((candidate) => {
       try {
-        accessSync(candidate, constants.X_OK);
+        accessSync(candidate, platform === 'win32' ? constants.F_OK : constants.X_OK);
         return true;
       } catch {
         return false;
@@ -89,8 +107,9 @@ function resolvedExecutable(command: string, environment: NodeJS.ProcessEnv) {
 export function providerRuntimeStatus(
   settings: ProviderSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  platform = process.platform,
 ) {
-  const executable = resolvedExecutable(settings.command, environment);
+  const executable = resolvedExecutable(settings.command, environment, platform);
   const pathCommand = settings.command === 'codex';
   return {
     detected: executable !== null,
@@ -143,7 +162,7 @@ export class CodexCodesignProvider implements CodesignProvider {
         ...(!account.connected ? { failureCategory: 'missing-login' as const } : {}),
         message: account.connected
           ? 'Codex App Server is connected.'
-          : 'Sign in to Codex with ChatGPT, then run pnpm doctor to verify AI setup.',
+          : 'Sign in to Codex with ChatGPT, then run pnpm run doctor to verify AI setup.',
       };
     } catch (cause) {
       const failure = asProviderFailure(cause);
@@ -157,7 +176,7 @@ export class CodexCodesignProvider implements CodesignProvider {
         failureCategory: failure.category,
         message:
           failure.category === 'unavailable'
-            ? 'Codex CLI is unavailable. Install it separately, then run pnpm doctor.'
+            ? 'Codex CLI is unavailable. Install it separately, then run pnpm run doctor.'
             : failure.message,
       };
     }

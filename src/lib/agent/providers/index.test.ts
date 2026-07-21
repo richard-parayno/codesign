@@ -105,6 +105,28 @@ describe('Codesign provider boundary', () => {
     }
   });
 
+  it('detects the Codex command through PATHEXT on Windows', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codesign-codex-windows-'));
+    const command = join(directory, 'codex.cmd');
+    try {
+      writeFileSync(command, '@echo off\r\nexit /b 0\r\n');
+
+      expect(
+        providerRuntimeStatus(
+          providerSettings({}),
+          { PATH: directory, PATHEXT: '.EXE;.CMD' },
+          'win32',
+        ),
+      ).toEqual({
+        detected: true,
+        source: 'path',
+        label: command,
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('returns actionable status when the user-installed runtime is missing', async () => {
     const client = {
       readAccount: vi.fn().mockRejectedValue(
@@ -119,7 +141,7 @@ describe('Codesign provider boundary', () => {
       available: false,
       connected: false,
       failureCategory: 'unavailable',
-      message: 'Codex CLI is unavailable. Install it separately, then run pnpm doctor.',
+      message: 'Codex CLI is unavailable. Install it separately, then run pnpm run doctor.',
     });
   });
 
@@ -139,7 +161,7 @@ describe('Codesign provider boundary', () => {
       available: true,
       connected: false,
       failureCategory: 'missing-login',
-      message: 'Sign in to Codex with ChatGPT, then run pnpm doctor to verify AI setup.',
+      message: 'Sign in to Codex with ChatGPT, then run pnpm run doctor to verify AI setup.',
     });
     expect(client.readAccount).toHaveBeenCalledOnce();
   });

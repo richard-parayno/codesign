@@ -70,6 +70,37 @@ function fakeProcess(
         );
       if (message.method === 'account/logout')
         stdout.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
+      if (message.method === 'model/list')
+        stdout.write(
+          `${JSON.stringify({
+            id: message.id,
+            result: {
+              data: [
+                {
+                  id: 'luna',
+                  model: 'gpt-5.6-luna',
+                  displayName: 'GPT-5.6 Luna',
+                  description: 'Visual coding model',
+                  hidden: false,
+                  supportedReasoningEfforts: [
+                    { reasoningEffort: 'high', description: 'Deep reasoning' },
+                  ],
+                  defaultReasoningEffort: 'high',
+                  inputModalities: ['text', 'image'],
+                  supportsPersonality: false,
+                  additionalSpeedTiers: [],
+                  serviceTiers: [],
+                  defaultServiceTier: null,
+                  isDefault: true,
+                  upgrade: null,
+                  upgradeInfo: null,
+                  availabilityNux: null,
+                },
+              ],
+              nextCursor: null,
+            },
+          })}\n`,
+        );
       if (message.method === 'thread/start') {
         threadIndex += 1;
         stdout.write(
@@ -220,6 +251,29 @@ describe('Codex App Server JSONL transport', () => {
       expect.arrayContaining(['account/read', 'account/login/start', 'account/logout']),
     );
     unsubscribe();
+    client.shutdown();
+  });
+
+  it('reads a bounded model catalog from App Server', async () => {
+    const fake = fakeProcess();
+    const client = new CodexAppServer('fake-codex', undefined, () => fake.child);
+
+    await expect(client.listModels()).resolves.toEqual([
+      {
+        id: 'luna',
+        model: 'gpt-5.6-luna',
+        displayName: 'GPT-5.6 Luna',
+        description: 'Visual coding model',
+        isDefault: true,
+        defaultReasoningEffort: 'high',
+        supportedReasoningEfforts: [{ reasoningEffort: 'high', description: 'Deep reasoning' }],
+      },
+    ]);
+    expect(fake.messages.find((message) => message.method === 'model/list')?.params).toEqual({
+      cursor: null,
+      limit: 100,
+      includeHidden: false,
+    });
     client.shutdown();
   });
 

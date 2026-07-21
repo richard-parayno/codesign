@@ -3,6 +3,8 @@ import {
   CODEX_PROVIDER_DESCRIPTOR,
   LOCAL_PROVIDER_DESCRIPTOR,
   ProviderFailure,
+  applyProviderOptions,
+  providerRuntimeStatus,
   providerSettings,
 } from './index';
 import { pinnedCodexCommand } from '../codex-client.server';
@@ -52,5 +54,23 @@ describe('Codesign provider boundary', () => {
     expect(() =>
       providerSettings({ CODESIGN_AGENT_BACKEND: 'codex', CODESIGN_CODEX_EFFORT: 'maximum' }),
     ).toThrow(ProviderFailure);
+  });
+
+  it('applies bounded per-generation model choices without changing runtime ownership', () => {
+    const configured = providerSettings({ CODESIGN_AGENT_BACKEND: 'codex' });
+    expect(
+      applyProviderOptions(configured, { model: 'gpt-5.6-luna-fast', effort: 'medium' }),
+    ).toEqual({
+      ...configured,
+      model: 'gpt-5.6-luna-fast',
+      effort: 'medium',
+    });
+    expect(() => applyProviderOptions(configured, { model: '../unsafe model' })).toThrow(
+      ProviderFailure,
+    );
+    expect(providerRuntimeStatus(configured)).toMatchObject({
+      source: 'project-pinned',
+      label: '@openai/codex project runtime',
+    });
   });
 });

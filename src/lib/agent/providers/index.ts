@@ -1,8 +1,11 @@
+import { constants, accessSync } from 'node:fs';
+import { delimiter, isAbsolute } from 'node:path';
 import type { ReasoningEffort } from '../../../../.generated/codex-app-server/ReasoningEffort';
 import {
   DEFAULT_CODEX_EFFORT,
   DEFAULT_CODEX_MODEL,
   getCodexClient,
+  pinnedCodexCommand,
   resolveCodexCommand,
   type CodexAppServer,
   type CodexLoginStart,
@@ -16,6 +19,7 @@ import {
   type ProviderDescriptor,
   type ProviderGenerationInput,
   type ProviderId,
+  type ProviderModelOption,
   type ProviderStatus,
 } from './contracts';
 
@@ -49,7 +53,7 @@ export const CODEX_PROVIDER_DESCRIPTOR = {
   },
 } as const satisfies ProviderDescriptor;
 
-const validEfforts = new Set(['low', 'medium', 'high', 'xhigh']);
+const validEfforts = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 
 export type ProviderSettings = {
   provider: ProviderId;
@@ -57,6 +61,55 @@ export type ProviderSettings = {
   effort: ReasoningEffort;
   command: string;
 };
+
+export type ProviderOptions = {
+  model?: string;
+  effort?: ReasoningEffort;
+};
+
+const validModelName = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/;
+
+export function applyProviderOptions(
+  settings: ProviderSettings,
+  options: ProviderOptions | undefined,
+): ProviderSettings {
+  if (!options) return settings;
+  const model = options.model?.trim() || settings.model;
+  const effort = options.effort ?? settings.effort;
+  if (!validModelName.test(model) || !validEfforts.has(effort))
+    throw new ProviderFailure('protocol-failure');
+  return { ...settings, model, effort };
+}
+
+function executableExists(command: string, environment: NodeJS.ProcessEnv) {
+  const candidates =
+    isAbsolute(command) || command.includes('/')
+      ? [command]
+      : (environment.PATH ?? '')
+          .split(delimiter)
+          .filter(Boolean)
+          .map((directory) => `${directory}/${command}`);
+  return candidates.some((candidate) => {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+export function providerRuntimeStatus(
+  settings: ProviderSettings,
+  environment: NodeJS.ProcessEnv = process.env,
+) {
+  const projectPinned = settings.command === pinnedCodexCommand();
+  return {
+    detected: executableExists(settings.command, environment),
+    source: projectPinned ? ('project-pinned' as const) : ('advanced-override' as const),
+    label: projectPinned ? '@openai/codex project runtime' : 'Advanced command override',
+  };
+}
 
 /** Reads only process configuration; Codex authentication remains entirely App Server-owned. */
 export function providerSettings(environment: NodeJS.ProcessEnv = process.env): ProviderSettings {
@@ -159,6 +212,14 @@ export class CodexCodesignProvider implements CodesignProvider {
   async startLogin(): Promise<CodexLoginStart> {
     try {
       return await this.client.startChatgptLogin();
+    } catch (cause) {
+      throw asProviderFailure(cause);
+    }
+  }
+
+  async models(): Promise<ProviderModelOption[]> {
+    try {
+      return await this.client.listModels();
     } catch (cause) {
       throw asProviderFailure(cause);
     }

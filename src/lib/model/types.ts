@@ -239,7 +239,7 @@ export type GenerationRun = {
   backend: 'local' | 'codex';
   provider: 'local' | 'codex';
   model?: string;
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   fallback: boolean;
   promptVersion: string;
   schemaVersion: string;
@@ -605,7 +605,7 @@ export const generationRunSchema: z.ZodType<GenerationRun> = z.object({
   backend: z.enum(['local', 'codex']),
   provider: z.enum(['local', 'codex']),
   model: z.string().optional(),
-  reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh']).optional(),
+  reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
   fallback: z.boolean(),
   promptVersion: z.string().min(1),
   schemaVersion: z.string().min(1),

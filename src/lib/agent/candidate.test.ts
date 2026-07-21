@@ -303,6 +303,22 @@ describe('Codesign candidate backend contract', () => {
     expect(parsed.visualInput).toBeUndefined();
   });
 
+  it('accepts bounded model preferences and rejects command-like model values', () => {
+    const request = requestFor(sourceDocument());
+    expect(
+      generationRequestSchema.parse({
+        ...request,
+        providerOptions: { model: 'gpt-5.6-luna', effort: 'high' },
+      }).providerOptions,
+    ).toEqual({ model: 'gpt-5.6-luna', effort: 'high' });
+    expect(() =>
+      generationRequestSchema.parse({
+        ...request,
+        providerOptions: { model: '../../command --flag' },
+      }),
+    ).toThrow();
+  });
+
   it('rejects malformed component bindings and unregistered style values', () => {
     const document = sourceDocument();
     const request = requestFor(document);

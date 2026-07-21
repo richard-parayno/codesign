@@ -6,6 +6,7 @@ import type { PlanType } from '../../../.generated/codex-app-server/PlanType';
 import type { ReasoningEffort } from '../../../.generated/codex-app-server/ReasoningEffort';
 import type { GetAccountResponse } from '../../../.generated/codex-app-server/v2/GetAccountResponse';
 import type { LoginAccountResponse } from '../../../.generated/codex-app-server/v2/LoginAccountResponse';
+import type { ModelListResponse } from '../../../.generated/codex-app-server/v2/ModelListResponse';
 import type { ThreadStartParams } from '../../../.generated/codex-app-server/v2/ThreadStartParams';
 import type { TurnStartParams } from '../../../.generated/codex-app-server/v2/TurnStartParams';
 import type { UserInput } from '../../../.generated/codex-app-server/v2/UserInput';
@@ -82,6 +83,19 @@ export type CodexLoginStart = {
 export type CodexGenerationOptions = {
   model?: string;
   effort?: ReasoningEffort;
+};
+
+export type CodexModelSummary = {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+  defaultReasoningEffort: ReasoningEffort;
+  supportedReasoningEfforts: Array<{
+    reasoningEffort: ReasoningEffort;
+    description: string;
+  }>;
 };
 
 const planTypes = new Set<PlanType>([
@@ -439,6 +453,38 @@ export class CodexAppServer {
     return { ...this.latestAccount };
   }
 
+  async listModels(): Promise<CodexModelSummary[]> {
+    await this.start();
+    const response = (await this.request(
+      'model/list',
+      { cursor: null, limit: 100, includeHidden: false },
+      10_000,
+    )) as ModelListResponse | undefined;
+    if (!response || !Array.isArray(response.data))
+      throw new Error('Codex App Server returned an invalid model list');
+    return response.data
+      .filter(
+        (model) =>
+          typeof model.id === 'string' &&
+          typeof model.model === 'string' &&
+          typeof model.displayName === 'string' &&
+          Array.isArray(model.supportedReasoningEfforts),
+      )
+      .slice(0, 100)
+      .map((model) => ({
+        id: model.id,
+        model: model.model,
+        displayName: model.displayName,
+        description: model.description,
+        isDefault: model.isDefault,
+        defaultReasoningEffort: model.defaultReasoningEffort,
+        supportedReasoningEfforts: model.supportedReasoningEfforts.map((option) => ({
+          reasoningEffort: option.reasoningEffort,
+          description: option.description,
+        })),
+      }));
+  }
+
   async startChatgptLogin(): Promise<CodexLoginStart> {
     await this.start();
     const response = (await this.request(
@@ -582,7 +628,8 @@ export function getCodexClient(
 ) {
   const command = resolveCodexCommand(advancedCommandOverride);
   const clients = (globalThis.__codesignCodexClients ??= new Map());
-  const key = JSON.stringify([command, model, effort]);
+  // The transport is model-agnostic; each isolated generation turn supplies its own model/effort.
+  const key = command;
   let client = clients.get(key);
   if (!client) {
     client = new CodexAppServer(command, model, spawn, effort);

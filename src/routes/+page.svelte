@@ -71,12 +71,18 @@
   } from '$lib/codesign/CodesignPanel.svelte';
   import type { FidelityStopView } from '$lib/codesign/FidelityStops.svelte';
   import ProcessPanel, { type ProcessEventView } from '$lib/codesign/ProcessPanel.svelte';
+  import AiSettingsDialog, {
+    type AiIntegrationView,
+    type AiModelOption,
+    type AiReasoningEffort,
+  } from '$lib/codesign/AiSettingsDialog.svelte';
 
   type Tool = 'select' | 'frame' | 'rectangle' | 'text' | 'connect';
   type EditorMode = 'edit' | 'codesign' | 'preview';
   const DEFAULT_CANVAS_BACKGROUND = '#edf0f3';
   const CANVAS_BACKGROUND_KEY = 'malleable.canvas-background.v1';
   const FRAME_SIZE_KEY = 'codesign.frame-size.v1';
+  const AI_SETTINGS_KEY = 'codesign.ai-settings.v1';
   let tool: Tool = 'select';
   let selection: string[] = [];
   let error = '';
@@ -92,6 +98,12 @@
   let contextMenu: { x: number; y: number; nodeId?: string } | null = null;
   let contextMenuElement: HTMLDivElement;
   let shortcutsOpen = false;
+  let aiSettingsOpen = false;
+  let aiSettingsLoading = false;
+  let aiSettingsError = '';
+  let selectedAiModel = 'gpt-5.6-luna';
+  let selectedAiEffort: AiReasoningEffort = 'high';
+  let aiIntegration: AiIntegrationView = { models: [] };
   let draft: Bounds | null = null;
   let marquee: Bounds | null = null;
   let transientBounds: Record<string, Bounds> = {};
@@ -235,6 +247,11 @@
   );
   $: fidelityStops = makeFidelityStops(selectedNodes, document, runCandidates);
   $: processEventViews = makeProcessEventViews(document.processEvents, document);
+  $: aiModelOptions = completeModelOptions(
+    aiIntegration.models,
+    aiIntegration.configuration,
+    selectedAiModel,
+  );
 
   onMount(() => {
     documentStore.restore();
@@ -258,12 +275,28 @@
         framePresetId = savedFrameSize.presetId ?? 'custom';
         frameOrientation = savedFrameSize.orientation ?? 'landscape';
       }
+      const savedAiSettings = JSON.parse(localStorage.getItem(AI_SETTINGS_KEY) ?? 'null') as {
+        model?: string;
+        effort?: AiReasoningEffort;
+      } | null;
+      if (
+        savedAiSettings?.model &&
+        /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(savedAiSettings.model)
+      )
+        selectedAiModel = savedAiSettings.model;
+      if (['low', 'medium', 'high', 'xhigh', 'max'].includes(savedAiSettings?.effort ?? ''))
+        selectedAiEffort = savedAiSettings!.effort!;
     } catch {
       // The editor still works when browser storage is unavailable.
     }
     void refreshProviderStatus();
     const keydown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
+      if (aiSettingsOpen && event.key === 'Escape') {
+        event.preventDefault();
+        closeAiSettings('keyboard');
+        return;
+      }
       if (
         target.matches('input, select, textarea, [contenteditable="true"]') ||
         target.closest('dialog, [role="dialog"]')
@@ -413,6 +446,7 @@
     if (control.closest('.canvas-toolbar')) return 'canvas-toolbar';
     if (control.closest('.context-menu')) return 'context-menu';
     if (control.closest('.shortcuts-dialog')) return 'shortcuts-overlay';
+    if (control.closest('.settings-dialog')) return 'ai-settings';
     if (control.closest('.context-bar')) return 'selection-toolbar';
     if (control.closest('.codesign-panel')) return 'codesign';
     if (control.closest('.bottom-panel')) return 'bottom-panel';
@@ -470,6 +504,107 @@
       agentStatus = cause instanceof Error ? cause.message : 'Provider status unavailable';
     }
   }
+  function completeModelOptions(
+    reported: AiModelOption[],
+    configuration: AiIntegrationView['configuration'],
+    selected: string,
+  ) {
+    const models = new Map(reported.map((option) => [option.model, option]));
+    for (const model of [configuration?.model, selected].filter((value): value is string =>
+      Boolean(value),
+    )) {
+      if (models.has(model)) continue;
+      models.set(model, {
+        id: model,
+        model,
+        displayName: model,
+        description:
+          model === configuration?.model
+            ? 'Configured by the SvelteKit environment.'
+            : 'Saved browser preference.',
+        isDefault: model === configuration?.model,
+        defaultReasoningEffort: configuration?.effort ?? 'high',
+        supportedReasoningEfforts: [],
+      });
+    }
+    return [...models.values()];
+  }
+  function saveAiSettings() {
+    try {
+      localStorage.setItem(
+        AI_SETTINGS_KEY,
+        JSON.stringify({ model: selectedAiModel, effort: selectedAiEffort }),
+      );
+    } catch {
+      aiSettingsError = 'The browser could not persist this AI preference.';
+    }
+  }
+  function selectAiModel(model: string) {
+    selectedAiModel = model;
+    const option = aiModelOptions.find((item) => item.model === model);
+    const supported = option?.supportedReasoningEfforts.map((item) => item.reasoningEffort) ?? [];
+    if (supported.length && !supported.includes(selectedAiEffort))
+      selectedAiEffort = option?.defaultReasoningEffort ?? supported[0];
+    saveAiSettings();
+    logAction('codesign.ai-model-selected', { model, effort: selectedAiEffort });
+  }
+  function selectAiEffort(effort: AiReasoningEffort) {
+    selectedAiEffort = effort;
+    saveAiSettings();
+    logAction('codesign.ai-effort-selected', { model: selectedAiModel, effort });
+  }
+  function resetAiSettings() {
+    selectedAiModel = aiIntegration.configuration?.model ?? 'gpt-5.6-luna';
+    selectedAiEffort = aiIntegration.configuration?.effort ?? 'high';
+    saveAiSettings();
+    logAction('codesign.ai-settings-reset', {
+      model: selectedAiModel,
+      effort: selectedAiEffort,
+    });
+  }
+  async function refreshAiIntegrationStatus() {
+    aiSettingsLoading = true;
+    aiSettingsError = '';
+    try {
+      const response = await fetch('/api/agent/provider/status?provider=codex');
+      const value = (await response.json()) as AiIntegrationView & {
+        error?: { message?: string };
+      };
+      if (!response.ok) throw new Error(value.error?.message ?? 'AI diagnostics unavailable');
+      aiIntegration = {
+        status: value.status,
+        runtime: value.runtime,
+        configuration: value.configuration,
+        models: value.models ?? [],
+        modelsMessage: value.modelsMessage,
+        checkedAt: Date.now(),
+      };
+      if (!selectedAiModel) selectedAiModel = value.configuration?.model ?? 'gpt-5.6-luna';
+      logAction('codesign.ai-status-refreshed', {
+        runtimeDetected: Boolean(value.runtime?.detected),
+        appServerAvailable: Boolean(value.status?.available),
+        connected: Boolean(value.status?.connected),
+        modelCount: value.models?.length ?? 0,
+      });
+    } catch (cause) {
+      aiSettingsError = cause instanceof Error ? cause.message : 'AI diagnostics unavailable';
+      aiIntegration = { ...aiIntegration, checkedAt: Date.now() };
+      logAction('codesign.ai-status-failed', { message: aiSettingsError });
+    } finally {
+      aiSettingsLoading = false;
+    }
+  }
+  function openAiSettings() {
+    contextMenu = null;
+    shortcutsOpen = false;
+    aiSettingsOpen = true;
+    logAction('codesign.ai-settings-opened', { backend });
+    void refreshAiIntegrationStatus();
+  }
+  function closeAiSettings(source: 'button' | 'keyboard' | 'backdrop') {
+    aiSettingsOpen = false;
+    logAction('codesign.ai-settings-closed', { source });
+  }
   async function signInToCodex() {
     try {
       const response = await fetch('/api/agent/provider/login', { method: 'POST' });
@@ -492,6 +627,7 @@
       const value = await response.json();
       if (!response.ok) throw new Error(value.error?.message ?? 'Codex sign-out failed');
       await refreshProviderStatus();
+      if (aiSettingsOpen) await refreshAiIntegrationStatus();
       notice = 'Signed out of Codex.';
       logAction('codesign.provider-logout', { provider: 'codex' });
     } catch (cause) {
@@ -1799,6 +1935,8 @@
       observationCount: observationScope.nodeIds.length,
       sourceRevisionId: document.currentRevisionId,
       requestedFidelity,
+      model: selectedAiModel,
+      reasoningEffort: selectedAiEffort,
       rerollCandidateId: rerollCandidateId ?? '',
     });
     try {
@@ -1819,6 +1957,7 @@
           projectId: activeProjectId,
           action,
           requestedFidelity,
+          providerOptions: { model: selectedAiModel, effort: selectedAiEffort },
           target,
           pinnedNodeIds: document.pinnedNodeIds,
           pinnedAtomicChanges: pinnedChanges,
@@ -2289,6 +2428,9 @@
           ><span class="button-icon" aria-hidden="true">↻</span>Refresh provider</button
         >
       {/if}
+      <button title="Open Codesign AI integration settings" onclick={openAiSettings}
+        >AI settings</button
+      >
       <button title="Undo · Ctrl/⌘ Z" onclick={() => undo('toolbar')}
         ><span class="button-icon" aria-hidden="true">↶</span>Undo</button
       ><button title="Redo · Ctrl/⌘ Shift Z" onclick={() => redo('toolbar')}
@@ -3193,6 +3335,24 @@
           </footer>
         </div>
       </div>
+    {/if}
+
+    {#if aiSettingsOpen}
+      <AiSettingsDialog
+        activeBackend={backend}
+        integration={{ ...aiIntegration, models: aiModelOptions }}
+        selectedModel={selectedAiModel}
+        selectedEffort={selectedAiEffort}
+        loading={aiSettingsLoading}
+        errorMessage={aiSettingsError}
+        onClose={() => closeAiSettings('button')}
+        onRefresh={refreshAiIntegrationStatus}
+        onModelChange={selectAiModel}
+        onEffortChange={selectAiEffort}
+        onReset={resetAiSettings}
+        onSignIn={signInToCodex}
+        onSignOut={signOutOfCodex}
+      />
     {/if}
 
     <section class:open={bottomOpen} class="bottom-panel">

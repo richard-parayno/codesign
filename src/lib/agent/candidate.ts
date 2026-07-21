@@ -205,6 +205,16 @@ export const generationRequestSchema = z.object({
   projectId: z.string().min(1).max(160).default('local-project'),
   action: z.enum(['complete', 'refine', 'vary', 'resolve']),
   requestedFidelity: fidelitySchema,
+  providerOptions: z
+    .object({
+      model: z
+        .string()
+        .trim()
+        .regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/)
+        .optional(),
+      effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    })
+    .optional(),
   target: z.object({
     focusNodeIds: z.array(z.string()).min(1).max(20),
     observationScope: observationScopeSchema.extend({
@@ -239,7 +249,7 @@ export class CandidateValidationError extends Error {}
 type BackendMetadata = {
   backend: 'local' | 'codex';
   model?: string;
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   fallback?: boolean;
   contextNodeIds?: string[];
   contextRootId?: string;

@@ -105,8 +105,22 @@ export type ProviderGenerationInput = {
   effort?: ReasoningEffort;
 };
 
+export type ProviderModelOption = {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+  defaultReasoningEffort: ReasoningEffort;
+  supportedReasoningEfforts: Array<{
+    reasoningEffort: ReasoningEffort;
+    description: string;
+  }>;
+};
+
 export interface CodesignProvider {
   readonly descriptor: ProviderDescriptor;
   status(): Promise<ProviderStatus>;
+  models?(): Promise<ProviderModelOption[]>;
   generate(input: ProviderGenerationInput): Promise<AgentCandidateBatch>;
 }

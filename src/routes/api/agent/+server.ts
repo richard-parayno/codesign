@@ -16,6 +16,7 @@ import {
 import {
   LocalCodesignProvider,
   ProviderFailure,
+  applyProviderOptions,
   asProviderFailure,
   createProvider,
   providerSettings,
@@ -126,7 +127,9 @@ function runMetadata(
     backend,
     model: backend === 'codex' ? settings.model : undefined,
     reasoningEffort:
-      backend === 'codex' ? (settings.effort as 'low' | 'medium' | 'high' | 'xhigh') : undefined,
+      backend === 'codex'
+        ? (settings.effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max')
+        : undefined,
     fallback,
     contextNodeIds: context.nodes.map((node) => node.id),
     contextRootId: context.coordinateSpace.observationRootId ?? undefined,
@@ -203,7 +206,7 @@ export async function POST({ request }) {
   const input = parsed.data;
   try {
     validateGenerationRequest(input);
-    const settings = providerSettings();
+    const settings = applyProviderOptions(providerSettings(), input.providerOptions);
     const runId = `generation-${randomUUID()}`;
     const createdAt = Date.now();
     if (settings.provider === 'local') {
@@ -269,7 +272,7 @@ export async function POST({ request }) {
   } catch (cause) {
     const settings = (() => {
       try {
-        return providerSettings();
+        return applyProviderOptions(providerSettings(), input.providerOptions);
       } catch {
         return undefined;
       }

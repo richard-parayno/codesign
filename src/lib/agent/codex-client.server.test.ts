@@ -545,6 +545,50 @@ describe('Codex App Server JSONL transport', () => {
     client.shutdown();
   });
 
+  it('interrupts a canvas-agent turn after repeated invalid mutation attempts', async () => {
+    const fake = fakeProcess({ complete: false });
+    const service = {
+      createSession: vi.fn(),
+      dispatch: vi.fn(),
+      cancelSession: vi.fn(),
+      cleanupExpired: vi.fn(),
+      dispose: vi.fn(),
+    } as unknown as CanvasSessionService;
+    const client = new CodexAppServer('fake-codex', undefined, () => fake.child);
+    const pending = client.runCanvasSession('Use the canvas tools', 'session-1', service);
+    const rejection = expect(pending).rejects.toThrow(
+      'stopped after 5 consecutive candidate mutation failures',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    for (let index = 0; index < 5; index += 1) {
+      fake.stdout.write(
+        `${JSON.stringify({
+          id: 100 + index,
+          method: 'item/tool/call',
+          params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            callId: `call-invalid-${index}`,
+            namespace: null,
+            tool: 'candidate_apply_changes',
+            arguments: {
+              candidateRevisionId: 'revision-source',
+              changes: [{ operation: { type: 'style', targetIds: ['node-1'] } }],
+            },
+          },
+        })}\n`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    await rejection;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fake.messages.some((message) => message.method === 'turn/interrupt')).toBe(true);
+    expect(service.dispatch).not.toHaveBeenCalled();
+    client.shutdown();
+  });
+
   it('rejects a completed canvas-agent turn that never submits a candidate', async () => {
     const fake = fakeProcess();
     const client = new CodexAppServer('fake-codex', undefined, () => fake.child);

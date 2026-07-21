@@ -43,6 +43,17 @@ export const codesignToolActivitySchema = z.object({
     })
     .optional(),
   error: z.string().max(4_000).optional(),
+  diagnostics: z
+    .array(
+      z.object({
+        path: z.string().max(500).optional(),
+        message: z.string().max(1_000),
+        code: z.string().max(120).optional(),
+        nodeIds: z.array(z.string()).max(50).optional(),
+      }),
+    )
+    .max(20)
+    .optional(),
 });
 
 export const codesignTokenUsageSchema = z.object({

@@ -26,7 +26,7 @@ import { z } from 'zod';
 import type { CodesignTelemetryEvent } from './telemetry';
 
 export const CANDIDATE_SCHEMA_VERSION = 'codesign-candidate-batch-v2';
-export const PROMPT_VERSION = 'codesign-agent-harness-v1';
+export const PROMPT_VERSION = 'codesign-agent-harness-v3';
 export const SUPPORTED_ACTIONS = ['complete'] as const satisfies readonly CodesignAction[];
 
 const MAX_KNOWN_NODE_IDS = 5_000;

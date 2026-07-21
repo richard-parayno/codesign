@@ -71,6 +71,7 @@ describe('deriveGenerationTarget', () => {
   it('uses a selected frame as both observation root and insertion parent', () => {
     const target = deriveGenerationTarget(scene(), ['frame']);
     expect(target.observationScope.rootId).toBe('frame');
+    expect(target.mutationScope.existingNodeIds).toEqual(['frame', 'region', 'content']);
     expect(target.mutationScope.insertionParentIds).toEqual(['frame']);
   });
 

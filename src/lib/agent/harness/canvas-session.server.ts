@@ -3,6 +3,8 @@ import { validateComponentBinding } from '$lib/design-system/manifest';
 import { applyOperation } from '$lib/model/operations';
 import {
   boundsSchema,
+  defaultLayout,
+  defaultStyle,
   layoutForNode,
   operationSchema,
   type Bounds,
@@ -98,6 +100,84 @@ type StoredSession = {
   expiresAt: number;
   submittedAt?: number;
 };
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function canonicalCandidateOperation(session: StoredSession, value: unknown): DesignOperation {
+  const canonical = operationSchema.safeParse(value);
+  if (canonical.success) return canonical.data;
+  const operation = recordValue(value);
+  const type = typeof operation?.type === 'string' ? operation.type : 'operation';
+  const operationId =
+    typeof operation?.id === 'string' ? operation.id : `candidate-${type}-${randomUUID()}`;
+  if (operation?.type === 'create') {
+    const parentId =
+      typeof operation.parentId === 'string'
+        ? operation.parentId
+        : session.target.mutationScope.insertionParentIds.length === 1
+          ? session.target.mutationScope.insertionParentIds[0]
+          : undefined;
+    const binding = recordValue(operation.componentBinding);
+    return operationSchema.parse({
+      id: operationId,
+      type: 'create',
+      actor: 'agent',
+      node: {
+        id:
+          typeof operation.nodeId === 'string'
+            ? operation.nodeId
+            : `candidate-node-${randomUUID()}`,
+        name: operation.name,
+        kind: operation.kind,
+        screenId: session.source.activeScreenId,
+        ...(parentId ? { parentId } : {}),
+        childIds: [],
+        bounds: operation.bounds,
+        style: { ...defaultStyle, ...(recordValue(operation.style) ?? {}) },
+        layout: { ...defaultLayout, ...(recordValue(operation.layout) ?? {}) },
+        ...(typeof operation.text === 'string' ? { text: operation.text } : {}),
+        ...(typeof operation.clipContent === 'boolean'
+          ? { clipContent: operation.clipContent }
+          : {}),
+        ...(binding
+          ? {
+              componentBinding: {
+                ...binding,
+                props: recordValue(binding.props) ?? {},
+              },
+            }
+          : {}),
+        provenance: { actor: 'agent', operationId },
+      },
+    });
+  }
+  return operationSchema.parse({
+    ...operation,
+    id: operationId,
+    actor: 'agent',
+    ...(operation?.type === 'promote' && !recordValue(operation.props) ? { props: {} } : {}),
+  });
+}
+
+function canonicalCandidateApplyInput(session: StoredSession, value: unknown) {
+  const input = recordValue(value);
+  if (!input || !Array.isArray(input.changes)) return value;
+  return {
+    ...input,
+    changes: input.changes.map((rawChange) => {
+      const change = recordValue(rawChange);
+      if (!change) return rawChange;
+      return {
+        ...change,
+        operation: canonicalCandidateOperation(session, change.operation),
+      };
+    }),
+  };
+}
 
 function clone<T>(value: T): T {
   return structuredClone(value);
@@ -195,10 +275,12 @@ function nodeSummary(node: DesignNode) {
     id: node.id,
     name: node.name,
     kind: node.kind,
+    screenId: node.screenId,
     parentId: node.parentId ?? null,
     childIds: node.childIds,
     bounds: node.bounds,
     style: node.style,
+    layout: layoutForNode(node),
     text: node.text,
     componentBinding: node.componentBinding,
     provenance: node.provenance,
@@ -637,7 +719,10 @@ export class CanvasSessionService implements CanvasSessionServiceContract {
       else if (toolName === 'candidate.get_state')
         result = this.candidateState(session, candidateStateSchema.parse(args));
       else if (toolName === 'candidate.apply_changes')
-        result = this.applyChanges(session, applySchema.parse(args));
+        result = this.applyChanges(
+          session,
+          applySchema.parse(canonicalCandidateApplyInput(session, args)),
+        );
       else if (toolName === 'candidate.validate') {
         emptySchema.parse(args);
         result = this.validate(session);

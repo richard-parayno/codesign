@@ -807,8 +807,15 @@ export class CodexAppServer {
     if (signal?.aborted) throw new Error('Codex generation cancelled');
     const model = options.model?.trim() || this.model || DEFAULT_CODEX_MODEL;
     const effort = options.effort || this.effort || DEFAULT_CODEX_EFFORT;
+    let activeTurnId: string | undefined;
+    let rejectFatalToolFailure: ((error: Error) => void) | undefined;
+    const fatalToolFailure = new Promise<never>((_resolve, reject) => {
+      rejectFatalToolFailure = reject;
+    });
+    void fatalToolFailure.catch(() => {});
     const dispatcher = new CanvasAppServerToolDispatcher(service, sessionId, {
       onActivity: options.onToolActivity,
+      onFatal: (error) => rejectFatalToolFailure?.(error),
     });
     const threadStartedAt = Date.now();
     const threadId = await this.createThread(model, dispatcher);
@@ -838,11 +845,12 @@ export class CodexAppServer {
       });
       const turnId = response.turn?.id;
       if (!turnId) throw new Error('Codex App Server did not return a turn ID');
+      activeTurnId = turnId;
       if (signal?.aborted) {
         this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
         throw new Error('Codex generation cancelled');
       }
-      const assistantText = await new Promise<string>((resolveTurn, rejectTurn) => {
+      const turnCompletion = new Promise<string>((resolveTurn, rejectTurn) => {
         const early = this.earlyTurns.get(turnId);
         if (early?.completed) {
           this.earlyTurns.delete(turnId);
@@ -880,6 +888,20 @@ export class CodexAppServer {
         this.earlyTurns.delete(turnId);
         signal?.addEventListener('abort', abort, { once: true });
       });
+      const assistantText = await Promise.race([turnCompletion, fatalToolFailure]).catch(
+        (error) => {
+          if (activeTurnId) {
+            const activeTurn = this.turns.get(activeTurnId);
+            if (activeTurn) clearTimeout(activeTurn.timer);
+            this.turns.delete(activeTurnId);
+            this.outputStartedTurns.delete(activeTurnId);
+            this.request('turn/interrupt', { threadId, turnId: activeTurnId }, 3_000).catch(
+              () => {},
+            );
+          }
+          throw error;
+        },
+      );
       const submission = dispatcher.submittedResult;
       if (!submission) {
         const error = new Error('Codex turn completed without submitting a valid candidate');

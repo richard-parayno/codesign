@@ -18,6 +18,8 @@ export const CODESIGN_COMPLETE_PROMPT_TEMPLATE = [
   'Preserve the established visual language and do not assume a particular product pattern.',
   'Use scene and component tools for evidence instead of asking for a full scene or catalog dump.',
   'Keep changes atomic, ordered, replayable, and within the mutation scope. Preserve pins.',
+  'candidate.apply_changes accepts only create, move, resize, delete, promote, style, update-node, and reparent. Every change requires evidenceNodeIds and summary. For create, put name, kind, parentId, bounds, style, layout, and text directly on operation; never send a nested node or screenId. Codesign assigns missing operation IDs, node IDs, provenance, child IDs, and defaults.',
+  'Do not repeat an identical scene read or render. Reuse its result unless the candidate revision changed.',
   'Use canonical layout and component properties so the result stays editable in Layers, Properties, direct manipulation, undo/redo, persistence, and Svelte projection.',
   'Required loop: inspect, apply a bounded change batch, inspect the ghost candidate, validate, repair if needed, then submit.',
   CODESIGN_PROMPT_PAYLOAD_TOKEN,
@@ -38,7 +40,7 @@ const submissionContract = {
 };
 
 export const CODESIGN_PROMPT_TEMPLATE_INSPECTION = {
-  id: 'codesign-agent-harness-v1',
+  id: 'codesign-agent-harness-v3',
   name: 'Complete with Codesign',
   systemInstructions: CODESIGN_SYSTEM_INSTRUCTIONS,
   userTemplate: CODESIGN_COMPLETE_PROMPT_TEMPLATE,

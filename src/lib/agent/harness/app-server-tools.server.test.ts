@@ -37,6 +37,18 @@ describe('Canvas App Server tools', () => {
       additionalProperties: false,
       required: ['nodeIds'],
     });
+    const applyChanges = CANVAS_APP_SERVER_TOOLS.find(
+      (tool) => 'name' in tool && tool.name === 'candidate_apply_changes',
+    );
+    const applySchema = JSON.stringify(
+      applyChanges && 'inputSchema' in applyChanges ? applyChanges.inputSchema : null,
+    );
+    expect(applySchema.length).toBeLessThan(12_000);
+    expect(applySchema).not.toContain('create-project-component');
+    expect(applySchema).not.toContain('generalize');
+    expect(applySchema).not.toContain('duplicate-screen');
+    expect(applySchema).not.toContain('screenId');
+    expect(applySchema).toContain('nodeId');
   });
 
   it('validates arguments and dispatches only the canonical service operation', async () => {
@@ -113,6 +125,206 @@ describe('Canvas App Server tools', () => {
     });
   });
 
+  it('normalizes nested create input into the compact server-owned wire operation', async () => {
+    const dispatch = vi.fn(async () => ({ ok: true }));
+    const adapter = new CanvasAppServerToolDispatcher(service(dispatch), 'session-1');
+
+    await adapter.dispatch({
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      callId: 'call-create',
+      namespace: null,
+      tool: 'candidate_apply_changes',
+      arguments: {
+        candidateRevisionId: 'revision-source',
+        changes: [
+          {
+            operation: {
+              type: 'create',
+              node: {
+                name: 'Created node',
+                kind: 'rectangle',
+                screenId: 'hallucinated-screen',
+                parentId: 'frame-1',
+                bounds: { x: 10, y: 20, width: 100, height: 80 },
+                style: { fill: '#ffffff' },
+              },
+            },
+            evidenceNodeIds: ['frame-1'],
+            summary: 'Created a panel in the observed frame.',
+          },
+        ],
+      },
+    });
+
+    expect(dispatch).toHaveBeenCalledWith(
+      'session-1',
+      'candidate.apply_changes',
+      expect.objectContaining({
+        changes: [
+          expect.objectContaining({
+            operation: expect.objectContaining({
+              type: 'create',
+              name: 'Created node',
+              kind: 'rectangle',
+              parentId: 'frame-1',
+              bounds: { x: 10, y: 20, width: 100, height: 80 },
+              style: { fill: '#ffffff' },
+            }),
+          }),
+        ],
+      }),
+    );
+    const forwarded = (dispatch.mock.calls as unknown[][])[0][2] as {
+      changes: Array<{ operation: Record<string, unknown> }>;
+    };
+    expect(forwarded.changes[0].operation).not.toHaveProperty('id');
+    expect(forwarded.changes[0].operation).not.toHaveProperty('nodeId');
+    expect(forwarded.changes[0].operation).not.toHaveProperty('screenId');
+  });
+
+  it('normalizes common target and patch aliases before validation', async () => {
+    const dispatch = vi.fn(async () => ({ ok: true }));
+    const adapter = new CanvasAppServerToolDispatcher(service(dispatch), 'session-1');
+
+    await adapter.dispatch({
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      callId: 'call-update-alias',
+      namespace: null,
+      tool: 'candidate_apply_changes',
+      arguments: {
+        candidateRevisionId: 'revision-source',
+        changes: [
+          {
+            operation: {
+              type: 'update-node',
+              targetId: 'node-1',
+              updates: { name: 'Updated name' },
+            },
+            evidenceNodeIds: ['node-1'],
+            summary: 'Clarified the node name.',
+          },
+        ],
+      },
+    });
+
+    expect(dispatch).toHaveBeenCalledWith(
+      'session-1',
+      'candidate.apply_changes',
+      expect.objectContaining({
+        changes: [
+          expect.objectContaining({
+            operation: {
+              type: 'update-node',
+              targetIds: ['node-1'],
+              patch: { name: 'Updated name' },
+            },
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('preserves the singular targetId required by resize operations', async () => {
+    const dispatch = vi.fn(async () => ({ ok: true }));
+    const adapter = new CanvasAppServerToolDispatcher(service(dispatch), 'session-1');
+
+    const response = await adapter.dispatch({
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      callId: 'call-resize',
+      namespace: null,
+      tool: 'candidate_apply_changes',
+      arguments: {
+        candidateRevisionId: 'revision-source',
+        changes: [
+          {
+            operation: {
+              type: 'resize',
+              targetId: 'node-1',
+              bounds: { x: 10, y: 20, width: 100, height: 80 },
+            },
+            evidenceNodeIds: ['node-1'],
+            summary: 'Resized the selected node.',
+          },
+        ],
+      },
+    });
+
+    expect(response.success).toBe(true);
+    expect(dispatch).toHaveBeenCalledWith(
+      'session-1',
+      'candidate.apply_changes',
+      expect.objectContaining({
+        changes: [
+          expect.objectContaining({
+            operation: expect.objectContaining({ type: 'resize', targetId: 'node-1' }),
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('publishes field-level diagnostics for invalid candidate changes', async () => {
+    const activity: unknown[] = [];
+    const dispatch = vi.fn();
+    const adapter = new CanvasAppServerToolDispatcher(service(dispatch), 'session-1', {
+      onActivity: (event) => activity.push(event),
+    });
+
+    const response = await adapter.dispatch({
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      callId: 'call-invalid-apply',
+      namespace: null,
+      tool: 'candidate_apply_changes',
+      arguments: {
+        candidateRevisionId: 'revision-source',
+        changes: [{ operation: { id: 'bad', type: 'style', targetIds: ['node-1'] } }],
+      },
+    });
+
+    expect(response.success).toBe(false);
+    expect(activity).toMatchObject([
+      {
+        phase: 'failed',
+        error: 'Invalid arguments for candidate.apply_changes',
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ path: expect.stringContaining('changes.0') }),
+        ]),
+      },
+    ]);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('raises a fatal protocol error after repeated consecutive mutation failures', async () => {
+    const onFatal = vi.fn();
+    const adapter = new CanvasAppServerToolDispatcher(service(vi.fn()), 'session-1', {
+      onFatal,
+    });
+    const invalidCall = {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      namespace: null,
+      tool: 'candidate_apply_changes',
+      arguments: {
+        candidateRevisionId: 'revision-source',
+        changes: [{ operation: { type: 'style', targetIds: ['node-1'] } }],
+      },
+    };
+
+    for (let index = 0; index < 6; index += 1)
+      await adapter.dispatch({ ...invalidCall, callId: `call-invalid-${index}` });
+
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(onFatal.mock.calls[0][0]).toMatchObject({
+      name: 'CodexProtocolError',
+      code: 'mutation-retry-limit',
+      stage: 'candidate-mutation',
+    });
+  });
+
   it('attaches scene renders as image content without exposing local artifact paths', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'codesign-render-tool-'));
     const path = join(directory, 'render.png');
@@ -125,7 +337,15 @@ describe('Canvas App Server tools', () => {
     );
     try {
       const adapter = new CanvasAppServerToolDispatcher(
-        service(vi.fn(async () => ({ path, mimeType: 'image/png', width: 1, height: 1 }))),
+        service(
+          vi.fn(async () => ({
+            path,
+            mimeType: 'image/png',
+            width: 1,
+            height: 1,
+            sha256: 'render-hash',
+          })),
+        ),
         'session-1',
       );
 
@@ -148,6 +368,19 @@ describe('Canvas App Server tools', () => {
       const textItem = response.contentItems[0];
       expect(textItem.type === 'inputText' ? textItem.text : '').not.toContain(path);
       expect(textItem.type === 'inputText' ? textItem.text : '').toContain('"imageAttached":true');
+
+      const duplicate = await adapter.dispatch({
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        callId: 'call-render-again',
+        namespace: null,
+        tool: 'scene_render',
+        arguments: { view: 'candidate' },
+      });
+      expect(duplicate.contentItems).toHaveLength(1);
+      expect(
+        duplicate.contentItems[0].type === 'inputText' ? duplicate.contentItems[0].text : '',
+      ).toContain('"imageAttached":false');
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

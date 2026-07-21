@@ -152,6 +152,51 @@ describe('CanvasSessionService', () => {
     await service.dispose();
   });
 
+  it('assigns internal IDs, active screen, provenance, and defaults for compact creates', async () => {
+    const document = sourceDocument();
+    const service = new CanvasSessionService();
+    const session = await service.createSession(input(document));
+
+    const applied = (await service.dispatch(session.id, 'candidate.apply_changes', {
+      candidateRevisionId: session.candidateRevisionId,
+      changes: [
+        {
+          operation: {
+            type: 'create',
+            name: 'Generated label',
+            kind: 'text',
+            parentId: 'group',
+            bounds: { x: 60, y: 200, width: 160, height: 32 },
+            text: 'Generated label',
+            style: { textColor: '#ffffff' },
+          },
+          evidenceNodeIds: ['group'],
+          summary: 'Added a readable label to the selected group.',
+        },
+      ],
+    })) as { candidateRevisionId: string; appliedOperationIds: string[] };
+
+    const state = (await service.dispatch(session.id, 'candidate.get_state', {})) as {
+      nodes: { items: DesignNode[] };
+    };
+    const created = state.nodes.items.find((item) => item.name === 'Generated label');
+    expect(applied.appliedOperationIds).toHaveLength(1);
+    expect(created).toMatchObject({
+      kind: 'text',
+      screenId: document.activeScreenId,
+      parentId: 'group',
+      childIds: [],
+      style: expect.objectContaining({ textColor: '#ffffff', opacity: 1 }),
+      layout: expect.objectContaining({ mode: 'none', widthMode: 'fixed' }),
+      provenance: {
+        actor: 'agent',
+        operationId: applied.appliedOperationIds[0],
+      },
+    });
+    expect(created?.id).toMatch(/^candidate-node-/);
+    await service.dispose();
+  });
+
   it('rejects a stale candidate revision before applying any mutation', async () => {
     const service = new CanvasSessionService();
     const session = await service.createSession(input(sourceDocument()));

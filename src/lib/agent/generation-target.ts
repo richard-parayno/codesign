@@ -54,6 +54,17 @@ export function deriveGenerationTarget(
     .filter((node) => observedIds.has(node.id))
     .map((node) => node.id);
   const pinned = new Set(document.pinnedNodeIds);
+  const editableExistingNodeIds = [
+    ...new Set(
+      focusNodes.flatMap((node) =>
+        pinned.has(node.id)
+          ? []
+          : node.kind === 'frame' || node.kind === 'group'
+            ? [...descendantNodeIds(document, [node.id])]
+            : [node.id],
+      ),
+    ),
+  ].filter((id) => !pinned.has(id));
   const insertionParentIds = [
     ...new Set(
       focusNodes
@@ -70,7 +81,7 @@ export function deriveGenerationTarget(
       nodeIds: observationNodeIds,
     },
     mutationScope: {
-      existingNodeIds: focusNodes.map((node) => node.id).filter((id) => !pinned.has(id)),
+      existingNodeIds: editableExistingNodeIds,
       insertionParentIds,
       regions: focusNodes.map((node) => ({ ...node.bounds })),
       allowCreate: insertionParentIds.length > 0 || !observationFrame,

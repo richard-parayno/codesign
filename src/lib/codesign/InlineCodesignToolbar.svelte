@@ -32,6 +32,7 @@
 </script>
 
 <script lang="ts">
+  import { candidateActionAvailability } from './candidate-actions';
   import FidelityStops, { type FidelityStopView } from './FidelityStops.svelte';
   import type { CodesignStage } from './fidelity-navigation';
 
@@ -108,6 +109,7 @@
       (item) => activeCandidate?.candidate.decisions[item.change.id] === 'pending',
     ).length ?? 0,
   );
+  let actionAvailability = $derived(candidateActionAvailability(activeCandidate?.candidate));
 
   function traceFor(item: AtomicChangeView): DerivationTrace {
     return item.change.trace;
@@ -191,101 +193,107 @@
     {#if busy}
       <span class="progress" role="status"><i aria-hidden="true"></i>Generating candidate</span>
       <button type="button" onclick={onCancel}>Cancel</button>
-    {:else if activeCandidate?.candidate.status === 'candidate'}
-      <button
-        class="primary"
-        type="button"
-        disabled={!pendingCount}
-        onclick={() => onAcceptAll(activeCandidate.candidate.id)}>Accept all</button
-      >
-      <details class="review-menu">
-        <summary>Review {selectedCount}/{activeCandidate.changes.length}</summary>
-        <div class="review-popover">
-          <header>
-            <div>
-              <strong>Proposed changes</strong><small>Select a dependency-safe subset.</small>
+    {:else}
+      {#if actionAvailability.review && activeCandidate}
+        <button
+          class="primary"
+          type="button"
+          disabled={!pendingCount}
+          onclick={() => onAcceptAll(activeCandidate.candidate.id)}>Accept all</button
+        >
+        <details class="review-menu">
+          <summary>Review {selectedCount}/{activeCandidate.changes.length}</summary>
+          <div class="review-popover">
+            <header>
+              <div>
+                <strong>Proposed changes</strong><small>Select a dependency-safe subset.</small>
+              </div>
+              <span>{activeCandidate.candidate.fidelity}</span>
+            </header>
+            <div class="change-list">
+              {#each activeCandidate.changes as item (item.change.id)}
+                <article class:highlighted={highlightedChangeId === item.change.id}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={item.selected}
+                      disabled={Boolean(item.disabledReason)}
+                      onchange={(event) =>
+                        onToggleAtomicChange(item.change.id, event.currentTarget.checked)}
+                    />
+                    <span><strong>{item.label}</strong><small>{item.summary}</small></span>
+                  </label>
+                  {#if item.change.dependencyIds.length}
+                    <small class="dependency"
+                      >Requires {(item.dependencyLabels ?? item.change.dependencyIds).join(
+                        ', ',
+                      )}</small
+                    >
+                  {/if}
+                  <div class="change-actions">
+                    <button
+                      type="button"
+                      aria-pressed={highlightedChangeId === item.change.id}
+                      onclick={() =>
+                        onHighlightChange(
+                          highlightedChangeId === item.change.id ? undefined : item.change.id,
+                        )}
+                      >{highlightedChangeId === item.change.id
+                        ? 'Clear evidence'
+                        : 'Evidence'}</button
+                    >
+                    <button
+                      type="button"
+                      disabled={!['create', 'style'].includes(item.change.operation.type)}
+                      aria-pressed={item.pinned}
+                      onclick={() => onTogglePin(item.change.id, !item.pinned)}
+                      >{item.pinned ? 'Unpin change' : 'Pin change'}</button
+                    >
+                  </div>
+                  <details class="trace">
+                    <summary>Why this change?</summary>
+                    <dl>
+                      <dt>Observation</dt>
+                      <dd>{traceFor(item).observation}</dd>
+                      <dt>Context</dt>
+                      <dd>{traceFor(item).context}</dd>
+                      <dt>Proposed interpretation</dt>
+                      <dd>{traceFor(item).inference}</dd>
+                      <dt>Change</dt>
+                      <dd>{traceFor(item).proposedChange}</dd>
+                      <dt>User decision</dt>
+                      <dd>{activeCandidate.candidate.decisions[item.change.id]}</dd>
+                    </dl>
+                  </details>
+                </article>
+              {/each}
             </div>
-            <span>{activeCandidate.candidate.fidelity}</span>
-          </header>
-          <div class="change-list">
-            {#each activeCandidate.changes as item (item.change.id)}
-              <article class:highlighted={highlightedChangeId === item.change.id}>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={item.selected}
-                    disabled={Boolean(item.disabledReason)}
-                    onchange={(event) =>
-                      onToggleAtomicChange(item.change.id, event.currentTarget.checked)}
-                  />
-                  <span><strong>{item.label}</strong><small>{item.summary}</small></span>
-                </label>
-                {#if item.change.dependencyIds.length}
-                  <small class="dependency"
-                    >Requires {(item.dependencyLabels ?? item.change.dependencyIds).join(
-                      ', ',
-                    )}</small
-                  >
-                {/if}
-                <div class="change-actions">
-                  <button
-                    type="button"
-                    aria-pressed={highlightedChangeId === item.change.id}
-                    onclick={() =>
-                      onHighlightChange(
-                        highlightedChangeId === item.change.id ? undefined : item.change.id,
-                      )}
-                    >{highlightedChangeId === item.change.id
-                      ? 'Clear evidence'
-                      : 'Evidence'}</button
-                  >
-                  <button
-                    type="button"
-                    disabled={!['create', 'style'].includes(item.change.operation.type)}
-                    aria-pressed={item.pinned}
-                    onclick={() => onTogglePin(item.change.id, !item.pinned)}
-                    >{item.pinned ? 'Unpin change' : 'Pin change'}</button
-                  >
-                </div>
-                <details class="trace">
-                  <summary>Why this change?</summary>
-                  <dl>
-                    <dt>Observation</dt>
-                    <dd>{traceFor(item).observation}</dd>
-                    <dt>Context</dt>
-                    <dd>{traceFor(item).context}</dd>
-                    <dt>Proposed interpretation</dt>
-                    <dd>{traceFor(item).inference}</dd>
-                    <dt>Change</dt>
-                    <dd>{traceFor(item).proposedChange}</dd>
-                    <dt>User decision</dt>
-                    <dd>{activeCandidate.candidate.decisions[item.change.id]}</dd>
-                  </dl>
-                </details>
-              </article>
-            {/each}
+            <footer>
+              <button
+                class="primary"
+                type="button"
+                disabled={!selectedCount}
+                onclick={() => onAcceptSelected(activeCandidate.candidate.id)}
+                >Accept {selectedCount}, reject {activeCandidate.changes.length -
+                  selectedCount}</button
+              >
+            </footer>
           </div>
-          <footer>
-            <button
-              class="primary"
-              type="button"
-              disabled={!selectedCount}
-              onclick={() => onAcceptSelected(activeCandidate.candidate.id)}
-              >Accept {selectedCount}, reject {activeCandidate.changes.length -
-                selectedCount}</button
-            >
-          </footer>
-        </div>
-      </details>
-      <button
-        type="button"
-        disabled={Boolean(rerollDisabledReason)}
-        title={rerollDisabledReason}
-        onclick={() => onReroll(activeCandidate.candidate.id)}>Reroll</button
-      >
-      <button type="button" onclick={() => onRejectCandidate(activeCandidate.candidate.id)}
-        >Reject</button
-      >
+        </details>
+      {/if}
+      {#if actionAvailability.reroll && activeCandidate}
+        <button
+          type="button"
+          disabled={Boolean(rerollDisabledReason)}
+          title={rerollDisabledReason}
+          onclick={() => onReroll(activeCandidate.candidate.id)}>Reroll</button
+        >
+      {/if}
+      {#if actionAvailability.reject && activeCandidate}
+        <button type="button" onclick={() => onRejectCandidate(activeCandidate.candidate.id)}
+          >Reject</button
+        >
+      {/if}
     {/if}
 
     <details class="fidelity-menu">

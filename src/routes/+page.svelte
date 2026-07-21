@@ -4167,10 +4167,9 @@
         activeCandidateId={activeCandidate?.id}
         highlightedChangeId={highlightedChangeId || undefined}
         compareSource={compareSourceActive}
-        rerollDisabledReason={activeCandidate?.status === 'accepted' ||
-        activeCandidate?.status === 'partially-accepted'
-          ? 'Applied candidates cannot be rerolled.'
-          : undefined}
+        rerollDisabledReason={generationCanGenerate
+          ? undefined
+          : (codesignEligibility.reason ?? 'The selection has no editable generation target.')}
         onObservationScopeChange={selectObservationScope}
         onScopePreviewChange={(open) => (scopePreviewActive = open)}
         onCancel={cancelGeneration}

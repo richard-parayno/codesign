@@ -699,6 +699,7 @@
   function controlArea(control: Element) {
     if (control.closest('.topbar')) return 'topbar';
     if (control.closest('.projects')) return 'sidebar';
+    if (control.closest('.pages')) return 'sidebar';
     if (control.closest('.tools')) return 'tools';
     if (control.closest('.outline')) return 'sidebar';
     if (control.closest('.canvas-toolbar')) return 'canvas-toolbar';
@@ -2984,16 +2985,6 @@
       : 'Element unpinned.';
     logAction('codesign.node-pin-changed', { nodeId, pinned });
   }
-  function duplicateScreen() {
-    apply({
-      id: uid('op'),
-      type: 'duplicate-screen',
-      actor: 'user',
-      sourceScreenId: document.activeScreenId,
-      screenId: uid('screen'),
-    });
-    selection = [];
-  }
   function connectTo(targetScreenId: string) {
     if (!connectSource) return;
     apply({
@@ -3174,16 +3165,6 @@
       },
     });
   }
-  function branch() {
-    apply({
-      id: uid('op'),
-      type: 'create-branch',
-      actor: 'user',
-      sourceScreenId: document.activeScreenId,
-      branchId: uid('branch'),
-    });
-    selection = [];
-  }
 </script>
 
 <svelte:head
@@ -3250,6 +3231,26 @@
         <button onclick={deleteProject}>Delete</button>
       </div>
     </section>
+    <section class="pages" aria-label="Pages">
+      <div class="section-title">
+        <span>Pages</span><small
+          >{document.screens.filter((screen) => screen.branchId === document.activeBranchId)
+            .length}</small
+        >
+      </div>
+      {#each document.screens.filter((screen) => screen.branchId === document.activeBranchId) as screen}
+        <div class:active={screen.id === document.activeScreenId} class="screen-row">
+          <button
+            onclick={() => {
+              navigateToScreen(screen.id, screen.branchId);
+            }}>{screen.name}</button
+          >{#if connectSource && screen.id !== document.activeScreenId}<button
+              class="connect-dest"
+              onclick={() => connectTo(screen.id)}>Connect</button
+            >{/if}
+        </div>
+      {/each}
+    </section>
     <nav class="tools" aria-label="Tools">
       {#each [{ id: 'select', label: 'Select', icon: '↖', key: 'V' }, { id: 'frame', label: 'Frame', icon: '▣', key: 'F' }, { id: 'rectangle', label: 'Rectangle', icon: '□', key: 'R' }, { id: 'text', label: 'Text', icon: 'T', key: 'T' }, { id: 'connect', label: 'Connect', icon: '↗', key: 'C' }] as item}<button
           class:active={tool === item.id}
@@ -3314,26 +3315,6 @@
     <ComponentLibrary components={componentCatalog} onInsert={insertComponent} />
     <ProjectComponentLibrary definitions={projectComponents} onInsert={insertProjectComponent} />
     <section class="outline">
-      <div class="section-title">
-        <span>Screens</span><button title="Duplicate screen" onclick={duplicateScreen}
-          ><span aria-hidden="true">＋</span>Duplicate screen</button
-        >
-      </div>
-      {#each document.branches as branchItem}
-        <div class="branch-label"><span aria-hidden="true">◇</span> Branch: {branchItem.name}</div>
-        {#each document.screens.filter((screen) => screen.branchId === branchItem.id) as screen}
-          <div class:active={screen.id === document.activeScreenId} class="screen-row">
-            <button
-              onclick={() => {
-                navigateToScreen(screen.id, branchItem.id);
-              }}>{screen.name}</button
-            >{#if connectSource && screen.id !== document.activeScreenId}<button
-                class="connect-dest"
-                onclick={() => connectTo(screen.id)}>Connect</button
-              >{/if}
-          </div>
-        {/each}
-      {/each}
       <div class="section-title layers-title">
         <span>Layers</span><small>{visibleNodes.length}</small>
       </div>
@@ -3441,9 +3422,6 @@
               >{/if}
           </div>{/each}
       </div>
-      <button class="branch-action" onclick={branch}
-        ><span aria-hidden="true">◇</span>Branch current screen</button
-      >
     </section>
   </aside>
 
@@ -4125,18 +4103,6 @@
               resetViewport('context-menu');
               contextMenu = null;
             }}>Reset canvas view</button
-          ><button
-            role="menuitem"
-            onclick={() => {
-              contextMenu = null;
-              duplicateScreen();
-            }}>Duplicate screen</button
-          ><button
-            role="menuitem"
-            onclick={() => {
-              contextMenu = null;
-              branch();
-            }}>Branch current screen</button
           >{/if}
       </div>{/if}
 
@@ -5071,6 +5037,14 @@
     border-color: #a9b9cb;
     color: #174b78;
   }
+  .pages {
+    padding: 4px 8px 8px;
+    border-bottom: 1px solid #d6dae0;
+  }
+  .pages .section-title {
+    min-height: 30px;
+    padding: 0;
+  }
   .frame-presets {
     display: grid;
     gap: 7px;
@@ -5146,33 +5120,6 @@
     font-weight: 700;
     color: #747b85;
   }
-  .section-title button {
-    min-height: 27px;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    border: 1px solid #c5cbd2;
-    border-radius: 4px;
-    background: white;
-    padding: 0 7px;
-    color: #3f4853;
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0;
-    text-transform: none;
-    white-space: nowrap;
-    cursor: pointer;
-  }
-  .section-title button:hover {
-    background: #edf2f6;
-    border-color: #aab6c2;
-  }
-  .branch-label {
-    padding: 8px 6px 3px;
-    color: #7b828c;
-    font-size: 10px;
-    text-transform: uppercase;
-  }
   .screen-row {
     display: flex;
     align-items: center;
@@ -5196,10 +5143,6 @@
     background: white;
     border-radius: 3px;
     padding: 3px;
-  }
-  .layers-title {
-    margin-top: 10px;
-    border-top: 1px solid #d6dae0;
   }
   .proposed-layers {
     margin: 5px 0 7px;
@@ -5394,19 +5337,6 @@
     outline: 2px solid #2672ad;
     outline-offset: -2px;
     background: #e7f1fa;
-  }
-  .branch-action {
-    width: 100%;
-    margin-top: 12px;
-    border: 1px solid #c9ced5;
-    background: white;
-    border-radius: 4px;
-    padding: 7px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    cursor: pointer;
   }
   .workspace {
     position: relative;

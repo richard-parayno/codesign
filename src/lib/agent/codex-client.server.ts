@@ -17,9 +17,17 @@ import {
 } from './candidate';
 import { CODESIGN_SYSTEM_INSTRUCTIONS } from './prompt-template';
 import { asProviderFailure, type ProviderFailureCategory } from './providers/contracts';
+import {
+  CANVAS_APP_SERVER_TOOLS,
+  CanvasAppServerToolDispatcher,
+  parseDynamicToolCallParams,
+  type CanvasToolActivity,
+} from './harness/app-server-tools.server';
+import type { CanvasSessionService } from './harness/contracts';
 
 export const DEFAULT_CODEX_MODEL = 'gpt-5.6-luna';
 export const DEFAULT_CODEX_EFFORT = 'high';
+export const DEFAULT_CODEX_AGENT_TIMEOUT_MS = 180_000;
 
 /** Project-local executable from the exact @openai/codex version pinned in package.json. */
 export function pinnedCodexCommand(cwd = process.cwd()) {
@@ -92,7 +100,20 @@ export type CodexGenerationOptions = {
   onTelemetry?: (event: CodexTransportTelemetryEvent) => void;
 };
 
+export type CodexCanvasSessionOptions = CodexGenerationOptions & {
+  timeoutMs?: number;
+  onToolActivity?: (activity: CanvasToolActivity) => void;
+};
+
+export type CodexCanvasSessionResult = {
+  assistantText: string;
+  submitted: true;
+  submission: unknown;
+};
+
 export type CodexTransportTelemetryEvent =
+  | { type: 'thread-started'; durationMs: number }
+  | { type: 'turn-started'; durationMs: number }
   | { type: 'output-started' }
   | {
       type: 'token-usage';
@@ -196,6 +217,7 @@ export class CodexAppServer {
     string,
     (event: CodexTransportTelemetryEvent) => void
   >();
+  private threadToolDispatchers = new Map<string, CanvasAppServerToolDispatcher>();
   private outputStartedTurns = new Set<string>();
   private accountListeners = new Set<(event: CodexAccountEvent) => void>();
   private nextId = 1;
@@ -343,7 +365,72 @@ export class CodexAppServer {
         });
         return true;
       case 'item/tool/call':
-        this.write({ id: message.id, result: { contentItems: [], success: false } });
+        {
+          const params = parseDynamicToolCallParams(message.params);
+          if (!params) {
+            this.write({
+              id: message.id,
+              result: {
+                contentItems: [
+                  {
+                    type: 'inputText',
+                    text: JSON.stringify({
+                      error: {
+                        code: 'invalid-tool-call',
+                        message: 'Codex App Server sent an invalid dynamic tool call',
+                      },
+                    }),
+                  },
+                ],
+                success: false,
+              },
+            });
+            return true;
+          }
+          const dispatcher = this.threadToolDispatchers.get(params.threadId);
+          if (!dispatcher) {
+            this.write({
+              id: message.id,
+              result: {
+                contentItems: [
+                  {
+                    type: 'inputText',
+                    text: JSON.stringify({
+                      error: {
+                        code: 'unknown-session',
+                        message: 'No canvas session is bound to this Codex thread',
+                      },
+                    }),
+                  },
+                ],
+                success: false,
+              },
+            });
+            return true;
+          }
+          dispatcher
+            .dispatch(params)
+            .then((result) => this.write({ id: message.id, result }))
+            .catch((error) =>
+              this.write({
+                id: message.id,
+                result: {
+                  contentItems: [
+                    {
+                      type: 'inputText',
+                      text: JSON.stringify({
+                        error: {
+                          code: 'tool-dispatch-failed',
+                          message: error instanceof Error ? error.message : 'Canvas tool failed',
+                        },
+                      }),
+                    },
+                  ],
+                  success: false,
+                },
+              }),
+            );
+        }
         return true;
       default:
         this.write({
@@ -514,10 +601,11 @@ export class CodexAppServer {
     this.turns.clear();
     this.earlyTurns.clear();
     this.threadTelemetryListeners.clear();
+    this.threadToolDispatchers.clear();
     this.outputStartedTurns.clear();
   }
 
-  private async createThread(model: string) {
+  private async createThread(model: string, dispatcher?: CanvasAppServerToolDispatcher) {
     await this.start();
     const params: ThreadStartParams = {
       model,
@@ -526,11 +614,13 @@ export class CodexAppServer {
       sandbox: 'read-only',
       ephemeral: true,
       baseInstructions: CODESIGN_SYSTEM_INSTRUCTIONS,
+      ...(dispatcher ? { dynamicTools: CANVAS_APP_SERVER_TOOLS } : {}),
     };
     const response = (await this.request('thread/start', params, 15_000)) as {
       thread?: { id?: string };
     };
     if (!response.thread?.id) throw new Error('Codex App Server did not return a thread ID');
+    if (dispatcher) this.threadToolDispatchers.set(response.thread.id, dispatcher);
     return response.thread.id;
   }
 
@@ -704,6 +794,107 @@ export class CodexAppServer {
       });
     } finally {
       this.threadTelemetryListeners.delete(threadId);
+    }
+  }
+
+  async runCanvasSession(
+    prompt: string,
+    sessionId: string,
+    service: CanvasSessionService,
+    signal?: AbortSignal,
+    options: CodexCanvasSessionOptions = {},
+  ): Promise<CodexCanvasSessionResult> {
+    if (signal?.aborted) throw new Error('Codex generation cancelled');
+    const model = options.model?.trim() || this.model || DEFAULT_CODEX_MODEL;
+    const effort = options.effort || this.effort || DEFAULT_CODEX_EFFORT;
+    const dispatcher = new CanvasAppServerToolDispatcher(service, sessionId, {
+      onActivity: options.onToolActivity,
+    });
+    const threadStartedAt = Date.now();
+    const threadId = await this.createThread(model, dispatcher);
+    options.onTelemetry?.({
+      type: 'thread-started',
+      durationMs: Date.now() - threadStartedAt,
+    });
+    if (options.onTelemetry) this.threadTelemetryListeners.set(threadId, options.onTelemetry);
+    try {
+      if (signal?.aborted) throw new Error('Codex generation cancelled');
+      const params: TurnStartParams = {
+        threadId,
+        input: [{ type: 'text', text: prompt, text_elements: [] }],
+        approvalPolicy: 'never',
+        sandboxPolicy: { type: 'readOnly', networkAccess: false },
+        model,
+        effort,
+        summary: 'none',
+      };
+      const turnStartedAt = Date.now();
+      const response = (await this.request('turn/start', params, 15_000)) as {
+        turn?: { id?: string };
+      };
+      options.onTelemetry?.({
+        type: 'turn-started',
+        durationMs: Date.now() - turnStartedAt,
+      });
+      const turnId = response.turn?.id;
+      if (!turnId) throw new Error('Codex App Server did not return a turn ID');
+      if (signal?.aborted) {
+        this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
+        throw new Error('Codex generation cancelled');
+      }
+      const assistantText = await new Promise<string>((resolveTurn, rejectTurn) => {
+        const early = this.earlyTurns.get(turnId);
+        if (early?.completed) {
+          this.earlyTurns.delete(turnId);
+          early.error ? rejectTurn(new Error(early.error)) : resolveTurn(early.text);
+          return;
+        }
+        let settled = false;
+        const finish = (kind: 'resolve' | 'reject', value: string | Error) => {
+          if (settled) return;
+          settled = true;
+          signal?.removeEventListener('abort', abort);
+          if (kind === 'resolve') resolveTurn(value as string);
+          else rejectTurn(value as Error);
+        };
+        const timeoutMs = Math.max(1_000, options.timeoutMs ?? DEFAULT_CODEX_AGENT_TIMEOUT_MS);
+        const timer = setTimeout(() => {
+          this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
+          this.turns.delete(turnId);
+          this.outputStartedTurns.delete(turnId);
+          finish('reject', new Error('Codex agent run timed out'));
+        }, timeoutMs);
+        const abort = () => {
+          clearTimeout(timer);
+          this.turns.delete(turnId);
+          this.outputStartedTurns.delete(turnId);
+          this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
+          finish('reject', new Error('Codex generation cancelled'));
+        };
+        this.turns.set(turnId, {
+          text: early?.text ?? '',
+          resolve: (text) => finish('resolve', text),
+          reject: (error) => finish('reject', error),
+          timer,
+        });
+        this.earlyTurns.delete(turnId);
+        signal?.addEventListener('abort', abort, { once: true });
+      });
+      const submission = dispatcher.submittedResult;
+      if (!submission) {
+        const error = new Error('Codex turn completed without submitting a valid candidate');
+        error.name = 'CodexProtocolError';
+        Object.assign(error, { stage: 'candidate-validation' });
+        throw error;
+      }
+      return {
+        assistantText,
+        submitted: true,
+        submission: submission.result,
+      };
+    } finally {
+      this.threadTelemetryListeners.delete(threadId);
+      this.threadToolDispatchers.delete(threadId);
     }
   }
 

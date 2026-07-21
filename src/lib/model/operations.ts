@@ -1,5 +1,6 @@
 import { validateComponentBinding, validateComponentChild } from '$lib/design-system/registry';
 import {
+  layoutForNode,
   operationSchema,
   type CanvasSnapshot,
   type DesignDocument,
@@ -190,6 +191,138 @@ function recomputeAncestorGroupBounds(
   }
 }
 
+function paddingSides(padding: ReturnType<typeof layoutForNode>['padding']) {
+  return typeof padding === 'number'
+    ? { top: padding, right: padding, bottom: padding, left: padding }
+    : padding;
+}
+
+/** Materializes container layout into the canonical absolute bounds used by the canvas. */
+function reflowLayouts(document: DesignDocument, touch: (node: DesignNode) => void) {
+  const place = (node: DesignNode, x: number, y: number) => {
+    const dx = x - node.bounds.x;
+    const dy = y - node.bounds.y;
+    for (const id of descendants(document, [node.id])) {
+      document.nodes[id].bounds.x += dx;
+      document.nodes[id].bounds.y += dy;
+      touch(document.nodes[id]);
+    }
+  };
+  const visit = (node: DesignNode) => {
+    const children = node.childIds
+      .map((id) => document.nodes[id])
+      .filter((child): child is DesignNode => Boolean(child));
+    children.forEach(visit);
+    const layout = layoutForNode(node);
+    node.layout = layout;
+    if (layout.mode === 'none' || !children.length) return;
+    const padding = paddingSides(layout.padding);
+    const innerWidth = Math.max(0, node.bounds.width - padding.left - padding.right);
+    const innerHeight = Math.max(0, node.bounds.height - padding.top - padding.bottom);
+
+    if (layout.mode === 'grid') {
+      const columns = Math.max(1, Math.min(layout.gridColumns, children.length));
+      const cellWidth = Math.max(1, (innerWidth - layout.gap * (columns - 1)) / columns);
+      const rowHeights: number[] = [];
+      children.forEach((child, index) => {
+        const row = Math.floor(index / columns);
+        const childLayout = layoutForNode(child);
+        if (childLayout.widthMode === 'fill' || layout.align === 'stretch')
+          child.bounds.width = cellWidth;
+        rowHeights[row] = Math.max(rowHeights[row] ?? 0, child.bounds.height);
+      });
+      children.forEach((child, index) => {
+        const column = index % columns;
+        const row = Math.floor(index / columns);
+        place(
+          child,
+          node.bounds.x + padding.left + column * (cellWidth + layout.gap),
+          node.bounds.y +
+            padding.top +
+            rowHeights.slice(0, row).reduce((sum, height) => sum + height, 0) +
+            row * layout.gap,
+        );
+      });
+      if (layout.heightMode === 'hug') {
+        node.bounds.height =
+          padding.top +
+          padding.bottom +
+          rowHeights.reduce((sum, height) => sum + height, 0) +
+          layout.gap * Math.max(0, rowHeights.length - 1);
+        touch(node);
+      }
+      children.forEach(visit);
+      return;
+    }
+
+    const horizontal = layout.mode === 'horizontal';
+    const mainAvailable = horizontal ? innerWidth : innerHeight;
+    const fillChildren = children.filter((child) => {
+      const childLayout = layoutForNode(child);
+      return horizontal ? childLayout.widthMode === 'fill' : childLayout.heightMode === 'fill';
+    });
+    const fixedMain = children.reduce((sum, child) => {
+      if (fillChildren.includes(child)) return sum;
+      return sum + (horizontal ? child.bounds.width : child.bounds.height);
+    }, 0);
+    const regularGap = layout.gap * Math.max(0, children.length - 1);
+    const fillSize = fillChildren.length
+      ? Math.max(1, (mainAvailable - fixedMain - regularGap) / fillChildren.length)
+      : 0;
+    for (const child of fillChildren) {
+      if (horizontal) child.bounds.width = fillSize;
+      else child.bounds.height = fillSize;
+    }
+    const contentMain =
+      children.reduce(
+        (sum, child) => sum + (horizontal ? child.bounds.width : child.bounds.height),
+        0,
+      ) + regularGap;
+    let gap = layout.gap;
+    let cursor = horizontal ? node.bounds.x + padding.left : node.bounds.y + padding.top;
+    const spare = Math.max(0, mainAvailable - contentMain);
+    if (layout.justify === 'center') cursor += spare / 2;
+    else if (layout.justify === 'end') cursor += spare;
+    else if (layout.justify === 'space-between' && children.length > 1)
+      gap = layout.gap + spare / (children.length - 1);
+
+    for (const child of children) {
+      const childLayout = layoutForNode(child);
+      const crossAvailable = horizontal ? innerHeight : innerWidth;
+      const stretch = layout.align === 'stretch';
+      if (horizontal && (stretch || childLayout.heightMode === 'fill'))
+        child.bounds.height = Math.max(1, crossAvailable);
+      if (!horizontal && (stretch || childLayout.widthMode === 'fill'))
+        child.bounds.width = Math.max(1, crossAvailable);
+      const childCross = horizontal ? child.bounds.height : child.bounds.width;
+      let cross = horizontal ? node.bounds.y + padding.top : node.bounds.x + padding.left;
+      if (layout.align === 'center') cross += (crossAvailable - childCross) / 2;
+      else if (layout.align === 'end') cross += crossAvailable - childCross;
+      if (horizontal) {
+        place(child, cursor, cross);
+        cursor += child.bounds.width + gap;
+      } else {
+        place(child, cross, cursor);
+        cursor += child.bounds.height + gap;
+      }
+    }
+
+    const widest = Math.max(...children.map((child) => child.bounds.width));
+    const tallest = Math.max(...children.map((child) => child.bounds.height));
+    if (layout.widthMode === 'hug')
+      node.bounds.width = padding.left + padding.right + (horizontal ? contentMain : widest);
+    if (layout.heightMode === 'hug')
+      node.bounds.height = padding.top + padding.bottom + (horizontal ? tallest : contentMain);
+    if (layout.widthMode === 'hug' || layout.heightMode === 'hug') touch(node);
+    children.forEach(visit);
+  };
+  for (const screen of document.screens)
+    screen.rootIds
+      .map((id) => document.nodes[id])
+      .filter(Boolean)
+      .forEach(visit);
+}
+
 function removeNodeMetadata(document: DesignDocument, node: DesignNode) {
   if (node.entityId) {
     for (const representationId of document.entities[node.entityId]?.representationIds ?? [])
@@ -321,6 +454,12 @@ export function validateOperation(document: DesignDocument, candidate: unknown):
       targets.some((id) => document.nodes[id].kind !== 'frame')
     )
       throw new OperationError('Clip content can only be applied to frames');
+    if (
+      operation.patch.layout?.mode !== undefined &&
+      operation.patch.layout.mode !== 'none' &&
+      targets.some((id) => !['frame', 'group', 'instance'].includes(document.nodes[id].kind))
+    )
+      throw new OperationError('Only frames, groups, and component instances support child layout');
   }
   if (operation.type === 'reparent') {
     const roots = selectionRoots(document, operation.targetIds);
@@ -543,6 +682,8 @@ function mutateOperation(document: DesignDocument, operation: DesignOperation) {
         if (operation.patch.text !== undefined) node.text = operation.patch.text;
         if (operation.patch.clipContent !== undefined)
           node.clipContent = operation.patch.clipContent;
+        if (operation.patch.layout !== undefined)
+          node.layout = { ...layoutForNode(node), ...operation.patch.layout };
         touch(node);
       }
       break;
@@ -739,6 +880,7 @@ function mutateOperation(document: DesignDocument, operation: DesignOperation) {
       break;
     }
   }
+  reflowLayouts(document, touch);
 }
 
 function closestFrameFidelity(document: DesignDocument, node: DesignNode): Fidelity | undefined {

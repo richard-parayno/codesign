@@ -64,6 +64,7 @@ describe('v1 to v2 migration', () => {
     expect(migrated.version).toBe(2);
     expect(migrated.revision).toBe(4);
     expect(migrated.nodes.row.semantics).toBeUndefined();
+    expect(migrated.nodes.row.layout).toMatchObject({ mode: 'none', widthMode: 'fixed' });
     expect(migrated.legacyArchive?.document.hypotheses).toEqual(legacy.hypotheses);
     expect(migrated.legacyArchive?.document.nodes.row.semantics?.role).toBe('record');
     expect(migrated.pinnedNodeIds).toEqual(['row']);
@@ -150,6 +151,32 @@ describe('v1 to v2 migration', () => {
     );
     expect(recovered?.projects[0].document.nodes.row).toEqual(document.nodes.row);
     expect(recovered?.projects[0].document.processEvents).toEqual(document.processEvents);
+  });
+
+  it('materializes layout defaults in older v2 canvases and revision snapshots', () => {
+    const document = migrateDocumentV1(legacyDocument(), 'malleable.projects.v1', 100);
+    delete document.nodes.frame.layout;
+    delete document.nodes.row.layout;
+    delete document.revisions[document.currentRevisionId].snapshot.nodes.frame.layout;
+    delete document.revisions[document.currentRevisionId].snapshot.nodes.row.layout;
+
+    const recovered = recoverProjectEnvelopeV2({
+      version: 2,
+      activeProjectId: 'project',
+      projects: [{ id: 'project', name: 'Project', document }],
+    });
+
+    expect(recovered).not.toBeNull();
+    expect(recovered?.projects[0].document.nodes.frame.layout).toMatchObject({
+      mode: 'none',
+      gap: 0,
+      padding: 0,
+      gridColumns: 2,
+    });
+    expect(
+      recovered?.projects[0].document.revisions[document.currentRevisionId].snapshot.nodes.frame
+        .layout,
+    ).toEqual(recovered?.projects[0].document.nodes.frame.layout);
   });
 
   it('rejects structurally broken v1 documents before migration', () => {

@@ -1,21 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyOperation } from '$lib/model/operations';
 import { blankDocument, defaultStyle } from '$lib/model/types';
-import { candidateBatchFixture } from '$lib/agent/fixtures/candidate-batch-fixture';
-
+import type { GenerationRequest } from '$lib/agent/candidate';
+import type { CodexCanvasSessionOptions } from '$lib/agent/codex-client.server';
+import type { CanvasSessionService } from '$lib/agent/harness/contracts';
 const mockProvider = vi.hoisted(() => ({
   status: vi.fn(),
-  generate: vi.fn(),
 }));
+const mockClient = vi.hoisted(() => ({ runCanvasSession: vi.fn() }));
 
 vi.mock('$lib/agent/providers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/agent/providers')>()),
   createProvider: () => mockProvider,
 }));
+vi.mock('$lib/agent/codex-client.server', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/agent/codex-client.server')>()),
+  getCodexClient: () => mockClient,
+}));
 
-import { POST } from './+server';
+import { DELETE, POST } from './+server';
 
-function body(action: 'complete' | 'vary' = 'complete') {
+function body(action: 'complete' | 'vary' = 'complete'): GenerationRequest {
   const document = applyOperation(blankDocument(), {
     id: 'create-region',
     type: 'create',
@@ -47,13 +52,6 @@ function body(action: 'complete' | 'vary' = 'complete') {
     },
     pinnedNodeIds: [],
     pinnedAtomicChanges: [],
-    visualSnapshot: {
-      id: 'snapshot-1',
-      mimeType: 'image/png',
-      width: 2,
-      height: 2,
-      data: 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAC0lEQVR4nGNgQAcAABIAAXfx+gAAAAAASUVORK5CYII=',
-    },
     document: {
       currentRevisionId: document.currentRevisionId,
       activeScreenId: document.activeScreenId,
@@ -61,6 +59,8 @@ function body(action: 'complete' | 'vary' = 'complete') {
       screenRootIds: document.screens[0].rootIds,
       knownNodeIds: Object.keys(document.nodes),
       nodes: document.nodes,
+      frameFidelity: {},
+      nodeFidelityOverrides: {},
     },
   };
 }
@@ -77,11 +77,65 @@ async function post(value: unknown, requestId?: string) {
   return POST({ request } as Parameters<typeof POST>[0]);
 }
 
+async function completeSession(
+  _prompt: string,
+  sessionId: string,
+  service: CanvasSessionService,
+  _signal?: AbortSignal,
+  options?: CodexCanvasSessionOptions,
+) {
+  const state = (await service.dispatch(sessionId, 'candidate.get_state', {})) as {
+    candidateRevisionId: string;
+  };
+  const argumentsValue = {
+    candidateRevisionId: state.candidateRevisionId,
+    changes: [
+      {
+        operation: {
+          id: 'operation-agent-style',
+          type: 'style' as const,
+          actor: 'agent' as const,
+          targetIds: ['region'],
+          patch: { radius: 12 },
+        },
+        evidenceNodeIds: ['region'],
+        summary: 'Matched the selected region to the surrounding visual language.',
+      },
+    ],
+  };
+  options?.onToolActivity?.({
+    phase: 'started',
+    sessionId,
+    callId: 'call-apply',
+    tool: 'candidate.apply_changes',
+    arguments: argumentsValue,
+  });
+  const applied = await service.dispatch(sessionId, 'candidate.apply_changes', argumentsValue);
+  options?.onToolActivity?.({
+    phase: 'completed',
+    sessionId,
+    callId: 'call-apply',
+    tool: 'candidate.apply_changes',
+    result: applied,
+    candidateMutation: {
+      candidateRevisionId: (applied as { candidateRevisionId: string }).candidateRevisionId,
+      appliedOperationIds: ['operation-agent-style'],
+    },
+  });
+  await service.dispatch(sessionId, 'candidate.validate', {});
+  const submission = await service.dispatch(sessionId, 'candidate.submit', {});
+  return { assistantText: '', submitted: true as const, submission };
+}
+
 beforeEach(() => {
-  vi.spyOn(console, 'info').mockImplementation(() => {});
-  vi.spyOn(console, 'error').mockImplementation(() => {});
+  vi.spyOn(console, 'info')
+    .mockClear()
+    .mockImplementation(() => {});
+  vi.spyOn(console, 'error')
+    .mockClear()
+    .mockImplementation(() => {});
   mockProvider.status.mockReset();
-  mockProvider.generate.mockReset();
+  mockClient.runCanvasSession.mockReset();
   mockProvider.status.mockResolvedValue({
     provider: 'codex',
     available: true,
@@ -91,36 +145,72 @@ beforeEach(() => {
     accountLabel: null,
     message: 'Codex App Server is connected.',
   });
-  mockProvider.generate.mockImplementation(({ request, run }) => {
-    const wire = candidateBatchFixture(request, run);
-    const origin = request.target.mutationScope.regions[0];
-    for (const change of wire.candidate.atomicChanges) {
-      if (change.operation.type !== 'create') continue;
-      change.operation.node.bounds.x -= origin.x;
-      change.operation.node.bounds.y -= origin.y;
-    }
-    return wire;
-  });
+  mockClient.runCanvasSession.mockImplementation(completeSession);
 });
 
 describe('POST /api/agent', () => {
-  it('normalizes a mocked Codex response through the endpoint', async () => {
+  it('runs a mocked iterative canvas session through the endpoint', async () => {
     const response = await post(body());
     const value = await response.json();
     expect(response.status).toBe(200);
     expect(value).toMatchObject({
       run: { provider: 'codex', requestedFidelity: 'component' },
       supportedActions: ['complete'],
-      visualInputUsed: true,
+      visualInputUsed: false,
     });
     expect(value).not.toHaveProperty('fallback');
-    expect(value.candidates[0].atomicChanges).toHaveLength(4);
+    expect(value.candidates[0].atomicChanges).toHaveLength(1);
+    expect(mockClient.runCanvasSession).toHaveBeenCalledOnce();
+  });
+
+  it('seeds and preserves pinned review changes during reroll sessions', async () => {
+    const request = body();
+    const beforeNode = structuredClone(request.document.nodes.region);
+    const afterNode = structuredClone(beforeNode);
+    afterNode.style.fill = '#7c3aed';
+    request.pinnedAtomicChanges = [
+      {
+        id: 'atomic-pinned-fill',
+        candidateId: 'candidate-previous',
+        operation: {
+          id: 'operation-pinned-fill',
+          type: 'style',
+          actor: 'agent',
+          targetIds: ['region'],
+          patch: { fill: '#7c3aed' },
+        },
+        dependencyIds: [],
+        trace: {
+          observation: 'Observed the selected region.',
+          context: 'The preserved accent distinguishes the region.',
+          inference: 'Keep the approved accent during reroll.',
+          proposedChange: 'Preserved the approved accent fill.',
+          evidenceNodeIds: ['region'],
+          affectedNodeIds: ['region'],
+        },
+        before: { nodes: { region: beforeNode } },
+        after: { nodes: { region: afterNode } },
+      },
+    ];
+
+    const response = await post(request);
+    const value = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(value.candidates[0].atomicChanges).toHaveLength(2);
+    expect(value.candidates[0].atomicChanges[0]).toMatchObject({
+      operation: { id: 'operation-pinned-fill' },
+      preservedFromAtomicChangeId: 'atomic-pinned-fill',
+    });
   });
 
   it('returns measured Codex usage and logs safe backend lifecycle events', async () => {
-    mockProvider.generate.mockImplementation(({ request, run, onTelemetry }) => {
-      onTelemetry?.({ type: 'output-started' });
-      onTelemetry?.({
+    mockClient.runCanvasSession.mockImplementationOnce(async (...args) => {
+      const options = args[4];
+      options?.onTelemetry?.({ type: 'thread-started', durationMs: 12 });
+      options?.onTelemetry?.({ type: 'turn-started', durationMs: 8 });
+      options?.onTelemetry?.({ type: 'output-started' });
+      options?.onTelemetry?.({
         type: 'token-usage',
         usage: {
           totalTokens: 240,
@@ -131,15 +221,14 @@ describe('POST /api/agent', () => {
           modelContextWindow: 200_000,
         },
       });
-      onTelemetry?.({ type: 'turn-completed', durationMs: 654 });
-      const wire = candidateBatchFixture(request, run);
-      const origin = request.target.mutationScope.regions[0];
-      for (const change of wire.candidate.atomicChanges) {
-        if (change.operation.type !== 'create') continue;
-        change.operation.node.bounds.x -= origin.x;
-        change.operation.node.bounds.y -= origin.y;
-      }
-      return wire;
+      options?.onTelemetry?.({ type: 'turn-completed', durationMs: 654 });
+      return completeSession(
+        args[0] as string,
+        args[1] as string,
+        args[2] as CanvasSessionService,
+        args[3] as AbortSignal | undefined,
+        options as CodexCanvasSessionOptions | undefined,
+      );
     });
 
     const response = await post(body());
@@ -163,7 +252,7 @@ describe('POST /api/agent', () => {
   });
 
   it('logs and returns the underlying provider failure with its request stage', async () => {
-    mockProvider.generate.mockRejectedValueOnce(
+    mockClient.runCanvasSession.mockRejectedValueOnce(
       new Error('output schema rejected candidate.atomicChanges at column 42'),
     );
 
@@ -202,6 +291,42 @@ describe('POST /api/agent', () => {
       message: 'vary is not available in this build',
       supportedActions: ['complete'],
     });
+  });
+
+  it('cancels an active canvas-agent run by request ID', async () => {
+    let observedSignal: AbortSignal | undefined;
+    mockClient.runCanvasSession.mockImplementationOnce(
+      (_prompt, _sessionId, _service, signal) =>
+        new Promise((_resolve, reject) => {
+          observedSignal = signal;
+          signal?.addEventListener(
+            'abort',
+            () =>
+              reject(
+                Object.assign(new Error('Canvas agent session cancelled'), { name: 'AbortError' }),
+              ),
+            { once: true },
+          );
+        }),
+    );
+
+    const pending = post(body(), 'codesign-cancel-test');
+    await vi.waitFor(() => expect(mockClient.runCanvasSession).toHaveBeenCalledOnce());
+
+    const cancellation = await DELETE({
+      request: new Request('http://localhost/api/agent', {
+        method: 'DELETE',
+        headers: { 'x-codesign-request-id': 'codesign-cancel-test' },
+      }),
+    } as Parameters<typeof DELETE>[0]);
+
+    expect(cancellation.status).toBe(200);
+    await expect(cancellation.json()).resolves.toEqual({
+      cancelled: true,
+      requestId: 'codesign-cancel-test',
+    });
+    expect(observedSignal?.aborted).toBe(true);
+    expect((await pending).status).toBe(499);
   });
 
   it('rejects mutation scope that is not observable', async () => {
@@ -245,7 +370,7 @@ describe('POST /api/agent', () => {
 
       expect(response.status).toBe(code);
       await expect(response.json()).resolves.toMatchObject({ category });
-      expect(mockProvider.generate).not.toHaveBeenCalled();
+      expect(mockClient.runCanvasSession).not.toHaveBeenCalled();
     },
   );
 });

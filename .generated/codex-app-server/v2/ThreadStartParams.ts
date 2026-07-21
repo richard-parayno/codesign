@@ -5,6 +5,7 @@ import type { Personality } from '../Personality';
 import type { JsonValue } from '../serde_json/JsonValue';
 import type { ApprovalsReviewer } from './ApprovalsReviewer';
 import type { AskForApproval } from './AskForApproval';
+import type { DynamicToolSpec } from './DynamicToolSpec';
 import type { SandboxMode } from './SandboxMode';
 import type { ThreadSource } from './ThreadSource';
 import type { ThreadStartSource } from './ThreadStartSource';
@@ -30,4 +31,5 @@ export type ThreadStartParams = {
    * Optional client-supplied analytics source classification for this thread.
    */;
   threadSource?: ThreadSource | null;
+  dynamicTools?: Array<DynamicToolSpec> | null;
 };

@@ -85,4 +85,40 @@ describe('Svelte projection', () => {
     expect(source).toContain('<Sheet.Content side={"left"}>');
     expect(() => compile(source, { generate: false, filename: 'Projection.svelte' })).not.toThrow();
   });
+
+  it('projects canonical horizontal and grid layout as valid Svelte styles', () => {
+    let document = applyOperation(blankDocument(), {
+      id: 'create-layout-frame',
+      type: 'create',
+      actor: 'user',
+      node: {
+        ...makeNode('layout-frame'),
+        kind: 'frame',
+        layout: {
+          mode: 'grid',
+          gap: 12,
+          padding: { top: 8, right: 16, bottom: 8, left: 16 },
+          align: 'stretch',
+          justify: 'space-between',
+          widthMode: 'fill',
+          heightMode: 'hug',
+          gridColumns: 3,
+        },
+      },
+    });
+    document = applyOperation(document, {
+      id: 'create-layout-child',
+      type: 'create',
+      actor: 'user',
+      node: { ...makeNode('layout-child'), parentId: 'layout-frame' },
+    });
+
+    const source = generateSvelte(document);
+    expect(source).toContain('display:grid');
+    expect(source).toContain('grid-template-columns:repeat(3,minmax(0,1fr))');
+    expect(source).toContain('padding:8px 16px 8px 16px');
+    expect(source).toContain('width:100%');
+    expect(source).toContain('height:fit-content');
+    expect(() => compile(source, { generate: false, filename: 'Projection.svelte' })).not.toThrow();
+  });
 });

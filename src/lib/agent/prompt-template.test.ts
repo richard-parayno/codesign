@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { applyOperation } from '$lib/model/operations';
 import { blankDocument, defaultStyle } from '$lib/model/types';
-import { buildSceneContext } from './scene-context';
-import { createGenerationRun, type GenerationRequest } from './candidate';
+import type { GenerationRequest } from './candidate';
 import {
   CODESIGN_COMPLETE_PROMPT_TEMPLATE,
   CODESIGN_PROMPT_PAYLOAD_TOKEN,
   CODESIGN_PROMPT_TEMPLATE_INSPECTION,
+  CODESIGN_SYSTEM_INSTRUCTIONS,
   renderCodesignPrompt,
 } from './prompt-template';
 
@@ -53,51 +53,34 @@ function fixture() {
       nodeFidelityOverrides: {},
     },
   } satisfies GenerationRequest;
-  const context = buildSceneContext({
-    snapshot: document,
-    focusNodeIds: ['region'],
-    observationNodeIds: ['region'],
-    observationRootId: null,
-    mutationTargetIds: ['region'],
-    mutationScope: request.target.mutationScope,
-    action: 'complete',
-    fidelity: 'wireframe',
-    metadata: {
-      snapshotId: 'snapshot-1',
-      revisionId: document.currentRevisionId,
-      capturedAt: 10,
-      projectId: 'project-1',
-    },
-  });
-  const run = createGenerationRun(request, {
-    runId: 'generation-test',
-    createdAt: 10,
-    model: 'gpt-test',
-    reasoningEffort: 'high',
-    contextNodeIds: ['region'],
-    contextRootId: undefined,
-    contextSummarized: false,
-    contextSchemaVersion: context.schemaVersion,
-  });
-  return { request, context, run };
+  return { request, document };
 }
 
-describe('Codesign prompt template', () => {
-  it('keeps the explicit dynamic payload boundary visible for inspection', () => {
+describe('Codesign agent prompt template', () => {
+  it('exposes the exact tool-using prompt and submission contract for inspection', () => {
     expect(CODESIGN_COMPLETE_PROMPT_TEMPLATE).toContain(CODESIGN_PROMPT_PAYLOAD_TOKEN);
     expect(CODESIGN_PROMPT_TEMPLATE_INSPECTION.userTemplate).toBe(
       CODESIGN_COMPLETE_PROMPT_TEMPLATE,
     );
-    expect(CODESIGN_PROMPT_TEMPLATE_INSPECTION.outputSchema).toContain('atomicChanges');
+    expect(CODESIGN_PROMPT_TEMPLATE_INSPECTION.outputSchema).toContain('candidate.submit');
+    expect(CODESIGN_SYSTEM_INSTRUCTIONS).not.toContain('Never use tools');
   });
 
-  it('renders the exact request prompt from the versioned template', () => {
-    const { request, context, run } = fixture();
-    const rendered = renderCodesignPrompt(request, run, context);
+  it('renders compact session orientation without dumping nodes or component catalog', () => {
+    const { request, document } = fixture();
+    const rendered = renderCodesignPrompt(request, {
+      id: 'canvas-test',
+      state: 'active',
+      sourceRevisionId: document.currentRevisionId,
+      candidateRevisionId: document.currentRevisionId,
+      expiresAt: 100,
+    });
 
     expect(rendered).not.toContain(CODESIGN_PROMPT_PAYLOAD_TOKEN);
-    expect(rendered).toContain('"idNamespace":"generation-test"');
-    expect(rendered).toContain('"scene"');
-    expect(rendered.startsWith('Complete the supplied design scene')).toBe(true);
+    expect(rendered).toContain('"sessionId":"canvas-test"');
+    expect(rendered).toContain('"nodeCount":1');
+    expect(rendered).not.toContain('"nodes"');
+    expect(rendered).not.toContain('componentCatalog');
+    expect(rendered.length).toBeLessThan(3_000);
   });
 });

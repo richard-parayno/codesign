@@ -3,16 +3,20 @@
   import { documentStore } from '$lib/model/store';
   import {
     defaultStyle,
+    layoutForNode,
     type Bounds,
     type CandidateRevision,
     type CodesignAction,
+    type DesignDocument,
     type DesignNode,
     type DesignOperation,
     type Fidelity,
     type GenerationRun,
+    type LayoutPatch,
     type ObservationScope,
     type ProcessEvent,
     type StylePatch,
+    operationSchema,
   } from '$lib/model/types';
   import {
     acceptCandidateChanges,
@@ -67,7 +71,7 @@
   import { groupedCanvasContextTarget, groupedCanvasSelectionTarget } from '$lib/editor/selection';
   import { logAction } from '$lib/debug/action-log';
   import { deriveGenerationTarget } from '$lib/agent/generation-target';
-  import { captureSceneSnapshot } from '$lib/agent/visual-snapshot.client';
+  import { applyOperation, canvasSnapshot } from '$lib/model/operations';
   import {
     codesignTelemetryEventSchema,
     isTerminalTelemetryPhase,
@@ -189,6 +193,8 @@
   let providerPlan = '';
   let loadingCandidate = false;
   let generationController: AbortController | null = null;
+  let liveCandidateDocument: DesignDocument | null = null;
+  let activeGenerationSourceRevisionId = '';
   let codesignTelemetrySource: EventSource | null = null;
   let codesignActivityEvents: CodesignTelemetryEvent[] = [];
   let activeTelemetryRequestId = '';
@@ -302,15 +308,24 @@
   $: sourceSnapshot = activeCandidate
     ? document.revisions[activeCandidate.sourceRevisionId]?.snapshot
     : undefined;
+  $: ghostSourceSnapshot = liveCandidateDocument ? canvasSnapshot(document) : sourceSnapshot;
+  $: if (
+    loadingCandidate &&
+    activeGenerationSourceRevisionId &&
+    document.currentRevisionId !== activeGenerationSourceRevisionId
+  )
+    abortGenerationForSourceDrift();
   $: renderedNodes =
     compareSourceActive && sourceSnapshot
       ? orderedScreenNodes(sourceSnapshot, document.activeScreenId)
       : visibleNodes;
-  $: ghostSnapshot = activeCandidateSnapshot;
+  $: ghostSnapshot = liveCandidateDocument
+    ? canvasSnapshot(liveCandidateDocument)
+    : activeCandidateSnapshot;
   $: ghostNodes = ghostSnapshot
     ? Object.values(ghostSnapshot.nodes).filter((node) => {
         if (node.screenId !== document.activeScreenId) return false;
-        const source = sourceSnapshot?.nodes[node.id];
+        const source = ghostSourceSnapshot?.nodes[node.id];
         return !source || JSON.stringify(source) !== JSON.stringify(node);
       })
     : [];
@@ -347,8 +362,13 @@
     ? {
         preparing: 'Preparing',
         'prompt-sent': 'Prompt running',
+        inspecting: 'Inspecting scene',
+        rendering: 'Rendering canvas',
+        components: 'Finding components',
+        applying: 'Applying changes',
         streaming: 'Receiving proposal',
         validating: 'Validating',
+        submitting: 'Submitting',
         completed: 'Complete',
         failed: 'Failed',
         cancelled: 'Cancelled',
@@ -577,6 +597,23 @@
     const parsed = codesignTelemetryEventSchema.safeParse(value);
     if (!parsed.success || parsed.data.requestId !== activeTelemetryRequestId) return;
     const event = parsed.data;
+    const activity = event.toolActivity;
+    if (
+      activity?.phase === 'completed' &&
+      activity.tool === 'candidate.apply_changes' &&
+      liveCandidateDocument
+    ) {
+      if (document.currentRevisionId !== activeGenerationSourceRevisionId)
+        abortGenerationForSourceDrift();
+      else {
+        const argumentsValue = activity.arguments as { changes?: Array<{ operation?: unknown }> };
+        for (const change of argumentsValue?.changes ?? []) {
+          const operation = operationSchema.safeParse(change.operation);
+          if (operation.success)
+            liveCandidateDocument = applyOperation(liveCandidateDocument, operation.data);
+        }
+      }
+    }
     if (!codesignActivityEvents.some((current) => current.sequence === event.sequence))
       codesignActivityEvents = [...codesignActivityEvents, event]
         .sort((left, right) => left.sequence - right.sequence)
@@ -2606,6 +2643,8 @@
     }
     dismissedCandidateSelectionKey = '';
     loadingCandidate = true;
+    liveCandidateDocument = structuredClone(document);
+    activeGenerationSourceRevisionId = document.currentRevisionId;
     generationController?.abort();
     const controller = new AbortController();
     generationController = controller;
@@ -2629,7 +2668,6 @@
     try {
       const baseTarget = deriveGenerationTarget(document, selection);
       const target = { ...baseTarget, observationScope };
-      const visualSnapshot = await captureSceneSnapshot(document, target);
       startCodesignTelemetry(telemetryRequestId);
       const pinnedChanges = rerollCandidateId
         ? pinnedAtomicIds
@@ -2652,7 +2690,6 @@
           target,
           pinnedNodeIds: document.pinnedNodeIds,
           pinnedAtomicChanges: pinnedChanges,
-          visualSnapshot,
           document: {
             currentRevisionId: document.currentRevisionId,
             activeScreenId: document.activeScreenId,
@@ -2692,6 +2729,8 @@
         logAction('codesign.discarded', { action, projectId: requestProjectId });
         return;
       }
+      if (document.currentRevisionId !== activeGenerationSourceRevisionId)
+        throw new Error('The source design changed during generation. Run Codesign again.');
       let next = stageGenerationRun(document, value.run);
       next = stageCandidates(next, value.run.id, value.candidates);
       for (const candidate of value.candidates) {
@@ -2705,6 +2744,8 @@
         }
       }
       documentStore.replaceMetadata(next);
+      liveCandidateDocument = null;
+      activeGenerationSourceRevisionId = '';
       const generatedIds = value.candidates.map((candidate) => candidate.id);
       activeCandidateId = generatedIds[0] ?? '';
       selectedAtomicIds = value.candidates[0]?.atomicChanges.map((change) => change.id) ?? [];
@@ -2712,7 +2753,7 @@
       highlightedChangeId = '';
       bottomOpen = true;
       bottomTab = 'process';
-      codesignStatus = `${value.candidates.length} structured ${value.candidates.length === 1 ? 'candidate is' : 'candidates are'} ready for review.`;
+      codesignStatus = `${value.candidates.length} editable ${value.candidates.length === 1 ? 'candidate is' : 'candidates are'} ready for review.`;
       logAction('codesign.ready', {
         action,
         generationRunId: value.run.id,
@@ -2722,6 +2763,8 @@
     } catch (cause) {
       if (requestId !== generationRequestId) return;
       if (controller.signal.aborted) return;
+      liveCandidateDocument = null;
+      activeGenerationSourceRevisionId = '';
       showError(
         cause instanceof Error ? cause.message : 'Codesign generation failed',
         'Couldn’t generate proposal',
@@ -2743,10 +2786,18 @@
   }
   function cancelGeneration() {
     if (!loadingCandidate || !generationController) return;
+    const requestId = activeTelemetryRequestId;
     generationController.abort();
+    if (requestId)
+      void fetch('/api/agent', {
+        method: 'DELETE',
+        headers: { 'x-codesign-request-id': requestId },
+      });
     generationRequestId += 1;
     generationController = null;
     loadingCandidate = false;
+    liveCandidateDocument = null;
+    activeGenerationSourceRevisionId = '';
     codesignStatus = 'Generation cancelled. Your selection and design are unchanged.';
     documentStore.replaceMetadata(
       recordGenerationOutcome(document, 'generation-cancelled', {
@@ -2755,6 +2806,26 @@
       }),
     );
     logAction('codesign.cancelled', { focusNodeIds: selection });
+  }
+  function abortGenerationForSourceDrift() {
+    if (!loadingCandidate || !activeGenerationSourceRevisionId) return;
+    const requestId = activeTelemetryRequestId;
+    if (requestId)
+      void fetch('/api/agent', {
+        method: 'DELETE',
+        headers: { 'x-codesign-request-id': requestId },
+      });
+    generationController?.abort();
+    generationRequestId += 1;
+    generationController = null;
+    loadingCandidate = false;
+    liveCandidateDocument = null;
+    activeGenerationSourceRevisionId = '';
+    codesignStatus = 'The source design changed. Run Codesign again from the new revision.';
+    logAction('codesign.source-drifted', {
+      requestId,
+      sourceRevisionId: document.currentRevisionId,
+    });
   }
   function selectCandidate(candidateId: string) {
     const candidate = document.candidates[candidateId];
@@ -2793,10 +2864,15 @@
   function toggleAtomicPin(changeId: string, pinned: boolean) {
     let next = document;
     const changedIds: string[] = [];
+    const candidate = activeCandidate;
     const visit = (id: string) => {
       const change = next.atomicChanges[id];
       if (!change || changedIds.includes(id)) return;
       if (pinned) change.dependencyIds.forEach(visit);
+      else
+        candidate?.atomicChangeIds
+          .filter((candidateId) => next.atomicChanges[candidateId]?.dependencyIds.includes(id))
+          .forEach(visit);
       next = setAtomicChangePinned(next, id, pinned);
       changedIds.push(id);
     };
@@ -3068,6 +3144,16 @@
     const targetIds = selectedNodes.filter(isEditableContentNode).map((node) => node.id);
     if (targetIds.length)
       apply({ id: uid('op'), type: 'update-node', actor: 'user', targetIds, patch: { text } });
+  }
+  function updateSelectedLayout(patch: LayoutPatch) {
+    if (!selectedNodes.length) return;
+    apply({
+      id: uid('op'),
+      type: 'update-node',
+      actor: 'user',
+      targetIds: selectedNodes.map((item) => item.id),
+      patch: { layout: patch },
+    });
   }
   function setSelectedFrameClipping(clipContent: boolean) {
     const targetIds = selectedNodes.filter((node) => node.kind === 'frame').map((node) => node.id);
@@ -4527,6 +4613,109 @@
               ? 'repeater siblings'
               : 'same component on screen'}</button
           >{/if}
+      </section>
+      {@const nodeLayout = layoutForNode(node)}
+      <section>
+        <h3>Layout</h3>
+        {#if ['frame', 'group', 'instance'].includes(node.kind)}
+          <label
+            >Direction<select
+              value={nodeLayout.mode}
+              onchange={(event) =>
+                updateSelectedLayout({
+                  mode: event.currentTarget.value as LayoutPatch['mode'],
+                })}
+              ><option value="none">Freeform</option><option value="horizontal">Horizontal</option
+              ><option value="vertical">Vertical</option><option value="grid">Grid</option></select
+            ></label
+          >
+          {#if nodeLayout.mode !== 'none'}
+            <div class="field-grid">
+              <label
+                >Gap<input
+                  type="number"
+                  min="0"
+                  value={nodeLayout.gap}
+                  onchange={(event) =>
+                    updateSelectedLayout({ gap: Math.max(0, Number(event.currentTarget.value)) })}
+                /></label
+              ><label
+                >Padding<input
+                  type="number"
+                  min="0"
+                  value={typeof nodeLayout.padding === 'number' ? nodeLayout.padding : ''}
+                  placeholder={typeof nodeLayout.padding === 'number' ? undefined : 'Per side'}
+                  onchange={(event) =>
+                    updateSelectedLayout({
+                      padding: Math.max(0, Number(event.currentTarget.value)),
+                    })}
+                /></label
+              >
+              {#if nodeLayout.mode === 'grid'}
+                <label
+                  >Columns<input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={nodeLayout.gridColumns}
+                    onchange={(event) =>
+                      updateSelectedLayout({
+                        gridColumns: Math.max(1, Math.round(Number(event.currentTarget.value))),
+                      })}
+                  /></label
+                >
+              {/if}
+            </div>
+            <label
+              >Align items<select
+                value={nodeLayout.align}
+                onchange={(event) =>
+                  updateSelectedLayout({
+                    align: event.currentTarget.value as LayoutPatch['align'],
+                  })}
+                ><option value="start">Start</option><option value="center">Center</option><option
+                  value="end">End</option
+                ><option value="stretch">Stretch</option></select
+              ></label
+            ><label
+              >Distribute<select
+                value={nodeLayout.justify}
+                onchange={(event) =>
+                  updateSelectedLayout({
+                    justify: event.currentTarget.value as LayoutPatch['justify'],
+                  })}
+                ><option value="start">Start</option><option value="center">Center</option><option
+                  value="end">End</option
+                ><option value="space-between">Space between</option></select
+              ></label
+            >
+          {/if}
+        {/if}
+        <div class="field-grid">
+          <label
+            >Width<select
+              value={nodeLayout.widthMode}
+              onchange={(event) =>
+                updateSelectedLayout({
+                  widthMode: event.currentTarget.value as LayoutPatch['widthMode'],
+                })}
+              ><option value="fixed">Fixed</option><option value="hug">Hug contents</option><option
+                value="fill">Fill container</option
+              ></select
+            ></label
+          ><label
+            >Height<select
+              value={nodeLayout.heightMode}
+              onchange={(event) =>
+                updateSelectedLayout({
+                  heightMode: event.currentTarget.value as LayoutPatch['heightMode'],
+                })}
+              ><option value="fixed">Fixed</option><option value="hug">Hug contents</option><option
+                value="fill">Fill container</option
+              ></select
+            ></label
+          >
+        </div>
       </section>
       {#if selectedNodes.every(isEditableContentNode)}
         <section>

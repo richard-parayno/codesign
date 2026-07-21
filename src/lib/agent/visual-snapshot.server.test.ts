@@ -4,6 +4,7 @@ import { isAbsolute } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import {
+  createTrustedVisualSnapshot,
   validateVisualSnapshot,
   VISUAL_SNAPSHOT_LIMITS,
   VisualSnapshotError,
@@ -162,6 +163,29 @@ describe('trusted visual snapshots', () => {
     );
     expect(result).toBe('accepted');
     await expectRemoved(trustedPath);
+  });
+
+  it('keeps a prepared lease alive independently of the preparation timeout', async () => {
+    const lease = await createTrustedVisualSnapshot(
+      { mimeType: 'image/png', bytes: makePng() },
+      { timeoutMs: 20 },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await expect(access(lease.snapshot.path)).resolves.toBeUndefined();
+    await lease.dispose();
+    await lease.dispose();
+    await expectRemoved(lease.snapshot.path);
+  });
+
+  it('releases a prepared lease when its owner disconnects', async () => {
+    const controller = new AbortController();
+    const lease = await createTrustedVisualSnapshot(
+      { mimeType: 'image/png', bytes: makePng() },
+      { signal: controller.signal },
+    );
+    controller.abort();
+    await lease.dispose();
+    await expectRemoved(lease.snapshot.path);
   });
 
   it('removes the trusted file when the callback fails', async () => {

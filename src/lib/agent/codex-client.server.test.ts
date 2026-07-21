@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { CANDIDATE_SCHEMA_VERSION } from './candidate';
+import type { CanvasSessionService } from './harness/contracts';
 import {
   CodexAppServer,
   DEFAULT_CODEX_EFFORT,
@@ -435,6 +436,129 @@ describe('Codex App Server JSONL transport', () => {
       detail: 'low',
     });
     expect(JSON.stringify(turn.params?.input)).not.toContain('image_url');
+    client.shutdown();
+  });
+
+  it('runs first-class dynamic tools through the canvas session and requires submit', async () => {
+    const fake = fakeProcess({ complete: false });
+    const dispatch = vi.fn(async (_sessionId: string, tool: string) => ({
+      tool,
+      candidateRevisionId: tool === 'candidate.submit' ? 'candidate-revision-2' : undefined,
+    }));
+    const service = {
+      createSession: vi.fn(),
+      dispatch,
+      cancelSession: vi.fn(),
+      cleanupExpired: vi.fn(),
+      dispose: vi.fn(),
+    } as unknown as CanvasSessionService;
+    const activity: unknown[] = [];
+    const client = new CodexAppServer('fake-codex', undefined, () => fake.child);
+    const pending = client.runCanvasSession(
+      'Use the canvas tools',
+      'session-1',
+      service,
+      undefined,
+      {
+        onToolActivity: (event) => activity.push(event),
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const thread = fake.messages.find((message) => message.method === 'thread/start')!;
+    expect(thread.params?.dynamicTools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'scene_overview', type: 'function' }),
+      ]),
+    );
+    const turn = fake.messages.find((message) => message.method === 'turn/start')!;
+    expect(turn.params).not.toHaveProperty('outputSchema');
+
+    fake.stdout.write(
+      `${JSON.stringify({
+        id: 91,
+        method: 'item/tool/call',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          callId: 'call-overview',
+          namespace: null,
+          tool: 'scene_overview',
+          arguments: {},
+        },
+      })}\n`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fake.messages.find((message) => message.id === 91)?.result).toMatchObject({
+      success: true,
+    });
+
+    fake.stdout.write(
+      `${JSON.stringify({
+        id: 92,
+        method: 'item/tool/call',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          callId: 'call-submit',
+          namespace: null,
+          tool: 'candidate_submit',
+          arguments: {},
+        },
+      })}\n`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fake.stdout.write(
+      `${JSON.stringify({
+        method: 'item/agentMessage/delta',
+        params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'item-1', delta: 'Ready' },
+      })}\n`,
+    );
+    fake.stdout.write(
+      `${JSON.stringify({
+        method: 'turn/completed',
+        params: {
+          threadId: 'thread-1',
+          turn: { id: 'turn-1', status: 'completed', error: null },
+        },
+      })}\n`,
+    );
+
+    await expect(pending).resolves.toEqual({
+      assistantText: 'Ready',
+      submitted: true,
+      submission: {
+        tool: 'candidate.submit',
+        candidateRevisionId: 'candidate-revision-2',
+      },
+    });
+    expect(dispatch.mock.calls.map((call) => call.slice(0, 2))).toEqual([
+      ['session-1', 'scene.overview'],
+      ['session-1', 'candidate.submit'],
+    ]);
+    expect(activity).toMatchObject([
+      { phase: 'started', tool: 'scene.overview' },
+      { phase: 'completed', tool: 'scene.overview' },
+      { phase: 'started', tool: 'candidate.submit' },
+      { phase: 'completed', tool: 'candidate.submit' },
+    ]);
+    client.shutdown();
+  });
+
+  it('rejects a completed canvas-agent turn that never submits a candidate', async () => {
+    const fake = fakeProcess();
+    const client = new CodexAppServer('fake-codex', undefined, () => fake.child);
+    const service = {
+      createSession: vi.fn(),
+      dispatch: vi.fn(),
+      cancelSession: vi.fn(),
+      cleanupExpired: vi.fn(),
+      dispose: vi.fn(),
+    } as unknown as CanvasSessionService;
+
+    await expect(client.runCanvasSession('Do not submit', 'session-1', service)).rejects.toThrow(
+      'without submitting a valid candidate',
+    );
     client.shutdown();
   });
 

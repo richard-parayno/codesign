@@ -137,6 +137,71 @@ describe('design operations', () => {
     expect(moved.nodes.child.bounds).toMatchObject({ x: 105, y: 80 });
   });
 
+  it('reflows nested children through an undoable update-node layout operation', () => {
+    let document = applyOperation(blankDocument(), {
+      id: 'create-frame',
+      type: 'create',
+      actor: 'user',
+      node: container('frame', 40, 50),
+    });
+    document = applyOperation(document, {
+      id: 'create-first',
+      type: 'create',
+      actor: 'user',
+      node: { ...node('first', 80, 90), parentId: 'frame' },
+    });
+    document = applyOperation(document, {
+      id: 'create-second',
+      type: 'create',
+      actor: 'user',
+      node: { ...node('second', 80, 160), parentId: 'frame' },
+    });
+    const source = structuredClone(document);
+
+    const laidOut = applyOperation(document, {
+      id: 'layout-frame',
+      type: 'update-node',
+      actor: 'user',
+      targetIds: ['frame'],
+      patch: {
+        layout: { mode: 'horizontal', gap: 8, padding: 12, align: 'center' },
+      },
+    });
+
+    expect(source.nodes.frame.layout?.mode ?? 'none').toBe('none');
+    expect(laidOut.nodes.frame.layout).toMatchObject({
+      mode: 'horizontal',
+      gap: 8,
+      padding: 12,
+      align: 'center',
+    });
+    expect(laidOut.nodes.first.bounds).toMatchObject({ x: 52, y: 226 });
+    expect(laidOut.nodes.second.bounds).toMatchObject({ x: 260, y: 226 });
+    expect(laidOut.operations.at(-1)).toMatchObject({
+      type: 'update-node',
+      patch: { layout: { mode: 'horizontal' } },
+    });
+    expect(laidOut.revisions[laidOut.currentRevisionId].snapshot.nodes.first.bounds.x).toBe(52);
+  });
+
+  it('rejects child layout modes on leaf primitives', () => {
+    const document = applyOperation(blankDocument(), {
+      id: 'create-leaf',
+      type: 'create',
+      actor: 'user',
+      node: node('leaf', 0, 0),
+    });
+    expect(() =>
+      applyOperation(document, {
+        id: 'layout-leaf',
+        type: 'update-node',
+        actor: 'user',
+        targetIds: ['leaf'],
+        patch: { layout: { mode: 'vertical' } },
+      }),
+    ).toThrow('support child layout');
+  });
+
   it('does not reset omitted properties in a partial style edit', () => {
     const styled = node('styled', 0, 0);
     styled.style = {

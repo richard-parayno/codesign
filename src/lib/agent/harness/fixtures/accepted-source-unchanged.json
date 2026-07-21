@@ -1,0 +1,159 @@
+{
+  "commands": [
+    {
+      "command": "session create",
+      "input": {
+        "document": {
+          "version": 2,
+          "revision": 0,
+          "currentRevisionId": "revision-cli-source",
+          "screens": [
+            {
+              "id": "screen-cli",
+              "name": "CLI fixture",
+              "rootIds": ["frame-cli"],
+              "branchId": "branch-cli"
+            }
+          ],
+          "nodes": {
+            "frame-cli": {
+              "id": "frame-cli",
+              "name": "Settings",
+              "kind": "frame",
+              "screenId": "screen-cli",
+              "childIds": ["rectangle-cli"],
+              "bounds": { "x": 0, "y": 0, "width": 640, "height": 480 },
+              "style": {
+                "fill": "#ffffff",
+                "opacity": 1,
+                "radius": 0,
+                "padding": 0,
+                "textColor": "#111827",
+                "fontSize": 14,
+                "fontWeight": 400,
+                "textAlign": "left",
+                "lineHeight": 1.4,
+                "density": "comfortable"
+              },
+              "provenance": { "actor": "user", "operationId": "fixture-frame" }
+            },
+            "rectangle-cli": {
+              "id": "rectangle-cli",
+              "name": "Incomplete panel",
+              "kind": "rectangle",
+              "screenId": "screen-cli",
+              "parentId": "frame-cli",
+              "childIds": [],
+              "bounds": { "x": 32, "y": 32, "width": 240, "height": 160 },
+              "style": {
+                "fill": "#e5e7eb",
+                "opacity": 1,
+                "radius": 0,
+                "padding": 0,
+                "textColor": "#111827",
+                "fontSize": 14,
+                "fontWeight": 400,
+                "textAlign": "left",
+                "lineHeight": 1.4,
+                "density": "comfortable"
+              },
+              "provenance": { "actor": "user", "operationId": "fixture-rectangle" }
+            }
+          },
+          "transitions": [],
+          "branches": [{ "id": "branch-cli", "name": "Accepted", "screenIds": ["screen-cli"] }],
+          "activeBranchId": "branch-cli",
+          "activeScreenId": "screen-cli",
+          "entities": {},
+          "representations": {},
+          "pinnedNodeIds": [],
+          "frameFidelity": {},
+          "nodeFidelityOverrides": {},
+          "projectComponents": {},
+          "revisions": {
+            "revision-cli-source": {
+              "id": "revision-cli-source",
+              "status": "working",
+              "origin": "human",
+              "createdAt": 0,
+              "operationIds": [],
+              "atomicChangeIds": [],
+              "snapshot": {
+                "screens": [
+                  {
+                    "id": "screen-cli",
+                    "name": "CLI fixture",
+                    "rootIds": ["frame-cli"],
+                    "branchId": "branch-cli"
+                  }
+                ],
+                "nodes": {},
+                "transitions": [],
+                "branches": [
+                  { "id": "branch-cli", "name": "Accepted", "screenIds": ["screen-cli"] }
+                ],
+                "activeBranchId": "branch-cli",
+                "activeScreenId": "screen-cli",
+                "entities": {},
+                "representations": {},
+                "pinnedNodeIds": [],
+                "frameFidelity": {},
+                "nodeFidelityOverrides": {},
+                "projectComponents": {}
+              }
+            }
+          },
+          "generationRuns": {},
+          "candidates": {},
+          "atomicChanges": {},
+          "processEvents": [],
+          "operations": []
+        },
+        "target": {
+          "focusNodeIds": ["rectangle-cli"],
+          "observationScope": {
+            "kind": "frame",
+            "rootId": "frame-cli",
+            "nodeIds": ["frame-cli", "rectangle-cli"]
+          },
+          "mutationScope": {
+            "existingNodeIds": ["rectangle-cli"],
+            "insertionParentIds": ["frame-cli"],
+            "regions": [{ "x": 0, "y": 0, "width": 640, "height": 480 }],
+            "allowCreate": true
+          }
+        },
+        "requestedFidelity": "wireframe",
+        "action": "complete"
+      }
+    },
+    { "command": "scene overview", "sessionId": "$session", "input": {} },
+    {
+      "command": "scene get-nodes",
+      "sessionId": "$session",
+      "input": { "nodeIds": ["rectangle-cli"] }
+    },
+    {
+      "command": "candidate apply",
+      "sessionId": "$session",
+      "input": {
+        "candidateRevisionId": "revision-cli-source",
+        "changes": [
+          {
+            "operation": {
+              "id": "operation-cli-style",
+              "type": "style",
+              "actor": "agent",
+              "targetIds": ["rectangle-cli"],
+              "patch": { "radius": 12 }
+            },
+            "evidenceNodeIds": ["rectangle-cli"],
+            "summary": "Rounded the incomplete panel within the editable region."
+          }
+        ]
+      }
+    },
+    { "command": "candidate validate", "sessionId": "$session", "input": {} },
+    { "command": "candidate submit", "sessionId": "$session", "input": {} }
+  ]
+}

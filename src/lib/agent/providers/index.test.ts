@@ -11,6 +11,9 @@ import { pinnedCodexCommand } from '../codex-client.server';
 describe('Codesign provider boundary', () => {
   it('advertises provider-specific visual and authentication capabilities', () => {
     expect(CODEX_PROVIDER_DESCRIPTOR.capabilities).toMatchObject({
+      agentSessions: true,
+      dynamicTools: true,
+      structuredCandidates: false,
       visualInputs: ['image', 'localImage'],
       authentication: 'app-server-chatgpt',
       canStartLogin: true,

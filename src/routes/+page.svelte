@@ -79,6 +79,7 @@
   } from '$lib/design-system/registry';
   import ComponentLibrary from '$lib/codesign/ComponentLibrary.svelte';
   import ComponentCanvasRenderer from '$lib/codesign/ComponentCanvasRenderer.svelte';
+  import { COMPONENT_DRAG_MIME, readDraggedComponent } from '$lib/codesign/component-drag';
   import CodesignActivity from '$lib/codesign/CodesignActivity.svelte';
   import InlineCodesignToolbar, {
     type CandidateView,
@@ -162,6 +163,7 @@
   };
   let canvasElement: SVGSVGElement;
   let gesture: CanvasGesture | null = null;
+  let componentDropActive = false;
   let connectSource = '';
   let agentStatus = 'Checking Codex App Server…';
   let providerConnected = true;
@@ -1491,34 +1493,44 @@
     tool = 'select';
     persistFrameSize();
   }
-  function insertComponent(componentId: string) {
+  function insertComponent(componentId: string, dropCenter?: { x: number; y: number }) {
     const definition = componentCatalog.find((component) => component.id === componentId);
     const blueprint = getDefaultComponentBlueprint(componentId);
     if (!definition || !blueprint?.length) return;
     const selectedParent = selectedNodes[0];
-    const parent =
-      selectedParent &&
-      (selectedParent.kind === 'frame' ||
-        selectedParent.kind === 'group' ||
-        (selectedParent.kind === 'instance' &&
-          selectedParent.componentBinding &&
-          validateComponentChild(
-            selectedParent.componentBinding.componentId,
-            componentId,
-            'default',
-          ).ok))
+    const droppedBounds = dropCenter
+      ? {
+          x: dropCenter.x - definition.defaultSize.width / 2,
+          y: dropCenter.y - definition.defaultSize.height / 2,
+          ...definition.defaultSize,
+        }
+      : undefined;
+    const parent = dropCenter
+      ? containingFrameForBounds(visibleNodes, droppedBounds!)
+      : selectedParent &&
+          (selectedParent.kind === 'frame' ||
+            selectedParent.kind === 'group' ||
+            (selectedParent.kind === 'instance' &&
+              selectedParent.componentBinding &&
+              validateComponentChild(
+                selectedParent.componentBinding.componentId,
+                componentId,
+                'default',
+              ).ok))
         ? selectedParent
         : undefined;
     const viewport = canvasElement.getBoundingClientRect();
-    const origin = parent
-      ? {
-          x: parent.bounds.x + Math.max(12, parent.style.padding),
-          y: parent.bounds.y + Math.max(12, parent.style.padding),
-        }
-      : {
-          x: (viewport.width / 2 - pan.x) / zoom - definition.defaultSize.width / 2,
-          y: (viewport.height / 2 - pan.y) / zoom - definition.defaultSize.height / 2,
-        };
+    const origin = droppedBounds
+      ? { x: droppedBounds.x, y: droppedBounds.y }
+      : parent
+        ? {
+            x: parent.bounds.x + Math.max(12, parent.style.padding),
+            y: parent.bounds.y + Math.max(12, parent.style.padding),
+          }
+        : {
+            x: (viewport.width / 2 - pan.x) / zoom - definition.defaultSize.width / 2,
+            y: (viewport.height / 2 - pan.y) / zoom - definition.defaultSize.height / 2,
+          };
     const ids = new Map(blueprint.map((item) => [item.key, uid('node')]));
     const childCount = Math.max(1, blueprint.length - 1);
     const childHeight = Math.max(20, (definition.defaultSize.height - 24) / childCount);
@@ -1572,6 +1584,35 @@
       rootId: ids.get('root')!,
       nodeCount: operations.length,
       parentId: parent?.id ?? '',
+      placement: dropCenter ? 'drag-drop' : 'insert-button',
+    });
+  }
+  function componentDragOver(event: DragEvent) {
+    if (!event.dataTransfer?.types.includes(COMPONENT_DRAG_MIME)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    componentDropActive = true;
+  }
+  function componentDragLeave(event: DragEvent) {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && canvasElement.contains(nextTarget)) return;
+    componentDropActive = false;
+  }
+  function dropComponent(event: DragEvent) {
+    const componentId = readDraggedComponent(event.dataTransfer);
+    if (!componentCatalog.some((component) => component.id === componentId)) return;
+    event.preventDefault();
+    componentDropActive = false;
+    const viewport = canvasElement.getBoundingClientRect();
+    const center = {
+      x: (event.clientX - viewport.left - pan.x) / zoom,
+      y: (event.clientY - viewport.top - pan.y) / zoom,
+    };
+    insertComponent(componentId, center);
+    logAction('component.dropped', {
+      componentId,
+      x: Math.round(center.x),
+      y: Math.round(center.y),
     });
   }
   function gestureDelta(event: PointerEvent) {
@@ -3059,18 +3100,21 @@
         >Reset color</button
       >
     </div>
-    <div class="canvas-help">
-      {preview
-        ? 'Click a connected object to navigate · Esc to exit'
-        : codesignReviewActive
-          ? 'Blue: can change · Amber: focus only · Gray dashed: can reference · Purple: insertion parent · Green: editable region · Candidate ghosts never block the canvas'
-          : tool === 'frame'
-            ? `${framePresetById(framePresetId)?.name ?? 'Custom frame'} · ${frameSize.width}×${frameSize.height} · Drag custom or place preset`
-            : `${tool[0].toUpperCase() + tool.slice(1)} tool · Scroll to pan · Pinch to zoom · Right-click for actions`}
+    <div class="canvas-help" class:component-drop-help={componentDropActive}>
+      {componentDropActive
+        ? 'Release to place this component on the canvas'
+        : preview
+          ? 'Click a connected object to navigate · Esc to exit'
+          : codesignReviewActive
+            ? 'Blue: can change · Amber: focus only · Gray dashed: can reference · Purple: insertion parent · Green: editable region · Candidate ghosts never block the canvas'
+            : tool === 'frame'
+              ? `${framePresetById(framePresetId)?.name ?? 'Custom frame'} · ${frameSize.width}×${frameSize.height} · Drag custom or place preset`
+              : `${tool[0].toUpperCase() + tool.slice(1)} tool · Scroll to pan · Pinch to zoom · Right-click for actions`}
     </div>
     <svg
       bind:this={canvasElement}
       class="canvas"
+      class:component-drop-active={componentDropActive}
       role="application"
       aria-label="Design canvas"
       style={`background-color:${canvasBackground}`}
@@ -3082,6 +3126,9 @@
         if (gesture?.pointerId === event.pointerId) cancelCanvasGesture(event);
       }}
       onwheel={wheel}
+      ondragover={componentDragOver}
+      ondragleave={componentDragLeave}
+      ondrop={dropComponent}
       oncontextmenu={(event) => openContextMenu(event)}
     >
       <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
@@ -4229,7 +4276,7 @@
   :global(textarea) {
     font: inherit;
   }
-  :global(button) {
+  :global(button:not([data-slot])) {
     color: inherit;
   }
   :global(kbd) {
@@ -4751,6 +4798,10 @@
     height: calc(100% - 42px);
     touch-action: none;
     transition: background-color 0.12s ease;
+  }
+  .canvas.component-drop-active {
+    outline: 2px solid #2672ad;
+    outline-offset: -2px;
   }
   .canvas-toolbar {
     position: absolute;

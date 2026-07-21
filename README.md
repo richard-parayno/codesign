@@ -41,7 +41,7 @@ Only **Complete with Codesign** is exposed because it is the action implemented 
 ## Editor controls
 
 - Use the labeled **Project** picker to switch local files; **New project**, **Rename**, and **Delete** manage them.
-- `V` Select, `F` Frame, `R` Rectangle, `T` Text, `C` Connect.
+- `V` Select, `F` Frame, `R` Rectangle, `T` Text.
 - Shift-click for multi-selection.
 - Drag selected objects to move them; drag the lower-right handle to resize.
 - Scroll or two-finger drag to pan. Pinch to zoom around the pointer. Middle-drag also pans.

@@ -35,7 +35,6 @@ function snapshot(nodes: DesignNode[], rootIds: string[]): CanvasSnapshot {
   return {
     screens: [{ id: 'screen', name: 'Test screen', rootIds, branchId: 'branch' }],
     nodes: Object.fromEntries(nodes.map((item) => [item.id, item])),
-    transitions: [],
     branches: [{ id: 'branch', name: 'Main', screenIds: ['screen'] }],
     activeBranchId: 'branch',
     activeScreenId: 'screen',

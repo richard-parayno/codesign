@@ -179,6 +179,77 @@ describe('v1 to v2 migration', () => {
     ).toEqual(recovered?.projects[0].document.nodes.frame.layout);
   });
 
+  it('drops retired Connect data while importing a v1 document', () => {
+    const legacy = legacyDocument();
+    legacy.transitions = [
+      {
+        id: 'transition-1',
+        sourceNodeId: 'row',
+        targetScreenId: 'screen-1',
+        label: 'Open details',
+      },
+    ];
+    legacy.operations = [
+      {
+        id: 'transition-operation-1',
+        type: 'transition',
+        actor: 'user',
+        transition: legacy.transitions[0],
+        timestamp: 50,
+        summary: 'Connected screen state',
+      },
+    ];
+
+    const migrated = migrateDocumentV1(legacy, 'malleable.projects.v1', 100);
+
+    expect(migrated).not.toHaveProperty('transitions');
+    expect(migrated.operations).toEqual([]);
+    expect(migrated.revisions[migrated.currentRevisionId].snapshot).not.toHaveProperty(
+      'transitions',
+    );
+    expect(isDesignDocumentV2(migrated)).toBe(true);
+  });
+
+  it('strips retired Connect data from restored v2 documents and revision history', () => {
+    const document = migrateDocumentV1(legacyDocument(), 'malleable.projects.v1', 100);
+    const removedOperation = {
+      id: 'transition-operation-1',
+      type: 'transition',
+      actor: 'user',
+      transition: {
+        id: 'transition-1',
+        sourceNodeId: 'row',
+        targetScreenId: 'screen-1',
+        label: 'Open details',
+      },
+      timestamp: 50,
+      summary: 'Connected screen state',
+    };
+    (document as unknown as Record<string, unknown>).transitions = [removedOperation.transition];
+    (
+      document.revisions[document.currentRevisionId].snapshot as unknown as Record<string, unknown>
+    ).transitions = [removedOperation.transition];
+    (document.operations as unknown[]).push(removedOperation);
+    document.revisions[document.currentRevisionId].operationIds.push(removedOperation.id);
+
+    const recovered = recoverProjectEnvelopeV2({
+      version: 2,
+      activeProjectId: 'project',
+      projects: [{ id: 'project', name: 'Project', document }],
+    });
+    const recoveredDocument = recovered?.projects[0].document;
+
+    expect(recoveredDocument).not.toBeUndefined();
+    expect(recoveredDocument).not.toHaveProperty('transitions');
+    expect(recoveredDocument?.operations).toEqual([]);
+    expect(
+      recoveredDocument?.revisions[recoveredDocument.currentRevisionId].snapshot,
+    ).not.toHaveProperty('transitions');
+    expect(
+      recoveredDocument?.revisions[recoveredDocument.currentRevisionId].operationIds,
+    ).not.toContain(removedOperation.id);
+  });
+
   it('rejects structurally broken v1 documents before migration', () => {
     const broken = { ...legacyDocument(), screens: [] };
     expect(isLegacyDesignDocumentV1(broken)).toBe(false);

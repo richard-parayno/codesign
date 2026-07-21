@@ -97,12 +97,6 @@ export type Screen = {
   rootIds: string[];
   branchId: string;
 };
-export type Transition = {
-  id: string;
-  sourceNodeId: string;
-  targetScreenId: string;
-  label: string;
-};
 export type Branch = { id: string; name: string; sourceScreenId?: string; screenIds: string[] };
 export type IntentHypothesis = {
   id: string;
@@ -127,7 +121,6 @@ export type DesignOperation =
       role: string;
       commitment: Commitment;
     }
-  | { id: string; type: 'transition'; actor: Actor; transition: Transition }
   | {
       id: string;
       type: 'promote';
@@ -247,7 +240,6 @@ export type DerivationTrace = {
 export type AtomicStateSlice = {
   nodes: Record<string, DesignNode | null>;
   screenRootIds?: Record<string, string[]>;
-  transitions?: Record<string, Transition | null>;
 };
 export type AtomicChange = {
   id: string;
@@ -337,7 +329,6 @@ export type ProcessEvent = {
 export type CanvasSnapshot = {
   screens: Screen[];
   nodes: Record<string, DesignNode>;
-  transitions: Transition[];
   branches: Branch[];
   activeBranchId: string;
   activeScreenId: string;
@@ -367,12 +358,13 @@ export type LegacyDesignDocumentV1 = {
   revision: number;
   screens: Screen[];
   nodes: Record<string, DesignNode>;
-  transitions: Transition[];
+  /** Removed interaction data is accepted only so old project files remain importable. */
+  transitions: unknown[];
   branches: Branch[];
   activeBranchId: string;
   activeScreenId: string;
   hypotheses: IntentHypothesis[];
-  operations: OperationRecord[];
+  operations: unknown[];
 };
 export type LegacyArchive = {
   sourceVersion: 1;
@@ -502,12 +494,6 @@ export const nodeSchema: z.ZodType<DesignNode> = z.object({
   repeaterId: z.string().optional(),
   provenance: z.object({ actor: z.enum(['user', 'agent']), operationId: z.string() }),
 });
-const transitionSchema: z.ZodType<Transition> = z.object({
-  id: z.string().min(1),
-  sourceNodeId: z.string().min(1),
-  targetScreenId: z.string().min(1),
-  label: z.string(),
-});
 export const projectComponentDefinitionSchema: z.ZodType<ProjectComponentDefinition> = z.object({
   id: z.string().min(1),
   name: z.string().min(1).max(120),
@@ -547,7 +533,6 @@ export const operationSchema: z.ZodType<DesignOperation> = z.discriminatedUnion(
     role: z.string().min(1),
     commitment: z.enum(['ambiguous', 'inferred', 'confirmed']),
   }),
-  z.object({ ...operationBase, type: z.literal('transition'), transition: transitionSchema }),
   z.object({
     ...operationBase,
     type: z.literal('promote'),
@@ -661,7 +646,6 @@ export const derivationTraceSchema: z.ZodType<DerivationTrace> = z.object({
 const atomicStateSliceSchema: z.ZodType<AtomicStateSlice> = z.object({
   nodes: z.record(z.string(), nodeSchema.nullable()),
   screenRootIds: z.record(z.string(), z.array(z.string())).optional(),
-  transitions: z.record(z.string(), transitionSchema.nullable()).optional(),
 });
 export const atomicChangeSchema: z.ZodType<AtomicChange> = z.object({
   id: z.string().min(1),
@@ -798,7 +782,6 @@ export function blankDocument(): DesignDocument {
   const canvas: CanvasSnapshot = {
     screens: [{ id: 'screen-1', name: 'Screen 1', rootIds: [], branchId: branch.id }],
     nodes: {},
-    transitions: [],
     branches: [branch],
     activeBranchId: branch.id,
     activeScreenId: 'screen-1',

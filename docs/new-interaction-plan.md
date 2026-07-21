@@ -37,7 +37,7 @@ Candidate operations use the existing typed operation reducer where possible. Ca
 
 - Persist v2 under `codesign.projects.v2`; never overwrite or delete `malleable.projects.v1` or `malleable.document.v1` during the compatibility window.
 - Restore order: valid v2, v1 project envelope, legacy single document, blank.
-- Migration preserves projects, nodes, screens, component bindings, repeaters, transitions, branches, and operation records.
+- Migration preserves projects, nodes, screens, component bindings, repeaters, branches, and operation records.
 - Old hypotheses/semantic commitments are archived in the legacy snapshot and are not converted into derivation evidence.
 - Legacy protected nodes become pinned nodes. Bound nodes migrate at Component fidelity; other nodes migrate at Wireframe.
 - Parse/migration/write failures leave raw legacy storage untouched and keep an in-memory blank project usable.

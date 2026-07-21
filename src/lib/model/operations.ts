@@ -34,7 +34,6 @@ export function canvasSnapshot(document: DesignDocument): CanvasSnapshot {
   return clone({
     screens: document.screens,
     nodes: document.nodes,
-    transitions: document.transitions,
     branches: document.branches,
     activeBranchId: document.activeBranchId,
     activeScreenId: document.activeScreenId,
@@ -84,7 +83,6 @@ function summary(operation: DesignOperation) {
     delete: `Deleted ${count} node${count === 1 ? '' : 's'}`,
     repeat: `Grouped repeater · ${count} items`,
     bind: `Bound ${'role' in operation ? operation.role : 'role'}`,
-    transition: 'Connected screen state',
     promote: `Resolved to ${'componentId' in operation ? operation.componentId : 'component'}`,
     style: 'Changed style',
     generalize: `Generalized style · ${count} targets`,
@@ -332,9 +330,6 @@ function removeNodeMetadata(document: DesignDocument, node: DesignNode) {
   document.pinnedNodeIds = document.pinnedNodeIds.filter((id) => id !== node.id);
   delete document.nodeFidelityOverrides[node.id];
   delete document.frameFidelity[node.id];
-  document.transitions = document.transitions.filter(
-    (transition) => transition.sourceNodeId !== node.id,
-  );
 }
 
 function cloneScreen(
@@ -539,13 +534,6 @@ export function validateOperation(document: DesignDocument, candidate: unknown):
     const binding = validateComponentBinding(operation.componentId, operation.props);
     if (!binding.ok) throw new OperationError(binding.error);
   }
-  if (operation.type === 'transition') {
-    if (
-      !document.nodes[operation.transition.sourceNodeId] ||
-      !document.screens.some((screen) => screen.id === operation.transition.targetScreenId)
-    )
-      throw new OperationError('Transition endpoints must exist');
-  }
   if (
     operation.type === 'duplicate-screen' &&
     document.screens.some((screen) => screen.id === operation.screenId)
@@ -621,9 +609,6 @@ function mutateOperation(document: DesignDocument, operation: DesignOperation) {
         node.childIds = node.childIds.filter((id) => !removed.has(id));
       for (const screen of document.screens)
         screen.rootIds = screen.rootIds.filter((id) => !removed.has(id));
-      document.transitions = document.transitions.filter(
-        (transition) => !removed.has(transition.sourceNodeId),
-      );
       document.pinnedNodeIds = document.pinnedNodeIds.filter((id) => !removed.has(id));
       for (const id of removed) {
         delete document.nodeFidelityOverrides[id];
@@ -647,9 +632,6 @@ function mutateOperation(document: DesignDocument, operation: DesignOperation) {
         };
         touch(document.nodes[id]);
       }
-      break;
-    case 'transition':
-      document.transitions.push(clone(operation.transition));
       break;
     case 'promote':
       for (const id of operation.targetIds) {
@@ -927,7 +909,6 @@ function recordEntitiesAndRepresentations(
     if ('targetIds' in operation) operation.targetIds.forEach((id) => affectedIds.add(id));
     if ('targetId' in operation) affectedIds.add(operation.targetId);
     if (operation.type === 'generalize') affectedIds.add(operation.sourceId);
-    if (operation.type === 'transition') affectedIds.add(operation.transition.sourceNodeId);
     if (operation.type === 'group') affectedIds.add(operation.group.id);
     if (operation.type === 'duplicate')
       Object.values(operation.idMap).forEach((id) => affectedIds.add(id));

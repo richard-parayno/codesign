@@ -163,7 +163,6 @@ function promoteAcceptedCodesignComponent(
 function operationMutationIds(operation: DesignOperation) {
   if ('targetIds' in operation) return operation.targetIds;
   if ('targetId' in operation) return [operation.targetId];
-  if (operation.type === 'transition') return [operation.transition.sourceNodeId];
   if (operation.type === 'create') return operation.node.parentId ? [operation.node.parentId] : [];
   return [];
 }

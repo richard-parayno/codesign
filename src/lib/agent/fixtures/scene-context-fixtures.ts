@@ -52,7 +52,6 @@ function fixtureSnapshot(name: string, specs: NodeSpec[]): CanvasSnapshot {
   return {
     screens: [{ id: 'screen-fixture', name, rootIds, branchId: 'branch-fixture' }],
     nodes,
-    transitions: [],
     branches: [{ id: 'branch-fixture', name: 'Fixture', screenIds: ['screen-fixture'] }],
     activeBranchId: 'branch-fixture',
     activeScreenId: 'screen-fixture',

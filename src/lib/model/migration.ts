@@ -80,7 +80,6 @@ function validCanvas(value: Partial<CanvasSnapshot>) {
     !validScreensAndBranches(value) ||
     !value.nodes ||
     typeof value.nodes !== 'object' ||
-    !Array.isArray(value.transitions) ||
     !value.entities ||
     typeof value.entities !== 'object' ||
     !value.representations ||
@@ -122,10 +121,6 @@ function validCanvas(value: Partial<CanvasSnapshot>) {
       ([, node]) =>
         (node.parentId && !value.nodes![node.parentId]) ||
         node.childIds.some((id) => !value.nodes![id]),
-    ) ||
-    value.transitions.some(
-      (transition) =>
-        !value.nodes![transition.sourceNodeId] || !screenIds.has(transition.targetScreenId),
     ) ||
     value.pinnedNodeIds.some((id) => !value.nodes![id]) ||
     Object.entries(value.frameFidelity).some(
@@ -189,19 +184,33 @@ export function isLegacyDesignDocumentV1(value: unknown): value is LegacyDesignD
       ([, node]) =>
         (node.parentId && !document.nodes![node.parentId]) ||
         node.childIds.some((id) => !document.nodes![id]),
-    ) ||
-    document.transitions.some(
-      (transition) =>
-        !document.nodes![transition.sourceNodeId] || !screenIds.has(transition.targetScreenId),
     )
   )
     return false;
   return document.operations.every(
-    (record) =>
-      !!record &&
-      Number.isFinite(record.timestamp) &&
-      typeof record.summary === 'string' &&
-      operationSchema.safeParse(record).success,
+    (record) => isOperationRecord(record) || isRemovedInteractionRecord(record),
+  );
+}
+
+function isOperationRecord(value: unknown): value is OperationRecord {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return (
+    Number.isFinite(record.timestamp) &&
+    typeof record.summary === 'string' &&
+    operationSchema.safeParse(record).success
+  );
+}
+
+function isRemovedInteractionRecord(value: unknown) {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return (
+    record.type === 'transition' &&
+    typeof record.id === 'string' &&
+    (record.actor === 'user' || record.actor === 'agent') &&
+    Number.isFinite(record.timestamp) &&
+    typeof record.summary === 'string'
   );
 }
 
@@ -228,7 +237,13 @@ export function isLegacyProjectEnvelopeV1(value: unknown): value is LegacyProjec
 }
 
 function originFor(document: LegacyDesignDocumentV1): Origin {
-  const actors = new Set(document.operations.map((operation) => operation.actor));
+  const actors = new Set(
+    document.operations.flatMap((operation) => {
+      if (!operation || typeof operation !== 'object') return [];
+      const actor = (operation as Record<string, unknown>).actor;
+      return actor === 'user' || actor === 'agent' ? [actor] : [];
+    }),
+  );
   if (actors.size > 1) return 'mixed';
   return actors.has('agent') ? 'ai' : 'human';
 }
@@ -246,6 +261,7 @@ export function migrateDocumentV1(
   const pinnedNodeIds: string[] = [];
   const frameFidelity: Record<string, 'wireframe'> = {};
   const nodeFidelityOverrides: Record<string, 'component'> = {};
+  const operations = source.operations.filter(isOperationRecord);
 
   for (const legacyNode of Object.values(source.nodes)) {
     const node = clone(legacyNode);
@@ -280,7 +296,6 @@ export function migrateDocumentV1(
   const canvas: CanvasSnapshot = {
     screens: clone(source.screens),
     nodes,
-    transitions: clone(source.transitions),
     branches: clone(source.branches),
     activeBranchId: source.activeBranchId,
     activeScreenId: source.activeScreenId,
@@ -291,13 +306,13 @@ export function migrateDocumentV1(
     nodeFidelityOverrides,
     projectComponents: {},
   };
-  const createdAt = source.operations.at(-1)?.timestamp ?? 0;
+  const createdAt = operations.at(-1)?.timestamp ?? 0;
   const revision: DesignRevision = {
     id: revisionId,
     status: 'working',
     origin: originFor(source),
     createdAt,
-    operationIds: source.operations.map((operation) => operation.id),
+    operationIds: operations.map((operation) => operation.id),
     atomicChangeIds: [],
     snapshot: clone(canvas),
   };
@@ -324,7 +339,7 @@ export function migrateDocumentV1(
         },
       },
     ],
-    operations: clone(source.operations),
+    operations: clone(operations),
     legacyArchive: {
       sourceVersion: 1,
       sourceKey,
@@ -435,7 +450,6 @@ export function isDesignDocumentV2(value: unknown): value is DesignDocument {
     JSON.stringify({
       screens: document.screens,
       nodes: document.nodes,
-      transitions: document.transitions,
       branches: document.branches,
       activeBranchId: document.activeBranchId,
       activeScreenId: document.activeScreenId,
@@ -480,6 +494,10 @@ export function recoverProjectEnvelopeV2(value: unknown): ProjectEnvelopeV2 | nu
   for (const project of envelope.projects ?? []) {
     const document = project.document;
     if (!document?.generationRuns || !document.revisions) continue;
+    delete (document as unknown as Record<string, unknown>).transitions;
+    document.operations = document.operations.filter(
+      (operation) => operation.type !== ('transition' as OperationRecord['type']),
+    );
     const materializeLayouts = (nodes: Record<string, DesignNode>) => {
       for (const node of Object.values(nodes)) node.layout = { ...defaultLayout, ...node.layout };
     };
@@ -488,6 +506,10 @@ export function recoverProjectEnvelopeV2(value: unknown): ProjectEnvelopeV2 | nu
     for (const definition of Object.values(document.projectComponents))
       materializeLayouts(definition.nodes);
     for (const revision of Object.values(document.revisions)) {
+      delete (revision.snapshot as unknown as Record<string, unknown>).transitions;
+      revision.operationIds = revision.operationIds.filter((id) =>
+        document.operations.some((operation) => operation.id === id),
+      );
       materializeLayouts(revision.snapshot.nodes);
       revision.snapshot.projectComponents ??= {};
       for (const definition of Object.values(revision.snapshot.projectComponents))

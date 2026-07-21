@@ -127,7 +127,7 @@
     type AiReasoningEffort,
   } from '$lib/codesign/SettingsDialog.svelte';
 
-  type Tool = 'select' | 'frame' | 'rectangle' | 'text' | 'connect';
+  type Tool = 'select' | 'frame' | 'rectangle' | 'text';
   type EditorMode = 'edit' | 'preview';
   // Inter's textarea font box sits one pixel below a 14px SVG text baseline.
   const INTER_TEXTAREA_ASCENT_CORRECTION_EM = 1 / 14;
@@ -213,7 +213,6 @@
   let gesture: CanvasGesture | null = null;
   let lastCanvasNodePointerDown = { nodeId: '', timestamp: 0 };
   let componentDropActive = false;
-  let connectSource = '';
   let agentStatus = 'Checking Codex App Server…';
   let providerConnected = true;
   let providerPlan = '';
@@ -635,7 +634,6 @@
         f: 'frame',
         r: 'rectangle',
         t: 'text',
-        c: 'connect',
       };
       if (shortcuts[key]) setTool(shortcuts[key], 'keyboard');
       if (event.key.startsWith('Arrow') && selection.length) {
@@ -1063,7 +1061,6 @@
     editingLayerName = '';
     editingLayerSource = 'layers';
     contextMenu = null;
-    connectSource = '';
     error = '';
     notice = '';
     loadingCandidate = false;
@@ -1183,9 +1180,7 @@
         ? operation.targetIds
         : 'targetId' in operation
           ? [operation.targetId]
-          : operation.type === 'transition'
-            ? [operation.transition.sourceNodeId]
-            : [];
+          : [];
     try {
       documentStore.apply(operation);
       error = '';
@@ -1430,7 +1425,6 @@
       delete: 'Delete element',
       repeat: 'Create repeated pattern',
       bind: 'Assign semantic role',
-      transition: 'Create interaction',
       promote: 'Resolve to component',
       style: 'Refine appearance',
       generalize: 'Apply shared style',
@@ -2345,17 +2339,7 @@
       beginCanvasPan(event);
       return;
     }
-    if (preview) {
-      const transition = document.transitions.find((item) => item.sourceNodeId === node.id);
-      if (transition) navigateToScreen(transition.targetScreenId, undefined, 'preview-transition');
-      return;
-    }
-    if (tool === 'connect') {
-      connectSource = node.id;
-      notice = `Connection starts at ${node.name}. Choose a destination screen.`;
-      logAction('connection.started', { nodeId: node.id, source: 'canvas' });
-      return;
-    }
+    if (preview) return;
     if (tool === 'frame' || tool === 'rectangle' || tool === 'text') {
       startDraw(event);
       return;
@@ -2552,15 +2536,6 @@
     });
     await tick();
     contextMenuElement?.querySelector<HTMLButtonElement>('button')?.focus();
-  }
-  function startConnectionFromContext() {
-    if (!contextNode) return;
-    selection = [contextNode.id];
-    connectSource = contextNode.id;
-    setTool('connect', 'context-menu');
-    notice = `Connection starts at ${contextNode.name}. Choose a destination screen.`;
-    logAction('connection.started', { nodeId: contextNode.id, source: 'context-menu' });
-    contextMenu = null;
   }
   function promoteFromContext() {
     if (!contextNode) return;
@@ -3123,22 +3098,6 @@
       : 'Element unpinned.';
     logAction('codesign.node-pin-changed', { nodeId, pinned });
   }
-  function connectTo(targetScreenId: string) {
-    if (!connectSource) return;
-    apply({
-      id: uid('op'),
-      type: 'transition',
-      actor: 'user',
-      transition: {
-        id: uid('transition'),
-        sourceNodeId: connectSource,
-        targetScreenId,
-        label: 'Open details',
-      },
-    });
-    connectSource = '';
-    tool = 'select';
-  }
   function changeStyle(patch: StylePatch) {
     const keys = Object.keys(patch);
     const textOnly = keys.every((key) =>
@@ -3429,15 +3388,12 @@
             onclick={() => {
               navigateToScreen(screen.id, screen.branchId);
             }}>{screen.name}</button
-          >{#if connectSource && screen.id !== document.activeScreenId}<button
-              class="connect-dest"
-              onclick={() => connectTo(screen.id)}>Connect</button
-            >{/if}
+          >
         </div>
       {/each}
     </section>
     <nav class="tools" aria-label="Tools">
-      {#each [{ id: 'select', label: 'Select', icon: '↖', key: 'V' }, { id: 'frame', label: 'Frame', icon: '▣', key: 'F' }, { id: 'rectangle', label: 'Rectangle', icon: '□', key: 'R' }, { id: 'text', label: 'Text', icon: 'T', key: 'T' }, { id: 'connect', label: 'Connect', icon: '↗', key: 'C' }] as item}<button
+      {#each [{ id: 'select', label: 'Select', icon: '↖', key: 'V' }, { id: 'frame', label: 'Frame', icon: '▣', key: 'F' }, { id: 'rectangle', label: 'Rectangle', icon: '□', key: 'R' }, { id: 'text', label: 'Text', icon: 'T', key: 'T' }] as item}<button
           class:active={tool === item.id}
           title={`${item.label} tool · ${item.key}`}
           onclick={() => setTool(item.id as Tool, 'toolbar')}
@@ -3638,7 +3594,7 @@
       {componentDropActive
         ? 'Release to place this component on the canvas'
         : preview
-          ? 'Click a connected object to navigate · Esc to exit'
+          ? 'Preview canvas · Esc to exit'
           : codesignReviewActive
             ? compareSourceActive
               ? 'Source view · Select Show candidate to return to the proposal'
@@ -3682,18 +3638,6 @@
             </clipPath>
           {/each}
         </defs>
-        {#each document.transitions.filter((item) => document.nodes[item.sourceNodeId]?.screenId === document.activeScreenId) as transition}<path
-            class="transition"
-            d={`M ${document.nodes[transition.sourceNodeId].bounds.x + document.nodes[transition.sourceNodeId].bounds.width} ${document.nodes[transition.sourceNodeId].bounds.y + document.nodes[transition.sourceNodeId].bounds.height / 2} l 46 0`}
-          /><text
-            class="transition-label"
-            x={document.nodes[transition.sourceNodeId].bounds.x +
-              document.nodes[transition.sourceNodeId].bounds.width +
-              8}
-            y={document.nodes[transition.sourceNodeId].bounds.y +
-              document.nodes[transition.sourceNodeId].bounds.height / 2 -
-              7}>→ state</text
-          >{/each}
         {#if codesignReviewActive && reviewTarget}
           {#each reviewTarget.mutationScope.regions as region}
             <rect
@@ -3734,8 +3678,6 @@
             id={`node-${node.id}`}
             class:selected={selection.includes(node.id)}
             class:promoted={!!node.componentBinding}
-            class:clickable={preview &&
-              document.transitions.some((item) => item.sourceNodeId === node.id)}
             role="button"
             tabindex="0"
             aria-label={node.name}
@@ -4272,7 +4214,6 @@
             >{/if}
           <div class="menu-separator"></div>
           <button role="menuitem" onclick={promoteFromContext}>Complete with Codesign</button
-          ><button role="menuitem" onclick={startConnectionFromContext}>Start connection</button
           ><button class="danger" role="menuitem" onclick={deleteFromContext}
             ><span>Delete {selection.length > 1 ? 'selection' : 'element'}</span><kbd>Delete</kbd
             ></button
@@ -4333,10 +4274,6 @@
                 <div>
                   <dt>Text</dt>
                   <dd><kbd>T</kbd></dd>
-                </div>
-                <div>
-                  <dt>Connect</dt>
-                  <dd><kbd>C</kbd></dd>
                 </div>
               </dl>
             </section>
@@ -5391,13 +5328,6 @@
     background: #dfe8f2;
     color: #174b78;
   }
-  .connect-dest {
-    font-size: 10px;
-    border: 1px solid #6b91b4;
-    background: white;
-    border-radius: 3px;
-    padding: 3px;
-  }
   .proposed-layers {
     margin: 5px 0 7px;
     padding: 4px;
@@ -5981,19 +5911,6 @@
     font-size: 8px;
     font-weight: 800;
     letter-spacing: 0.06em;
-  }
-  .transition {
-    stroke: #4382b6;
-    fill: none;
-    stroke-width: 2;
-    stroke-dasharray: 4 3;
-  }
-  .transition-label {
-    fill: #356687;
-    font-size: 10px;
-  }
-  .clickable {
-    cursor: pointer;
   }
   .context-menu {
     position: fixed;

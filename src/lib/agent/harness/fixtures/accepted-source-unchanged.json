@@ -60,7 +60,6 @@
               "provenance": { "actor": "user", "operationId": "fixture-rectangle" }
             }
           },
-          "transitions": [],
           "branches": [{ "id": "branch-cli", "name": "Accepted", "screenIds": ["screen-cli"] }],
           "activeBranchId": "branch-cli",
           "activeScreenId": "screen-cli",
@@ -88,7 +87,6 @@
                   }
                 ],
                 "nodes": {},
-                "transitions": [],
                 "branches": [
                   { "id": "branch-cli", "name": "Accepted", "screenIds": ["screen-cli"] }
                 ],

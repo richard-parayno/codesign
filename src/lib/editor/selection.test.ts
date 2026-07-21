@@ -4,6 +4,8 @@ import {
   groupedCanvasContextTarget,
   groupedCanvasSelectionTarget,
   isAdditiveSelectionModifier,
+  isCanvasAdditiveSelectionModifier,
+  selectedContainerCanvasTarget,
   selectionWithTarget,
 } from './selection';
 
@@ -30,13 +32,30 @@ describe('grouped canvas selection', () => {
     expect(groupedCanvasSelectionTarget(document, 'child')?.id).toBe('group');
   });
 
-  it('selects the outermost group across nested group boundaries', () => {
+  it('selects the nearest group across nested group boundaries', () => {
     const document = blankDocument();
     document.nodes.outer = node('outer', 'group');
     document.nodes.inner = node('inner', 'group', 'outer');
     document.nodes.child = node('child', 'rectangle', 'inner');
 
-    expect(groupedCanvasSelectionTarget(document, 'child')?.id).toBe('outer');
+    expect(groupedCanvasSelectionTarget(document, 'child')?.id).toBe('inner');
+  });
+
+  it('does not promote a directly hit nested container to the root screen frame', () => {
+    const document = blankDocument();
+    document.nodes.screen = node('screen', 'frame');
+    document.nodes.group = node('group', 'group', 'screen');
+
+    expect(groupedCanvasSelectionTarget(document, 'group')?.id).toBe('group');
+  });
+
+  it('selects a nested group instead of its root screen frame when a child is hit', () => {
+    const document = blankDocument();
+    document.nodes.screen = node('screen', 'frame');
+    document.nodes.group = node('group', 'group', 'screen');
+    document.nodes.child = node('child', 'rectangle', 'group');
+
+    expect(groupedCanvasSelectionTarget(document, 'child')?.id).toBe('group');
   });
 
   it('keeps the directly hit node for modifier-assisted deep selection', () => {
@@ -47,12 +66,36 @@ describe('grouped canvas selection', () => {
     expect(groupedCanvasSelectionTarget(document, 'child', true)?.id).toBe('child');
   });
 
-  it('does not promote a child through a frame boundary', () => {
+  it('selects the containing frame when a child is hit', () => {
     const document = blankDocument();
     document.nodes.frame = node('frame', 'frame');
     document.nodes.child = node('child', 'rectangle', 'frame');
 
-    expect(groupedCanvasSelectionTarget(document, 'child')?.id).toBe('child');
+    expect(groupedCanvasSelectionTarget(document, 'child')?.id).toBe('frame');
+  });
+
+  it('keeps a frame child as the target for modifier-assisted deep selection', () => {
+    const document = blankDocument();
+    document.nodes.frame = node('frame', 'frame');
+    document.nodes.child = node('child', 'rectangle', 'frame');
+
+    expect(groupedCanvasSelectionTarget(document, 'child', true)?.id).toBe('child');
+  });
+
+  it('keeps an already-selected frame as the drag target when a child is hit', () => {
+    const document = blankDocument();
+    document.nodes.frame = node('frame', 'frame');
+    document.nodes.background = node('background', 'rectangle', 'frame');
+
+    expect(selectedContainerCanvasTarget(document, 'background', ['frame'])?.id).toBe('frame');
+  });
+
+  it('does not retain a selected container that is not an ancestor of the hit node', () => {
+    const document = blankDocument();
+    document.nodes.frame = node('frame', 'frame');
+    document.nodes.sibling = node('sibling', 'rectangle');
+
+    expect(selectedContainerCanvasTarget(document, 'sibling', ['frame'])).toBeUndefined();
   });
 });
 
@@ -69,6 +112,18 @@ describe('multi-selection modifiers', () => {
     expect(selectionWithTarget(['one'], 'two', true)).toEqual(['one', 'two']);
     expect(selectionWithTarget(['one', 'two'], 'two', true)).toEqual(['one']);
     expect(selectionWithTarget(['one', 'two'], 'three', false)).toEqual(['three']);
+  });
+
+  it('reserves Ctrl and Cmd for exclusive deep selection on the canvas', () => {
+    expect(
+      isCanvasAdditiveSelectionModifier({ ctrlKey: true, metaKey: false, shiftKey: false }),
+    ).toBe(false);
+    expect(
+      isCanvasAdditiveSelectionModifier({ ctrlKey: false, metaKey: true, shiftKey: false }),
+    ).toBe(false);
+    expect(
+      isCanvasAdditiveSelectionModifier({ ctrlKey: false, metaKey: false, shiftKey: true }),
+    ).toBe(true);
   });
 });
 

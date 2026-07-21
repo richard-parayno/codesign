@@ -10,6 +10,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "harness": "node scripts/codesign-harness.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },

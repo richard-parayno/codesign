@@ -51,7 +51,7 @@ Only **Complete with Codesign** is exposed because it is the action implemented 
 - Scroll or two-finger drag to pan. Pinch to zoom around the pointer. Middle-drag also pans.
 - Right-click an object or empty canvas for a relevant text-labelled context menu.
 - **Canvas color** changes the solid workspace background and persists locally.
-- **AI settings** shows whether the project-pinned Codex runtime and App Server are available, the current account state, and the live model catalog. Model and reasoning-effort choices persist in this browser and apply to new generations and rerolls.
+- **Settings** manages canvas appearance, viewport recovery, new-frame defaults, Co-design fidelity, local project diagnostics, and the Codesign AI integration. Model and reasoning-effort choices persist in this browser and apply to new generations and rerolls.
 - Arrow keys nudge by 1 px; Shift+arrow nudges by 10 px.
 - Ctrl/⌘+Z undo; Ctrl/⌘+Shift+Z or Ctrl/⌘+Y redo.
 - Delete/Backspace removes selected objects; Escape exits Preview or Co-design.

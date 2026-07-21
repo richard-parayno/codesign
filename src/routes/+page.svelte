@@ -71,11 +71,11 @@
   } from '$lib/codesign/CodesignPanel.svelte';
   import type { FidelityStopView } from '$lib/codesign/FidelityStops.svelte';
   import ProcessPanel, { type ProcessEventView } from '$lib/codesign/ProcessPanel.svelte';
-  import AiSettingsDialog, {
+  import SettingsDialog, {
     type AiIntegrationView,
     type AiModelOption,
     type AiReasoningEffort,
-  } from '$lib/codesign/AiSettingsDialog.svelte';
+  } from '$lib/codesign/SettingsDialog.svelte';
 
   type Tool = 'select' | 'frame' | 'rectangle' | 'text' | 'connect';
   type EditorMode = 'edit' | 'codesign' | 'preview';
@@ -83,6 +83,7 @@
   const CANVAS_BACKGROUND_KEY = 'malleable.canvas-background.v1';
   const FRAME_SIZE_KEY = 'codesign.frame-size.v1';
   const AI_SETTINGS_KEY = 'codesign.ai-settings.v1';
+  const DEFAULT_FIDELITY_KEY = 'codesign.default-fidelity.v1';
   let tool: Tool = 'select';
   let selection: string[] = [];
   let error = '';
@@ -98,7 +99,7 @@
   let contextMenu: { x: number; y: number; nodeId?: string } | null = null;
   let contextMenuElement: HTMLDivElement;
   let shortcutsOpen = false;
-  let aiSettingsOpen = false;
+  let settingsOpen = false;
   let aiSettingsLoading = false;
   let aiSettingsError = '';
   let selectedAiModel = 'gpt-5.6-luna';
@@ -286,15 +287,18 @@
         selectedAiModel = savedAiSettings.model;
       if (['low', 'medium', 'high', 'xhigh', 'max'].includes(savedAiSettings?.effort ?? ''))
         selectedAiEffort = savedAiSettings!.effort!;
+      const savedFidelity = localStorage.getItem(DEFAULT_FIDELITY_KEY);
+      if (['wireframe', 'component', 'visual', 'production'].includes(savedFidelity ?? ''))
+        requestedFidelity = savedFidelity as Fidelity;
     } catch {
       // The editor still works when browser storage is unavailable.
     }
     void refreshProviderStatus();
     const keydown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
-      if (aiSettingsOpen && event.key === 'Escape') {
+      if (settingsOpen && event.key === 'Escape') {
         event.preventDefault();
-        closeAiSettings('keyboard');
+        closeSettings('keyboard');
         return;
       }
       if (
@@ -446,7 +450,7 @@
     if (control.closest('.canvas-toolbar')) return 'canvas-toolbar';
     if (control.closest('.context-menu')) return 'context-menu';
     if (control.closest('.shortcuts-dialog')) return 'shortcuts-overlay';
-    if (control.closest('.settings-dialog')) return 'ai-settings';
+    if (control.closest('.settings-dialog')) return 'settings';
     if (control.closest('.context-bar')) return 'selection-toolbar';
     if (control.closest('.codesign-panel')) return 'codesign';
     if (control.closest('.bottom-panel')) return 'bottom-panel';
@@ -594,16 +598,29 @@
       aiSettingsLoading = false;
     }
   }
-  function openAiSettings() {
+  function openSettings() {
     contextMenu = null;
     shortcutsOpen = false;
-    aiSettingsOpen = true;
-    logAction('codesign.ai-settings-opened', { backend });
-    void refreshAiIntegrationStatus();
+    settingsOpen = true;
+    logAction('settings.opened', { backend });
   }
-  function closeAiSettings(source: 'button' | 'keyboard' | 'backdrop') {
-    aiSettingsOpen = false;
-    logAction('codesign.ai-settings-closed', { source });
+  function closeSettings(source: 'button' | 'keyboard' | 'backdrop') {
+    settingsOpen = false;
+    logAction('settings.closed', { source });
+  }
+  function setDefaultFidelity(fidelity: Fidelity) {
+    requestedFidelity = fidelity;
+    try {
+      localStorage.setItem(DEFAULT_FIDELITY_KEY, fidelity);
+    } catch {
+      // Keep the in-memory preference when browser storage is unavailable.
+    }
+    logAction('settings.default-fidelity-changed', { fidelity });
+  }
+  function setFrameOrientation(orientation: FrameOrientation) {
+    if (orientation === frameOrientation) return;
+    swapFramePresetOrientation();
+    logAction('settings.frame-orientation-changed', { orientation, ...frameSize });
   }
   async function signInToCodex() {
     try {
@@ -627,7 +644,7 @@
       const value = await response.json();
       if (!response.ok) throw new Error(value.error?.message ?? 'Codex sign-out failed');
       await refreshProviderStatus();
-      if (aiSettingsOpen) await refreshAiIntegrationStatus();
+      if (settingsOpen) await refreshAiIntegrationStatus();
       notice = 'Signed out of Codex.';
       logAction('codesign.provider-logout', { provider: 'codex' });
     } catch (cause) {
@@ -2428,9 +2445,7 @@
           ><span class="button-icon" aria-hidden="true">↻</span>Refresh provider</button
         >
       {/if}
-      <button title="Open Codesign AI integration settings" onclick={openAiSettings}
-        >AI settings</button
-      >
+      <button title="Open editor and Codesign settings" onclick={openSettings}>Settings</button>
       <button title="Undo · Ctrl/⌘ Z" onclick={() => undo('toolbar')}
         ><span class="button-icon" aria-hidden="true">↶</span>Undo</button
       ><button title="Redo · Ctrl/⌘ Shift Z" onclick={() => redo('toolbar')}
@@ -3337,15 +3352,41 @@
       </div>
     {/if}
 
-    {#if aiSettingsOpen}
-      <AiSettingsDialog
+    {#if settingsOpen}
+      <SettingsDialog
+        {canvasBackground}
+        defaultCanvasBackground={DEFAULT_CANVAS_BACKGROUND}
+        framePresets={[...FRAME_PRESETS]}
+        {framePresetId}
+        {frameOrientation}
+        {frameSize}
+        {requestedFidelity}
+        projectSummary={{
+          name: activeProject?.name ?? 'Untitled design',
+          projectCount: projects.length,
+          screenCount: document.screens.length,
+          layerCount: Object.keys(document.nodes).length,
+          revision: document.revision,
+          storageMessage: storageWarning ?? 'Saved locally',
+        }}
         activeBackend={backend}
         integration={{ ...aiIntegration, models: aiModelOptions }}
         selectedModel={selectedAiModel}
         selectedEffort={selectedAiEffort}
         loading={aiSettingsLoading}
         errorMessage={aiSettingsError}
-        onClose={() => closeAiSettings('button')}
+        onClose={closeSettings}
+        onCanvasBackgroundChange={(color) => setCanvasBackground(color, 'settings')}
+        onResetCanvasBackground={() =>
+          setCanvasBackground(DEFAULT_CANVAS_BACKGROUND, 'settings-reset')}
+        onFramePresetChange={(presetId) => {
+          chooseFramePreset(presetId);
+          logAction('settings.frame-preset-changed', { presetId, ...frameSize });
+        }}
+        onFrameOrientationChange={setFrameOrientation}
+        onFidelityChange={setDefaultFidelity}
+        onResetViewport={() => resetViewport('settings')}
+        onAiSectionOpen={refreshAiIntegrationStatus}
         onRefresh={refreshAiIntegrationStatus}
         onModelChange={selectAiModel}
         onEffortChange={selectAiEffort}

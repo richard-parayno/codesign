@@ -1,10 +1,6 @@
 import type { Fidelity } from '$lib/model/types';
 
-type SavedFidelityStop = {
-  fidelity: Fidelity;
-  state: string;
-  representationId?: string;
-};
+export type CodesignStage = 'base' | 'wireframe' | 'component';
 
 export function normalizeCodesignFidelity(
   fidelity?: Fidelity,
@@ -14,11 +10,14 @@ export function normalizeCodesignFidelity(
     : 'wireframe';
 }
 
-/** A slider move must never replace the live canvas with an older revision of the same fidelity. */
-export function shouldNavigateSavedFidelity(stop: SavedFidelityStop, committedFidelity?: Fidelity) {
-  return Boolean(
-    stop.representationId &&
-    (stop.state === 'saved' || stop.state === 'versions') &&
-    normalizeCodesignFidelity(stop.fidelity) !== normalizeCodesignFidelity(committedFidelity),
-  );
+export type FidelityStageAction = 'stay-live' | 'inspect-candidate' | 'confirm-generation';
+
+/**
+ * Base is UI-only and always means the live canvas. Historical representations are never
+ * activated from this control because they contain whole-canvas revision snapshots.
+ */
+export function fidelityStageAction(stage: CodesignStage, state?: string): FidelityStageAction {
+  if (stage === 'base' || state === 'current' || state === 'unavailable') return 'stay-live';
+  if (state === 'candidate') return 'inspect-candidate';
+  return 'confirm-generation';
 }

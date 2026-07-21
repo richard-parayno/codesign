@@ -20,7 +20,6 @@
   } from '$lib/model/types';
   import {
     acceptCandidateChanges,
-    activateRevision,
     compareWithSource,
     effectiveFidelity,
     recordGenerationOutcome,
@@ -2945,15 +2944,6 @@
     const candidate = runCandidates.find((item) => item.fidelity === fidelity);
     if (candidate) selectCandidate(candidate.id);
   }
-  function navigateRepresentation(fidelity: Fidelity, representationId: string) {
-    requestedFidelity = fidelity;
-    const representation = document.representations[representationId];
-    if (!representation) return;
-    documentStore.replaceMetadata(activateRevision(document, representation.revisionId));
-    if (representation.rootNodeIds[0]) selection = [representation.rootNodeIds[0]];
-    codesignStatus = `${fidelity[0].toUpperCase() + fidelity.slice(1)} representation selected.`;
-    logAction('fidelity.navigated', { fidelity, representationId });
-  }
   function setSelectedFidelity(fidelity: Fidelity) {
     const node = selectedNodes[0];
     if (!node) return;
@@ -4015,7 +4005,7 @@
         observationScope={reviewObservationScope}
         {observationScopes}
         {fidelityStops}
-        {requestedFidelity}
+        fidelityResetKey={`${selection.join(',')}:${document.currentRevisionId}`}
         candidates={candidateViews}
         activeCandidateId={activeCandidate?.id}
         highlightedChangeId={highlightedChangeId || undefined}
@@ -4028,7 +4018,6 @@
         onScopePreviewChange={(open) => (scopePreviewActive = open)}
         onGenerate={generateCandidates}
         onCancel={cancelGeneration}
-        onNavigateFidelity={navigateRepresentation}
         onStageFidelity={stageFidelity}
         onInspectFidelityCandidate={inspectFidelityCandidate}
         onSelectCandidate={selectCandidate}
@@ -4814,7 +4803,7 @@
         <FidelityStops
           label={node.kind === 'frame' ? 'Frame representations' : 'Element representations'}
           stops={fidelityStops}
-          onNavigate={navigateRepresentation}
+          resetKey={`${node.id}:${document.currentRevisionId}`}
           onStageGeneration={stageFidelity}
           onInspectCandidate={inspectFidelityCandidate}
         />
@@ -4829,8 +4818,8 @@
               }}
             >
               <option value="">Inherit from containing frame</option>
-              <option value="wireframe">Wireframe</option>
-              <option value="component">Component</option>
+              <option value="wireframe">AI Draft</option>
+              <option value="component">AI Hi-Fi</option>
             </select>
           </label>
           {#if document.nodeFidelityOverrides[node.id]}

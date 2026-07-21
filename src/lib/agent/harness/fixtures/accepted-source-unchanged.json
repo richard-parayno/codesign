@@ -139,6 +139,7 @@
       "command": "candidate apply",
       "sessionId": "$session",
       "input": {
+        "candidateRevisionId": "revision-cli-source",
         "changes": [
           {
             "operation": {

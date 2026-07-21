@@ -130,6 +130,7 @@ describe('Canvas App Server tools', () => {
       namespace: null,
       tool: 'candidate_apply_changes',
       arguments: {
+        candidateRevisionId: 'revision-source',
         changes: [
           {
             operation: {

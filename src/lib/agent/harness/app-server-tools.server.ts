@@ -76,6 +76,7 @@ export const canvasToolInputSchemas = {
     .strict(),
   'candidate.apply_changes': z
     .object({
+      candidateRevisionId: z.string().min(1),
       changes: z
         .array(
           z

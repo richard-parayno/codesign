@@ -73,6 +73,12 @@
     isAdditiveSelectionModifier,
     selectionWithTarget,
   } from '$lib/editor/selection';
+  import {
+    constrainSidebarPair,
+    constrainSidebarWidth,
+    SIDEBAR_LAYOUT,
+    type SidebarSide,
+  } from '$lib/editor/sidebar-layout';
   import { logAction } from '$lib/debug/action-log';
   import {
     deriveCodesignGenerationTarget,
@@ -128,6 +134,7 @@
   const CANVAS_BACKGROUND_KEY = 'malleable.canvas-background.v1';
   const FRAME_SIZE_KEY = 'codesign.frame-size.v1';
   const AI_SETTINGS_KEY = 'codesign.ai-settings.v1';
+  const SIDEBAR_WIDTHS_KEY = 'codesign.sidebar-widths.v1';
   let tool: Tool = 'select';
   let selection: string[] = [];
   let error = '';
@@ -165,6 +172,14 @@
   let frameOrientation: FrameOrientation = 'landscape';
   let frameSize = { width: 1440, height: 1024 };
   let commandLabel = 'Ctrl';
+  let leftSidebarWidth: number = SIDEBAR_LAYOUT.left.defaultWidth;
+  let rightSidebarWidth: number = SIDEBAR_LAYOUT.right.defaultWidth;
+  let sidebarResize: {
+    side: SidebarSide;
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+  } | null = null;
   let layerDrag: {
     sourceId: string;
     targetId?: string;
@@ -472,6 +487,23 @@
         selectedAiModel = savedAiSettings.model;
       if (['low', 'medium', 'high', 'xhigh', 'max'].includes(savedAiSettings?.effort ?? ''))
         selectedAiEffort = savedAiSettings!.effort!;
+      const savedSidebarWidths = JSON.parse(localStorage.getItem(SIDEBAR_WIDTHS_KEY) ?? 'null') as {
+        left?: number;
+        right?: number;
+      } | null;
+      if (
+        savedSidebarWidths &&
+        Number.isFinite(savedSidebarWidths.left) &&
+        Number.isFinite(savedSidebarWidths.right)
+      ) {
+        const widths = constrainSidebarPair(
+          savedSidebarWidths.left!,
+          savedSidebarWidths.right!,
+          window.innerWidth,
+        );
+        leftSidebarWidth = widths.left;
+        rightSidebarWidth = widths.right;
+      }
     } catch {
       // The editor still works when browser storage is unavailable.
     }
@@ -610,21 +642,107 @@
       if (contextMenu && event.target instanceof Element && !event.target.closest('.context-menu'))
         contextMenu = null;
     };
+    const fitSidebarsToViewport = () => {
+      const widths = constrainSidebarPair(leftSidebarWidth, rightSidebarWidth, window.innerWidth);
+      leftSidebarWidth = widths.left;
+      rightSidebarWidth = widths.right;
+    };
     window.addEventListener('keydown', keydown);
     window.addEventListener('keyup', keyup);
     window.addEventListener('pointerdown', dismissContextMenu);
+    window.addEventListener('resize', fitSidebarsToViewport);
     return () => {
       if (viewportLogTimer) clearTimeout(viewportLogTimer);
       closeCodesignTelemetry();
       window.removeEventListener('keydown', keydown);
       window.removeEventListener('keyup', keyup);
       window.removeEventListener('pointerdown', dismissContextMenu);
+      window.removeEventListener('resize', fitSidebarsToViewport);
     };
   });
 
   function uid(prefix: string) {
     idCounter += 1;
     return `${prefix}-${Date.now().toString(36)}-${idCounter}`;
+  }
+  function currentSidebarWidth(side: SidebarSide) {
+    return side === 'left' ? leftSidebarWidth : rightSidebarWidth;
+  }
+  function setSidebarWidth(side: SidebarSide, proposedWidth: number) {
+    const viewportWidth = typeof window === 'undefined' ? 1440 : window.innerWidth;
+    const otherWidth = side === 'left' ? rightSidebarWidth : leftSidebarWidth;
+    const width = constrainSidebarWidth(side, proposedWidth, viewportWidth, otherWidth);
+    if (side === 'left') leftSidebarWidth = width;
+    else rightSidebarWidth = width;
+    return width;
+  }
+  function persistSidebarWidths() {
+    try {
+      localStorage.setItem(
+        SIDEBAR_WIDTHS_KEY,
+        JSON.stringify({ left: leftSidebarWidth, right: rightSidebarWidth }),
+      );
+    } catch {
+      // Keep the resized layout in memory when browser storage is unavailable.
+    }
+  }
+  function startSidebarResize(event: PointerEvent, side: SidebarSide) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    sidebarResize = {
+      side,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: currentSidebarWidth(side),
+    };
+  }
+  function updateSidebarResize(event: PointerEvent) {
+    if (!sidebarResize || sidebarResize.pointerId !== event.pointerId) return;
+    const movement = event.clientX - sidebarResize.startX;
+    setSidebarWidth(
+      sidebarResize.side,
+      sidebarResize.startWidth + (sidebarResize.side === 'left' ? movement : -movement),
+    );
+  }
+  function finishSidebarResize(event: PointerEvent) {
+    if (!sidebarResize || sidebarResize.pointerId !== event.pointerId) return;
+    const side = sidebarResize.side;
+    const target = event.currentTarget as HTMLElement;
+    if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
+    sidebarResize = null;
+    persistSidebarWidths();
+    logAction('layout.sidebar-resized', {
+      side,
+      width: currentSidebarWidth(side),
+      leftWidth: leftSidebarWidth,
+      rightWidth: rightSidebarWidth,
+    });
+  }
+  function resizeSidebarWithKeyboard(event: KeyboardEvent, side: SidebarSide) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const limits = SIDEBAR_LAYOUT[side];
+    const physicalDirection = event.key === 'ArrowLeft' ? -1 : 1;
+    const widthDirection = side === 'left' ? physicalDirection : -physicalDirection;
+    const proposedWidth =
+      event.key === 'Home'
+        ? limits.minWidth
+        : event.key === 'End'
+          ? limits.maxWidth
+          : currentSidebarWidth(side) +
+            widthDirection * SIDEBAR_LAYOUT.keyboardStep * (event.shiftKey ? 3 : 1);
+    const width = setSidebarWidth(side, proposedWidth);
+    persistSidebarWidths();
+    logAction('layout.sidebar-resized', {
+      source: 'keyboard',
+      side,
+      width,
+      leftWidth: leftSidebarWidth,
+      rightWidth: rightSidebarWidth,
+    });
   }
   function showError(message: string, title = 'Couldn’t apply change') {
     errorTitle = title;
@@ -3176,7 +3294,12 @@
 
 <svelte:window onclick={logControlClick} />
 
-<div class="app" class:preview>
+<div
+  class="app"
+  class:preview
+  class:resizing-sidebar={Boolean(sidebarResize)}
+  style={`--left-sidebar-width:${leftSidebarWidth}px;--right-sidebar-width:${rightSidebarWidth}px`}
+>
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark">C</span><strong>Codesign</strong><span class="document-name"
@@ -3213,7 +3336,36 @@
     </div>
   </header>
 
-  <aside class="leftbar">
+  <button
+    type="button"
+    class="sidebar-resizer left-resizer"
+    class:active={sidebarResize?.side === 'left'}
+    aria-label={`Resize left sidebar, currently ${leftSidebarWidth} pixels`}
+    aria-controls="left-sidebar"
+    title="Drag to resize the left sidebar"
+    onpointerdown={(event) => startSidebarResize(event, 'left')}
+    onpointermove={updateSidebarResize}
+    onpointerup={finishSidebarResize}
+    onpointercancel={finishSidebarResize}
+    onkeydown={(event) => resizeSidebarWithKeyboard(event, 'left')}
+    onclick={(event) => event.stopPropagation()}
+  ></button>
+  <button
+    type="button"
+    class="sidebar-resizer right-resizer"
+    class:active={sidebarResize?.side === 'right'}
+    aria-label={`Resize right sidebar, currently ${rightSidebarWidth} pixels`}
+    aria-controls="right-sidebar"
+    title="Drag to resize the right sidebar"
+    onpointerdown={(event) => startSidebarResize(event, 'right')}
+    onpointermove={updateSidebarResize}
+    onpointerup={finishSidebarResize}
+    onpointercancel={finishSidebarResize}
+    onkeydown={(event) => resizeSidebarWithKeyboard(event, 'right')}
+    onclick={(event) => event.stopPropagation()}
+  ></button>
+
+  <aside class="leftbar" id="left-sidebar">
     <section class="projects" aria-label="Projects">
       <label for="project-picker">Project</label>
       <select
@@ -4375,7 +4527,7 @@
     </section>
   </main>
 
-  <aside class="inspector">
+  <aside class="inspector" id="right-sidebar">
     <div class="inspector-tabs">
       <span>Properties</span>
     </div>
@@ -4859,10 +5011,56 @@
   }
   .app {
     height: 100vh;
+    position: relative;
     display: grid;
-    grid-template: 48px minmax(0, 1fr) / 232px minmax(0, 1fr) 390px;
+    grid-template:
+      48px minmax(0, 1fr) / var(--left-sidebar-width, 232px) minmax(0, 1fr)
+      var(--right-sidebar-width, 390px);
     background: #eef0f3;
     font-size: 13px;
+  }
+  .sidebar-resizer {
+    position: absolute;
+    top: 48px;
+    bottom: 0;
+    z-index: 19;
+    width: 9px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: col-resize;
+    touch-action: none;
+  }
+  .left-resizer {
+    left: calc(var(--left-sidebar-width, 232px) - 4px);
+  }
+  .right-resizer {
+    right: calc(var(--right-sidebar-width, 390px) - 4px);
+  }
+  .sidebar-resizer::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 4px;
+    width: 1px;
+    background: transparent;
+    transition:
+      width 100ms ease,
+      background 100ms ease,
+      transform 100ms ease;
+  }
+  .sidebar-resizer:hover::after,
+  .sidebar-resizer:focus-visible::after,
+  .sidebar-resizer.active::after {
+    width: 2px;
+    background: #7c3aed;
+    transform: translateX(-0.5px);
+  }
+  .resizing-sidebar,
+  .resizing-sidebar * {
+    cursor: col-resize !important;
+    user-select: none !important;
   }
   .topbar {
     grid-column: 1/-1;
@@ -4956,6 +5154,7 @@
   .leftbar {
     display: flex;
     flex-direction: column;
+    min-width: 0;
     border-right: 1px solid #cdd1d7;
     background: #f7f8fa;
     min-height: 0;
@@ -6011,6 +6210,7 @@
     overflow: auto;
   }
   .inspector {
+    min-width: 0;
     border-left: 1px solid #cdd1d7;
     background: #fafbfc;
     overflow: auto;
@@ -6273,9 +6473,6 @@
     outline-offset: 2px;
   }
   @media (max-width: 1200px) {
-    .app {
-      grid-template-columns: 205px minmax(0, 1fr) 340px;
-    }
     .brand {
       width: auto;
     }

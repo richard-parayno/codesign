@@ -2372,11 +2372,17 @@
     pan = { x: pan.x - horizontal * unit, y: pan.y - vertical * unit };
     scheduleViewportLog('scroll');
   }
-  async function openContextMenu(event: MouseEvent, node?: DesignNode) {
+  async function openContextMenu(
+    event: MouseEvent,
+    node?: DesignNode,
+    source: 'canvas' | 'layers' = 'canvas',
+  ) {
     event.preventDefault();
     event.stopPropagation();
     const target = node
-      ? (groupedCanvasContextTarget(document, node.id, selection) ?? node)
+      ? source === 'layers'
+        ? node
+        : (groupedCanvasContextTarget(document, node.id, selection) ?? node)
       : undefined;
     if (target && !selection.includes(target.id)) selection = [target.id];
     const width = 236;
@@ -2387,6 +2393,7 @@
       nodeId: target?.id,
     };
     logAction('context-menu.opened', {
+      source,
       target: target ? 'node' : 'canvas',
       hitNodeId: node?.id ?? '',
       nodeId: target?.id ?? '',
@@ -3299,6 +3306,7 @@
             ondragover={(event) => layerDragOver(event, row.node)}
             ondrop={(event) => layerDrop(event, row.node)}
             ondragend={() => (layerDrag = null)}
+            oncontextmenu={(event) => openContextMenu(event, row.node, 'layers')}
           >
             {#if layerCanCollapse(row.node)}<button
                 class="layer-action layer-collapse"

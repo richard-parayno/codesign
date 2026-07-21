@@ -26,7 +26,7 @@
     };
     runtime?: {
       detected: boolean;
-      source: 'project-pinned' | 'advanced-override';
+      source: 'path' | 'command-override';
       label: string;
     };
     configuration?: {

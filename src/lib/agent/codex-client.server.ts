@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { AuthMode } from '../../../.generated/codex-app-server/AuthMode';
 import type { PlanType } from '../../../.generated/codex-app-server/PlanType';
@@ -29,17 +29,15 @@ export const DEFAULT_CODEX_MODEL = 'gpt-5.6-luna';
 export const DEFAULT_CODEX_EFFORT = 'high';
 export const DEFAULT_CODEX_AGENT_TIMEOUT_MS = 180_000;
 
-/** Project-local executable from the exact @openai/codex version pinned in package.json. */
-export function pinnedCodexCommand(cwd = process.cwd()) {
-  return resolve(cwd, 'node_modules', '.bin', 'codex');
-}
-
-/** `codex` is retained as a legacy sentinel, not resolved through an arbitrary PATH entry. */
-export function resolveCodexCommand(advancedOverride?: string) {
-  const override = advancedOverride?.trim();
-  if (!override || override === 'codex') return pinnedCodexCommand();
-  if (override.includes('\0')) throw new Error('Codex command override contains an invalid byte');
-  return override;
+/**
+ * Returns the user-owned Codex executable. Bare commands are intentionally left bare so
+ * `spawn` resolves them through the server process's PATH; overrides remain one executable
+ * argument even when their path contains spaces.
+ */
+export function resolveCodexCommand(commandOverride?: string) {
+  const command = commandOverride?.trim() || 'codex';
+  if (command.includes('\0')) throw new Error('Codex command override contains an invalid byte');
+  return command;
 }
 
 type RpcMessage = {
@@ -231,7 +229,7 @@ export class CodexAppServer {
   };
 
   constructor(
-    private command = pinnedCodexCommand(),
+    private command = resolveCodexCommand(),
     private model = DEFAULT_CODEX_MODEL,
     private spawnProcess: SpawnFactory = spawn,
     private effort: ReasoningEffort = DEFAULT_CODEX_EFFORT,
@@ -933,11 +931,11 @@ declare global {
 }
 
 export function getCodexClient(
-  advancedCommandOverride?: string,
+  commandOverride?: string,
   model = DEFAULT_CODEX_MODEL,
   effort: ReasoningEffort = DEFAULT_CODEX_EFFORT,
 ) {
-  const command = resolveCodexCommand(advancedCommandOverride);
+  const command = resolveCodexCommand(commandOverride);
   const clients = (globalThis.__codesignCodexClients ??= new Map());
   // Keep model/effort turn-local, but replace an HMR-surviving transport whenever its structured
   // output contract changes. Otherwise an old class instance retains the old module's schema.

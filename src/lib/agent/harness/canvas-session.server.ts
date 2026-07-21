@@ -3,6 +3,7 @@ import { validateComponentBinding } from '$lib/design-system/manifest';
 import { applyOperation } from '$lib/model/operations';
 import {
   boundsSchema,
+  layoutForNode,
   operationSchema,
   type Bounds,
   type DesignDocument,
@@ -424,6 +425,92 @@ function validateScopedOperation(
   }
 }
 
+function differs(left: unknown, right: unknown) {
+  return JSON.stringify(left) !== JSON.stringify(right);
+}
+
+function nodeDiffers(left: DesignNode | undefined, right: DesignNode | undefined) {
+  if (!left || !right) return left !== right;
+  const leftComparable = clone(left);
+  const rightComparable = clone(right);
+  // applyOperation lazily initializes stable entity identity for every legacy node. That metadata
+  // is not a canvas mutation and must not make an otherwise scoped operation fail.
+  delete leftComparable.entityId;
+  delete rightComparable.entityId;
+  leftComparable.layout = layoutForNode(leftComparable);
+  rightComparable.layout = layoutForNode(rightComparable);
+  return differs(leftComparable, rightComparable);
+}
+
+function onlyStructuralParentFieldsChanged(before: DesignNode, after: DesignNode) {
+  const beforeComparable = clone(before);
+  const afterComparable = clone(after);
+  beforeComparable.childIds = [];
+  afterComparable.childIds = [];
+  beforeComparable.provenance = { actor: 'user', operationId: 'scope-check' };
+  afterComparable.provenance = { actor: 'user', operationId: 'scope-check' };
+  return !differs(beforeComparable, afterComparable);
+}
+
+/** Reject reducer side effects that escape the explicit write authority of the session. */
+function validateIndirectMutations(
+  session: StoredSession,
+  before: DesignDocument,
+  after: DesignDocument,
+  operation: DesignOperation,
+) {
+  const mutable = new Set([
+    ...session.target.mutationScope.existingNodeIds,
+    ...session.createdNodeIds,
+    ...(operation.type === 'create' ? [operation.node.id] : []),
+  ]);
+  const structuralParents = new Set(session.target.mutationScope.insertionParentIds);
+  const changedIds = new Set<string>();
+  for (const id of new Set([...Object.keys(before.nodes), ...Object.keys(after.nodes)]))
+    if (nodeDiffers(before.nodes[id], after.nodes[id])) changedIds.add(id);
+
+  const forbidden = [...changedIds].filter((id) => {
+    if (mutable.has(id)) return false;
+    const beforeNode = before.nodes[id];
+    const afterNode = after.nodes[id];
+    return !(
+      structuralParents.has(id) &&
+      beforeNode &&
+      afterNode &&
+      onlyStructuralParentFieldsChanged(beforeNode, afterNode)
+    );
+  });
+  if (forbidden.length)
+    throw new CanvasSessionError(
+      'indirect-scope-violation',
+      'Candidate operation would indirectly change nodes outside the mutation scope',
+      [
+        {
+          code: 'indirect-scope-violation',
+          message: 'Layout reflow or ancestor geometry would change nodes without write authority.',
+          nodeIds: forbidden.slice(0, 50),
+          repair:
+            'Restrict the operation or ask the designer to select the affected container and siblings.',
+        },
+      ],
+    );
+  const changedPins = [...session.pinnedNodeIds].filter((id) =>
+    nodeDiffers(before.nodes[id], after.nodes[id]),
+  );
+  if (changedPins.length)
+    throw new CanvasSessionError(
+      'pinned-node',
+      'Candidate operation would indirectly change a pinned node',
+      [
+        {
+          code: 'pinned-node',
+          message: 'Pinned node design state must remain unchanged in the candidate.',
+          nodeIds: changedPins,
+        },
+      ],
+    );
+}
+
 export class CanvasSessionService implements CanvasSessionServiceContract {
   private readonly sessions = new Map<string, StoredSession>();
   private disposed = false;
@@ -802,8 +889,12 @@ export class CanvasSessionService implements CanvasSessionServiceContract {
       simulation.changes = [...session.changes, ...staged];
       validateScopedOperation(simulation, change.operation, change.dependencyIds);
       try {
-        candidate = applyOperation(candidate, change.operation, this.now());
+        const before = candidate;
+        const after = applyOperation(candidate, change.operation, this.now());
+        validateIndirectMutations(simulation, before, after, change.operation);
+        candidate = after;
       } catch (cause) {
+        if (cause instanceof CanvasSessionError) throw cause;
         throw new CanvasSessionError(
           'operation-invalid',
           cause instanceof Error ? cause.message : 'Candidate operation is invalid',

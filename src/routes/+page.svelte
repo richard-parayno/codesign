@@ -309,6 +309,12 @@
     ? document.revisions[activeCandidate.sourceRevisionId]?.snapshot
     : undefined;
   $: ghostSourceSnapshot = liveCandidateDocument ? canvasSnapshot(document) : sourceSnapshot;
+  $: if (
+    loadingCandidate &&
+    activeGenerationSourceRevisionId &&
+    document.currentRevisionId !== activeGenerationSourceRevisionId
+  )
+    abortGenerationForSourceDrift();
   $: renderedNodes =
     compareSourceActive && sourceSnapshot
       ? orderedScreenNodes(sourceSnapshot, document.activeScreenId)
@@ -597,17 +603,9 @@
       activity.tool === 'candidate.apply_changes' &&
       liveCandidateDocument
     ) {
-      if (document.currentRevisionId !== activeGenerationSourceRevisionId) {
-        const requestId = activeTelemetryRequestId;
-        if (requestId)
-          void fetch('/api/agent', {
-            method: 'DELETE',
-            headers: { 'x-codesign-request-id': requestId },
-          });
-        generationController?.abort();
-        liveCandidateDocument = null;
-        codesignStatus = 'The source design changed. Run Codesign again from the new revision.';
-      } else {
+      if (document.currentRevisionId !== activeGenerationSourceRevisionId)
+        abortGenerationForSourceDrift();
+      else {
         const argumentsValue = activity.arguments as { changes?: Array<{ operation?: unknown }> };
         for (const change of argumentsValue?.changes ?? []) {
           const operation = operationSchema.safeParse(change.operation);
@@ -2809,6 +2807,26 @@
     );
     logAction('codesign.cancelled', { focusNodeIds: selection });
   }
+  function abortGenerationForSourceDrift() {
+    if (!loadingCandidate || !activeGenerationSourceRevisionId) return;
+    const requestId = activeTelemetryRequestId;
+    if (requestId)
+      void fetch('/api/agent', {
+        method: 'DELETE',
+        headers: { 'x-codesign-request-id': requestId },
+      });
+    generationController?.abort();
+    generationRequestId += 1;
+    generationController = null;
+    loadingCandidate = false;
+    liveCandidateDocument = null;
+    activeGenerationSourceRevisionId = '';
+    codesignStatus = 'The source design changed. Run Codesign again from the new revision.';
+    logAction('codesign.source-drifted', {
+      requestId,
+      sourceRevisionId: document.currentRevisionId,
+    });
+  }
   function selectCandidate(candidateId: string) {
     const candidate = document.candidates[candidateId];
     if (!candidate) return;
@@ -2846,10 +2864,15 @@
   function toggleAtomicPin(changeId: string, pinned: boolean) {
     let next = document;
     const changedIds: string[] = [];
+    const candidate = activeCandidate;
     const visit = (id: string) => {
       const change = next.atomicChanges[id];
       if (!change || changedIds.includes(id)) return;
       if (pinned) change.dependencyIds.forEach(visit);
+      else
+        candidate?.atomicChangeIds
+          .filter((candidateId) => next.atomicChanges[candidateId]?.dependencyIds.includes(id))
+          .forEach(visit);
       next = setAtomicChangePinned(next, id, pinned);
       changedIds.push(id);
     };

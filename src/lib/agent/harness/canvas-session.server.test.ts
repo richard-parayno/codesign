@@ -243,6 +243,67 @@ describe('CanvasSessionService', () => {
     await service.dispose();
   });
 
+  it('rejects indirect ancestor and sibling mutations caused by reducer reflow', async () => {
+    const document = sourceDocument();
+    const service = new CanvasSessionService();
+    const narrow = input(document);
+    narrow.target.mutationScope.existingNodeIds = ['editable'];
+    narrow.target.mutationScope.insertionParentIds = ['group'];
+    const session = await service.createSession(narrow);
+
+    await expect(
+      service.dispatch(session.id, 'candidate.apply_changes', {
+        candidateRevisionId: session.candidateRevisionId,
+        changes: [
+          {
+            operation: {
+              id: 'move-with-ancestor-side-effect',
+              type: 'move',
+              actor: 'agent',
+              targetIds: ['editable'],
+              dx: 8,
+              dy: 0,
+            },
+            evidenceNodeIds: ['editable'],
+            summary: 'Moved the editable child.',
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'indirect-scope-violation' });
+
+    const layoutDocument = sourceDocument();
+    layoutDocument.nodes.group.layout = {
+      mode: 'horizontal',
+      gap: 12,
+      padding: 8,
+      align: 'start',
+      justify: 'start',
+      widthMode: 'fixed',
+      heightMode: 'fixed',
+      gridColumns: 2,
+    };
+    const layoutSession = await service.createSession(input(layoutDocument));
+    await expect(
+      service.dispatch(layoutSession.id, 'candidate.apply_changes', {
+        candidateRevisionId: layoutSession.candidateRevisionId,
+        changes: [
+          {
+            operation: {
+              id: 'style-triggering-layout-reflow',
+              type: 'style',
+              actor: 'agent',
+              targetIds: ['group'],
+              patch: { radius: 10 },
+            },
+            evidenceNodeIds: ['group'],
+            summary: 'Styled the editable group.',
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'indirect-scope-violation' });
+    await service.dispose();
+  });
+
   it('supports dependency-ordered nested creates', async () => {
     const service = new CanvasSessionService();
     const session = await service.createSession(input(sourceDocument()));

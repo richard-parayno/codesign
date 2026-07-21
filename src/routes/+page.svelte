@@ -94,6 +94,7 @@
     instantiateProjectComponent,
   } from '$lib/editor/project-components';
   import CodesignActivity from '$lib/codesign/CodesignActivity.svelte';
+  import CodesignPromptInspector from '$lib/codesign/CodesignPromptInspector.svelte';
   import InlineCodesignToolbar, {
     type CandidateView,
     type ObservationScopeView,
@@ -118,11 +119,12 @@
   let tool: Tool = 'select';
   let selection: string[] = [];
   let error = '';
+  let errorTitle = 'Couldn’t apply change';
   let notice = '';
   let editorMode: EditorMode = 'edit';
   let preview = false;
   let bottomOpen = false;
-  let bottomTab: 'process' | 'activity' | 'operations' | 'code' = 'process';
+  let bottomTab: 'process' | 'activity' | 'prompt' | 'operations' | 'code' = 'process';
   let zoom = 1;
   let pan = { x: 0, y: 0 };
   let canvasBackground = DEFAULT_CANVAS_BACKGROUND;
@@ -338,6 +340,9 @@
   $: latestCodesignUsage = [...codesignActivityEvents]
     .reverse()
     .find((event) => event.usage)?.usage;
+  $: latestRenderedCodesignPrompt = [...codesignActivityEvents]
+    .reverse()
+    .find((event) => event.renderedPrompt)?.renderedPrompt;
   $: codesignActivityLabel = latestCodesignActivity
     ? {
         preparing: 'Preparing',
@@ -545,6 +550,10 @@
   function uid(prefix: string) {
     idCounter += 1;
     return `${prefix}-${Date.now().toString(36)}-${idCounter}`;
+  }
+  function showError(message: string, title = 'Couldn’t apply change') {
+    errorTitle = title;
+    error = message;
   }
   function sortedIdKey(ids: string[]) {
     return [...ids].sort().join(':');
@@ -771,7 +780,10 @@
         : `Open this sign-in URL: ${value.login.authUrl}`;
       logAction('codesign.provider-login-started', { provider: 'codex' });
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : 'Codex sign-in could not start';
+      showError(
+        cause instanceof Error ? cause.message : 'Codex sign-in could not start',
+        'Couldn’t update Codex integration',
+      );
       logAction('codesign.provider-login-failed', { provider: 'codex', message: error });
     }
   }
@@ -785,7 +797,10 @@
       notice = 'Signed out of Codex.';
       logAction('codesign.provider-logout', { provider: 'codex' });
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : 'Codex sign-out failed';
+      showError(
+        cause instanceof Error ? cause.message : 'Codex sign-out failed',
+        'Couldn’t update Codex integration',
+      );
     }
   }
   function undo(source: 'toolbar' | 'keyboard') {
@@ -847,7 +862,7 @@
     }
     const project = documentStore.createProject(name);
     if (!project) {
-      error = 'Enter a project name';
+      showError('Enter a project name', 'Couldn’t create project');
       logAction('project.create-rejected', {
         fromProjectId,
         reason: 'empty-name',
@@ -867,7 +882,7 @@
     const name = prompt('Rename this project', activeProject.name);
     if (name === null || name.trim() === activeProject.name) return;
     if (!documentStore.renameProject(activeProject.id, name)) {
-      error = 'Enter a project name';
+      showError('Enter a project name', 'Couldn’t rename project');
       return;
     }
     logAction('project.renamed', {
@@ -954,7 +969,7 @@
         targetCount: targetIds.length,
       });
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : 'That operation could not be applied';
+      showError(cause instanceof Error ? cause.message : 'That operation could not be applied');
       logAction('operation.failed', {
         type: operation.type,
         actor: operation.actor,
@@ -980,7 +995,7 @@
       });
       return true;
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : `${label} could not be applied`;
+      showError(cause instanceof Error ? cause.message : `${label} could not be applied`);
       logAction('operation.failed', { type: label, actor: 'user', baseRevision, message: error });
       return false;
     }
@@ -1621,7 +1636,10 @@
   }
   function createProjectComponentFrom(source: DesignNode | undefined) {
     if (!canCreateProjectComponent(source) || !source) {
-      error = 'Select one frame or group to create a reusable project component.';
+      showError(
+        'Select one frame or group to create a reusable project component.',
+        'Couldn’t create component',
+      );
       return;
     }
     const name = window.prompt('Component name', source.name)?.trim();
@@ -2494,7 +2512,7 @@
     editingLayerSource = 'layers';
     if (!commit || !nodeId) return;
     if (!name) {
-      error = 'Layer names cannot be empty';
+      showError('Layer names cannot be empty', 'Couldn’t rename layer');
       logAction('layer.rename-rejected', { nodeId, reason: 'empty-name' });
       return;
     }
@@ -2571,12 +2589,18 @@
 
   async function generateCandidates(action: CodesignAction, rerollCandidateId?: string) {
     if (!selection.length) {
-      error = 'Select a frame or object before generating a candidate';
+      showError(
+        'Select a frame or object before generating a candidate',
+        'Couldn’t generate proposal',
+      );
       logAction('codesign.request-rejected', { action, message: error });
       return;
     }
     if (!generationCanGenerate) {
-      error = 'The selection is pinned or has no editable insertion region';
+      showError(
+        'The selection is pinned or has no editable insertion region',
+        'Couldn’t generate proposal',
+      );
       logAction('codesign.request-rejected', { action, message: error });
       return;
     }
@@ -2698,7 +2722,10 @@
     } catch (cause) {
       if (requestId !== generationRequestId) return;
       if (controller.signal.aborted) return;
-      error = cause instanceof Error ? cause.message : 'Codesign generation failed';
+      showError(
+        cause instanceof Error ? cause.message : 'Codesign generation failed',
+        'Couldn’t generate proposal',
+      );
       codesignStatus = error;
       documentStore.replaceMetadata(
         recordGenerationOutcome(document, 'generation-failed', { action, message: error }),
@@ -2800,7 +2827,7 @@
         : `Accepted all ${acceptedIds.length} changes in one revision.`;
       logAction('codesign.accepted', { candidateId, acceptedIds, rejectedIds });
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : 'Candidate could not be accepted';
+      showError(cause instanceof Error ? cause.message : 'Candidate could not be accepted');
       codesignStatus = error;
     }
   }
@@ -2841,7 +2868,7 @@
       codesignStatus = 'Recorded changes reapplied from their source revision.';
       logAction('codesign.replayed', { candidateId });
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : 'Recorded changes could not be reapplied';
+      showError(cause instanceof Error ? cause.message : 'Recorded changes could not be reapplied');
     }
   }
   function selectObservationScope(scope: ObservationScope) {
@@ -4249,7 +4276,7 @@
 
     <section class:open={bottomOpen} class="bottom-panel">
       <div class="bottom-tabs">
-        {#each ['process', 'activity', 'operations', 'code'] as tab}<button
+        {#each ['process', 'activity', 'prompt', 'operations', 'code'] as tab}<button
             class:active={bottomTab === tab}
             onclick={() => {
               bottomTab = tab as typeof bottomTab;
@@ -4259,9 +4286,11 @@
               ? 'Process history'
               : tab === 'activity'
                 ? codesignActivityTabLabel
-                : tab === 'operations'
-                  ? 'Applied operations'
-                  : 'Svelte projection'}</button
+                : tab === 'prompt'
+                  ? 'Codesign prompt'
+                  : tab === 'operations'
+                    ? 'Applied operations'
+                    : 'Svelte projection'}</button
           >{/each}<button class="panel-toggle" onclick={() => (bottomOpen = !bottomOpen)}
           >{bottomOpen ? 'Hide panel' : 'Show panel'}
           <span aria-hidden="true">{bottomOpen ? '⌄' : '⌃'}</span></button
@@ -4282,6 +4311,8 @@
             />
           {:else if bottomTab === 'activity'}
             <CodesignActivity events={codesignActivityEvents} />
+          {:else if bottomTab === 'prompt'}
+            <CodesignPromptInspector renderedPrompt={latestRenderedCodesignPrompt} />
           {:else if bottomTab === 'operations'}<div class="history">
               {#each [...document.operations].reverse() as operation}<div>
                   <i class:agent={operation.actor === 'agent'}
@@ -4653,7 +4684,7 @@
       <strong>Project recovery notice</strong><span>{storageWarning}</span>
     </div>{/if}
   {#if error}<div class="error-toast">
-      <strong>Couldn’t apply change</strong><span>{error}</span><button onclick={() => (error = '')}
+      <strong>{errorTitle}</strong><span>{error}</span><button onclick={() => (error = '')}
         >Dismiss</button
       >
     </div>{/if}

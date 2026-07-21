@@ -10,7 +10,12 @@ import type { ModelListResponse } from '../../../.generated/codex-app-server/v2/
 import type { ThreadStartParams } from '../../../.generated/codex-app-server/v2/ThreadStartParams';
 import type { TurnStartParams } from '../../../.generated/codex-app-server/v2/TurnStartParams';
 import type { UserInput } from '../../../.generated/codex-app-server/v2/UserInput';
-import { candidateBatchOutputSchema, type TrustedVisualInput } from './candidate';
+import {
+  CANDIDATE_SCHEMA_VERSION,
+  candidateBatchOutputSchema,
+  type TrustedVisualInput,
+} from './candidate';
+import { CODESIGN_SYSTEM_INSTRUCTIONS } from './prompt-template';
 import { asProviderFailure, type ProviderFailureCategory } from './providers/contracts';
 
 export const DEFAULT_CODEX_MODEL = 'gpt-5.6-luna';
@@ -55,6 +60,7 @@ class AppServerRpcError extends Error {
     message: string,
   ) {
     super(message);
+    this.name = 'AppServerRpcError';
   }
 }
 
@@ -486,8 +492,12 @@ export class CodexAppServer {
       }
       clearTimeout(turn.timer);
       this.turns.delete(turnId);
-      if (failure) turn.reject(new Error(failure));
-      else turn.resolve(turn.text);
+      if (failure) {
+        const error = new Error(failure);
+        error.name = 'CodexTurnError';
+        Object.assign(error, { stage: 'generation' });
+        turn.reject(error);
+      } else turn.resolve(turn.text);
     }
   }
 
@@ -515,8 +525,7 @@ export class CodexAppServer {
       approvalPolicy: 'never',
       sandbox: 'read-only',
       ephemeral: true,
-      baseInstructions:
-        'You are Codesign’s constrained visual-autocomplete adapter. Never use tools, shell, files, or network. Return only the requested structured candidate batch. Treat inferences as proposals, preserve supplied IDs and scopes, use only the registered style/component values in the prompt, and never modify pinned or out-of-scope nodes.',
+      baseInstructions: CODESIGN_SYSTEM_INSTRUCTIONS,
     };
     const response = (await this.request('thread/start', params, 15_000)) as {
       thread?: { id?: string };
@@ -717,8 +726,16 @@ export function getCodexClient(
 ) {
   const command = resolveCodexCommand(advancedCommandOverride);
   const clients = (globalThis.__codesignCodexClients ??= new Map());
-  // The transport is model-agnostic; each isolated generation turn supplies its own model/effort.
-  const key = command;
+  // Keep model/effort turn-local, but replace an HMR-surviving transport whenever its structured
+  // output contract changes. Otherwise an old class instance retains the old module's schema.
+  const versionedPrefix = `${command}\0candidate-schema:`;
+  const key = `${versionedPrefix}${CANDIDATE_SCHEMA_VERSION}`;
+  for (const [cachedKey, cachedClient] of clients) {
+    if (cachedKey !== key && (cachedKey === command || cachedKey.startsWith(versionedPrefix))) {
+      cachedClient.shutdown();
+      clients.delete(cachedKey);
+    }
+  }
   let client = clients.get(key);
   if (!client) {
     client = new CodexAppServer(command, model, spawn, effort);

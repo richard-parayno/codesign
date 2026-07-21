@@ -6,7 +6,6 @@ import {
   SUPPORTED_ACTIONS,
   createGenerationRun,
   candidateToDocumentCoordinates,
-  operationToSceneCoordinates,
   generationRequestSchema,
   normalizeCandidateBatch,
   validateGenerationRequest,
@@ -25,6 +24,7 @@ import {
   buildSceneContext,
   type SceneContext,
 } from '$lib/agent/scene-context';
+import { renderCodesignPrompt } from '$lib/agent/prompt-template';
 import type { CodesignTelemetryEffort, CodesignTokenUsage } from '$lib/agent/telemetry';
 import {
   latestCodesignTelemetry,
@@ -36,6 +36,7 @@ import {
   withTrustedVisualSnapshot,
   type TrustedVisualSnapshot,
 } from '$lib/agent/visual-snapshot.server';
+import { codesignFailureDiagnostic, type CodesignFailureStage } from '$lib/agent/failure';
 import type { CanvasSnapshot, GenerationRun } from '$lib/model/types';
 
 function canvasSnapshot(request: GenerationRequest): CanvasSnapshot {
@@ -96,28 +97,6 @@ function sceneContext(request: GenerationRequest, trusted?: TrustedVisualSnapsho
   });
 }
 
-function generationPrompt(request: GenerationRequest, run: GenerationRun, context: SceneContext) {
-  return [
-    'Complete the supplied design scene with one coherent candidate batch.',
-    'Use the visual snapshot and canonical scene context together. Preserve the existing visual language; do not assume a navbar, dashboard, or any particular product pattern.',
-    'Return at least three individually useful atomic changes using only create, style, update-node, move, and resize.',
-    'Every new ID must begin with idNamespace plus a hyphen. Respect mutationScope exactly, never mutate pinned nodes, keep creates inside an allowed insertion parent and editable region, and order nested creates after their parent dependency.',
-    'Ground observations in observable node IDs. Phrase inferred intent as a proposal, not as a discovered fact.',
-    'Preserve every pinnedAtomicChange exactly once with preservedFromAtomicChangeId and fresh namespaced IDs where required.',
-    JSON.stringify({
-      idNamespace: run.id,
-      pinnedNodeIds: run.pinnedNodeIds,
-      pinnedAtomicChanges: request.pinnedAtomicChanges.map((change) => ({
-        id: change.id,
-        operation: operationToSceneCoordinates(change.operation, context.coordinateSpace.origin),
-        dependencyIds: change.dependencyIds,
-        trace: change.trace,
-      })),
-      scene: context,
-    }),
-  ].join('\n');
-}
-
 function runMetadata(
   request: GenerationRequest,
   context: SceneContext,
@@ -146,11 +125,17 @@ function runMetadata(
   });
 }
 
-function errorResponse(cause: unknown, requestId: string) {
+function errorResponse(
+  cause: unknown,
+  requestId: string,
+  providerFailure = asProviderFailure(cause),
+) {
   if (cause instanceof CandidateValidationError)
     return json(
       {
+        requestId,
         message: cause.message,
+        diagnostic: providerFailure.diagnostic,
         telemetry: latestCodesignTelemetry(requestId),
         ...(cause.message.includes('not available') ? { supportedActions: SUPPORTED_ACTIONS } : {}),
       },
@@ -158,10 +143,14 @@ function errorResponse(cause: unknown, requestId: string) {
     );
   if (cause instanceof VisualSnapshotError)
     return json(
-      { message: cause.message, telemetry: latestCodesignTelemetry(requestId) },
+      {
+        requestId,
+        message: cause.message,
+        diagnostic: providerFailure.diagnostic,
+        telemetry: latestCodesignTelemetry(requestId),
+      },
       { status: cause.code === 'cancelled' ? 499 : 400 },
     );
-  const failure = asProviderFailure(cause);
   const status = {
     'missing-login': 401,
     'model-unavailable': 422,
@@ -169,11 +158,13 @@ function errorResponse(cause: unknown, requestId: string) {
     cancelled: 499,
     'protocol-failure': 502,
     unavailable: 503,
-  }[failure.category];
+  }[providerFailure.category];
   return json(
     {
-      message: failure.message,
-      category: failure.category,
+      requestId,
+      message: providerFailure.message,
+      category: providerFailure.category,
+      diagnostic: providerFailure.diagnostic,
       telemetry: latestCodesignTelemetry(requestId),
     },
     { status },
@@ -185,15 +176,33 @@ export async function POST({ request }) {
   const startedAt = Date.now();
   const parsed = generationRequestSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
+    const issues = parsed.error.issues.slice(0, 5).map((issue) => issue.message);
+    const diagnostic = {
+      stage: 'request-validation' as const,
+      message: issues.join('; ') || 'Invalid Codesign generation request',
+      errorName: 'ZodError',
+    };
+    const durationMs = Date.now() - startedAt;
+    console.error(
+      `[codesign:ai:error] ${JSON.stringify({
+        requestId,
+        category: 'protocol-failure',
+        ...diagnostic,
+        durationMs,
+      })}`,
+    );
     publishCodesignTelemetry(requestId, {
       phase: 'failed',
       message: 'The Codesign request was invalid.',
-      durationMs: Date.now() - startedAt,
+      durationMs,
+      failure: { category: 'protocol-failure', ...diagnostic },
     });
     return json(
       {
+        requestId,
         message: 'Invalid Codesign generation request',
-        issues: parsed.error.issues.slice(0, 5).map((issue) => issue.message),
+        issues,
+        diagnostic,
         telemetry: latestCodesignTelemetry(requestId),
       },
       { status: 400 },
@@ -202,12 +211,14 @@ export async function POST({ request }) {
   const input = parsed.data;
   let latestUsage: CodesignTokenUsage | undefined;
   let transportDurationMs: number | undefined;
+  let failureStage: CodesignFailureStage = 'request-validation';
   try {
     publishCodesignTelemetry(requestId, {
       phase: 'preparing',
       message: 'Preparing scene context for Codesign.',
     });
     validateGenerationRequest(input);
+    failureStage = 'provider-status';
     const settings = applyProviderOptions(providerSettings(), input.providerOptions);
     const telemetryEffort = settings.effort as CodesignTelemetryEffort;
     const provider = createProvider(settings);
@@ -216,6 +227,7 @@ export async function POST({ request }) {
     if (!status.connected) throw new ProviderFailure('missing-login');
     const runId = `generation-${randomUUID()}`;
     const createdAt = Date.now();
+    failureStage = 'snapshot-validation';
     if (!input.visualSnapshot)
       throw new CandidateValidationError('AI scene generation requires a visual snapshot');
 
@@ -230,9 +242,10 @@ export async function POST({ request }) {
             'Visual snapshot dimensions do not match the uploaded image',
             'invalid-dimensions',
           );
+        failureStage = 'prompt-construction';
         const context = sceneContext(input, trusted);
         const run = runMetadata(input, context, settings, runId, createdAt, trusted);
-        const prompt = generationPrompt(input, run, context);
+        const prompt = renderCodesignPrompt(input, run, context);
         publishCodesignTelemetry(requestId, {
           phase: 'prompt-sent',
           message: 'Codesign prompt sent to Codex.',
@@ -241,7 +254,9 @@ export async function POST({ request }) {
           promptVersion: PROMPT_VERSION,
           contextNodeCount: context.nodes.length,
           promptCharacters: prompt.length,
+          renderedPrompt: prompt,
         });
+        failureStage = 'generation';
         const relativeWire = await provider.generate({
           request: input,
           run,
@@ -274,6 +289,7 @@ export async function POST({ request }) {
             transportDurationMs = event.durationMs;
           },
         });
+        failureStage = 'candidate-validation';
         publishCodesignTelemetry(requestId, {
           phase: 'validating',
           message: 'Validating the structured Codesign proposal.',
@@ -307,21 +323,36 @@ export async function POST({ request }) {
     );
     return json(response);
   } catch (cause) {
-    const failure =
-      cause instanceof VisualSnapshotError && cause.code === 'cancelled'
-        ? 'cancelled'
-        : asProviderFailure(cause).category === 'cancelled'
-          ? 'cancelled'
-          : 'failed';
+    const providerFailure =
+      cause instanceof CandidateValidationError
+        ? new ProviderFailure('protocol-failure', codesignFailureDiagnostic(cause, failureStage))
+        : cause instanceof VisualSnapshotError
+          ? new ProviderFailure(
+              cause.code === 'cancelled' ? 'cancelled' : 'protocol-failure',
+              codesignFailureDiagnostic(cause, failureStage),
+            )
+          : asProviderFailure(cause, failureStage);
+    const telemetryPhase = providerFailure.category === 'cancelled' ? 'cancelled' : 'failed';
+    const diagnostic = providerFailure.diagnostic ?? codesignFailureDiagnostic(cause, failureStage);
+    const durationMs = Date.now() - startedAt;
+    console.error(
+      `[codesign:ai:error] ${JSON.stringify({
+        requestId,
+        category: providerFailure.category,
+        ...diagnostic,
+        durationMs,
+      })}`,
+    );
     publishCodesignTelemetry(requestId, {
-      phase: failure,
+      phase: telemetryPhase,
       message:
-        failure === 'cancelled'
+        telemetryPhase === 'cancelled'
           ? 'Codesign generation was cancelled.'
           : 'Codesign generation could not be completed.',
-      durationMs: Date.now() - startedAt,
+      durationMs,
+      failure: { category: providerFailure.category, ...diagnostic },
       ...(latestUsage ? { usage: latestUsage } : {}),
     });
-    return errorResponse(cause, requestId);
+    return errorResponse(cause, requestId, providerFailure);
   }
 }

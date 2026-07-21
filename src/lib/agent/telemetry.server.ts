@@ -4,6 +4,8 @@ import type {
   CodesignTelemetryPhase,
   CodesignTokenUsage,
 } from './telemetry';
+import type { CodesignFailureDiagnostic } from './failure';
+import type { ProviderFailureCategory } from './providers/contracts';
 
 type TelemetryDraft = {
   phase: CodesignTelemetryPhase;
@@ -16,6 +18,8 @@ type TelemetryDraft = {
   outputCharacters?: number;
   durationMs?: number;
   usage?: CodesignTokenUsage;
+  renderedPrompt?: string;
+  failure?: CodesignFailureDiagnostic & { category: ProviderFailureCategory };
 };
 
 type Channel = {
@@ -77,8 +81,9 @@ export function publishCodesignTelemetry(requestId: string, draft: TelemetryDraf
     channel.events.splice(0, channel.events.length - MAX_EVENTS);
   channel.touchedAt = event.timestamp;
 
-  // Deliberately logs metadata only: never prompt text, scene contents, image paths, or accounts.
-  console.info(`[codesign:ai] ${JSON.stringify(event)}`);
+  // The rendered prompt is inspectable in the originating editor, but is not duplicated to logs.
+  const { renderedPrompt: _renderedPrompt, ...loggableEvent } = event;
+  console.info(`[codesign:ai] ${JSON.stringify(loggableEvent)}`);
   for (const listener of channel.listeners) {
     try {
       listener(event);

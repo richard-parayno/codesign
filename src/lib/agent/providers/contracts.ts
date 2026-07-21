@@ -2,6 +2,11 @@ import type { ReasoningEffort } from '../../../../.generated/codex-app-server/Re
 import type { AgentCandidateBatch, GenerationRequest, TrustedVisualInput } from '../candidate';
 import type { GenerationRun } from '$lib/model/types';
 import type { CodexTransportTelemetryEvent } from '../codex-client.server';
+import {
+  codesignFailureDiagnostic,
+  type CodesignFailureDiagnostic,
+  type CodesignFailureStage,
+} from '../failure';
 
 export type ProviderId = 'codex';
 export type ProviderFailureCategory =
@@ -22,19 +27,26 @@ const publicFailureMessages: Record<ProviderFailureCategory, string> = {
 };
 
 export class ProviderFailure extends Error {
-  constructor(readonly category: ProviderFailureCategory) {
+  constructor(
+    readonly category: ProviderFailureCategory,
+    readonly diagnostic?: CodesignFailureDiagnostic,
+  ) {
     super(publicFailureMessages[category]);
     this.name = 'ProviderFailure';
   }
 }
 
 /** Converts transport errors to a fixed, non-secret UI-safe category and message. */
-export function asProviderFailure(cause: unknown): ProviderFailure {
+export function asProviderFailure(
+  cause: unknown,
+  stage: CodesignFailureStage = 'unknown',
+): ProviderFailure {
   if (cause instanceof ProviderFailure) return cause;
   const message =
     cause instanceof Error ? cause.message.toLowerCase() : String(cause).toLowerCase();
+  const diagnostic = codesignFailureDiagnostic(cause, stage);
   if (message.includes('cancel') || message.includes('abort') || message.includes('interrupt'))
-    return new ProviderFailure('cancelled');
+    return new ProviderFailure('cancelled', diagnostic);
   if (
     message.includes('login') ||
     message.includes('sign in') ||
@@ -42,7 +54,7 @@ export function asProviderFailure(cause: unknown): ProviderFailure {
     message.includes('unauthorized') ||
     message.includes('401')
   )
-    return new ProviderFailure('missing-login');
+    return new ProviderFailure('missing-login', diagnostic);
   if (
     message.includes('model') &&
     (message.includes('unavailable') ||
@@ -50,7 +62,7 @@ export function asProviderFailure(cause: unknown): ProviderFailure {
       message.includes('unsupported') ||
       message.includes('access'))
   )
-    return new ProviderFailure('model-unavailable');
+    return new ProviderFailure('model-unavailable', diagnostic);
   if (
     message.includes('rate limit') ||
     message.includes('rate_limit') ||
@@ -58,15 +70,15 @@ export function asProviderFailure(cause: unknown): ProviderFailure {
     message.includes('quota') ||
     message.includes('credit')
   )
-    return new ProviderFailure('rate-limited');
+    return new ProviderFailure('rate-limited', diagnostic);
   if (
     message.includes('enoent') ||
     message.includes('not running') ||
     message.includes('stopped unexpectedly') ||
     message.includes('spawn')
   )
-    return new ProviderFailure('unavailable');
-  return new ProviderFailure('protocol-failure');
+    return new ProviderFailure('unavailable', diagnostic);
+  return new ProviderFailure('protocol-failure', diagnostic);
 }
 
 export type ProviderCapabilities = {

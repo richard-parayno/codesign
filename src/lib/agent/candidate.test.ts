@@ -5,6 +5,7 @@ import { blankDocument, defaultStyle, type DesignDocument } from '$lib/model/typ
 import {
   CANDIDATE_SCHEMA_VERSION,
   CandidateValidationError,
+  candidateBatchOutputSchema,
   candidateToDocumentCoordinates,
   createGenerationRun,
   generationRequestSchema,
@@ -76,7 +77,55 @@ function runFor(request: GenerationRequest, id = 'generation-test') {
   });
 }
 
+function expectStrictObjectRequirements(value: unknown, path = '$') {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => expectStrictObjectRequirements(item, `${path}[${index}]`));
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+
+  const schema = value as Record<string, unknown>;
+  if (schema.type === 'object' && schema.properties && typeof schema.properties === 'object') {
+    const propertyNames = Object.keys(schema.properties as Record<string, unknown>).sort();
+    const required = Array.isArray(schema.required)
+      ? schema.required.filter((item): item is string => typeof item === 'string').sort()
+      : [];
+    expect(required, `${path} must require every declared property`).toEqual(propertyNames);
+    expect(schema.additionalProperties, `${path} must reject undeclared properties`).toBe(false);
+  }
+
+  for (const [key, child] of Object.entries(schema))
+    expectStrictObjectRequirements(child, `${path}.${key}`);
+}
+
 describe('Codesign candidate backend contract', () => {
+  it('uses an OpenAI-compatible strict schema for every nested object', () => {
+    expectStrictObjectRequirements(candidateBatchOutputSchema);
+  });
+
+  it('uses nullable update fields in the wire response and removes null sentinels', () => {
+    const document = sourceDocument();
+    const request = requestFor(document);
+    const run = runFor(request);
+    const wire = candidateBatchFixture(request, run);
+    const change = wire.candidate.atomicChanges[0];
+    change.operation = {
+      id: change.operation.id,
+      type: 'update-node',
+      actor: 'agent',
+      targetIds: ['region'],
+      patch: { name: 'Updated region', text: null },
+    };
+    change.trace.affectedNodeIds = ['region'];
+
+    const candidate = normalizeCandidateBatch(request, run, wire);
+    expect(candidate.atomicChanges[0].operation).toMatchObject({
+      type: 'update-node',
+      patch: { name: 'Updated region' },
+    });
+    expect(candidate.atomicChanges[0].operation).not.toHaveProperty('patch.text');
+  });
+
   it('restores relative create and resize bounds to document coordinates without mutating input', () => {
     const request = requestFor(sourceDocument());
     const run = runFor(request);

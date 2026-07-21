@@ -21,6 +21,7 @@
   $: usage = latest?.usage ?? [...events].reverse().find((event) => event.usage)?.usage;
   $: statusLabel = latest ? phaseLabels[latest.phase] : 'Idle';
   $: visibleEvents = events.slice(-8);
+  $: latestFailure = [...events].reverse().find((event) => event.failure)?.failure;
 
   function formatNumber(value: number | undefined) {
     return value === undefined ? '—' : new Intl.NumberFormat().format(value);
@@ -63,7 +64,17 @@
         <dt>Prompt version</dt>
         <dd>{details.promptVersion ?? '—'}</dd>
       </div>
+      <div>
+        <dt>Request ID</dt>
+        <dd title={latest?.requestId}>{latest?.requestId ?? '—'}</dd>
+      </div>
     </dl>
+    {#if latestFailure}<div class="failure-detail">
+        <strong>Failure detail</strong>
+        <span>{latestFailure.stage} · {latestFailure.category}</span>
+        <p>{latestFailure.message}</p>
+        {#if latestFailure.code}<code>{latestFailure.code}</code>{/if}
+      </div>{/if}
   </div>
 
   <div class="metrics-column">
@@ -110,6 +121,9 @@
           <li class:current={event === latest}>
             <span>{phaseLabels[event.phase]}</span>
             <p>{event.message}</p>
+            {#if event.failure}<small class="failure-message"
+                >{event.failure.stage}: {event.failure.message}</small
+              >{/if}
             {#if event.usage}<small>{formatNumber(event.usage.totalTokens)} tokens</small>{/if}
           </li>
         {/each}
@@ -200,6 +214,31 @@
     gap: 7px;
     padding-top: 11px;
   }
+  .failure-detail {
+    display: grid;
+    gap: 4px;
+    margin-top: 11px;
+    border: 1px solid #e1b7b2;
+    border-radius: 4px;
+    background: #fff4f2;
+    padding: 8px;
+  }
+  .failure-detail strong {
+    color: #773b35;
+    font-size: 10px;
+    text-transform: uppercase;
+  }
+  .failure-detail span,
+  .failure-detail code {
+    color: #8b4c45;
+    font-size: 10px;
+  }
+  .failure-detail p {
+    margin: 0;
+    color: #663c38;
+    font-size: 11px;
+    overflow-wrap: anywhere;
+  }
   .usage-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -251,5 +290,10 @@
     grid-column: 2;
     color: #78818b;
     white-space: nowrap;
+  }
+  li .failure-message {
+    color: #8c403a;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 </style>

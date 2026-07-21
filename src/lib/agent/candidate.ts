@@ -24,8 +24,8 @@ import {
 import { z } from 'zod';
 import type { CodesignTelemetryEvent } from './telemetry';
 
-export const CANDIDATE_SCHEMA_VERSION = 'codesign-candidate-batch-v1';
-export const PROMPT_VERSION = 'codesign-complete-v1';
+export const CANDIDATE_SCHEMA_VERSION = 'codesign-candidate-batch-v2';
+export const PROMPT_VERSION = 'codesign-complete-v2';
 export const SUPPORTED_ACTIONS = ['complete'] as const satisfies readonly CodesignAction[];
 
 const MAX_KNOWN_NODE_IDS = 5_000;
@@ -90,10 +90,10 @@ const updateNodeOperationSchema = z.object({
   targetIds: z.array(z.string()).min(1).max(20),
   patch: z
     .object({
-      name: z.string().min(1).max(120).optional(),
-      text: z.string().max(10_000).optional(),
+      name: z.string().min(1).max(120).nullable(),
+      text: z.string().max(10_000).nullable(),
     })
-    .refine((patch) => Object.keys(patch).length > 0),
+    .refine((patch) => patch.name !== null || patch.text !== null),
 });
 
 const moveOperationSchema = z.object({
@@ -339,7 +339,11 @@ function normalizeOperation(
   }
   if (operation.type === 'update-node') {
     assertMutableTargets(operation.targetIds);
-    return operation;
+    const patch = {
+      ...(operation.patch.name !== null ? { name: operation.patch.name } : {}),
+      ...(operation.patch.text !== null ? { text: operation.patch.text } : {}),
+    };
+    return { ...operation, patch };
   }
   if (operation.type === 'move') {
     assertMutableTargets(operation.targetIds);
@@ -920,11 +924,10 @@ export const candidateBatchOutputSchema: CandidateOutputSchema = strictObject({
               type: { type: 'string', enum: ['update-node'] },
               actor: { type: 'string', enum: ['agent'] },
               targetIds: { type: 'array', minItems: 1, items: { type: 'string' } },
-              patch: {
-                type: 'object',
-                additionalProperties: false,
-                properties: { name: { type: 'string' }, text: { type: 'string' } },
-              },
+              patch: strictObject({
+                name: nullable({ type: 'string' }),
+                text: nullable({ type: 'string' }),
+              }),
             }),
             strictObject({
               id: { type: 'string' },

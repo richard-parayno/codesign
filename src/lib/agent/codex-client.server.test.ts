@@ -1,12 +1,13 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { CANDIDATE_SCHEMA_VERSION } from './candidate';
 import {
   CodexAppServer,
   DEFAULT_CODEX_EFFORT,
   DEFAULT_CODEX_MODEL,
+  getCodexClient,
   pinnedCodexCommand,
   resolveCodexCommand,
 } from './codex-client.server';
@@ -199,7 +200,39 @@ describe('Codex App Server JSONL transport', () => {
         },
       },
     });
+    const outputSchema = turn.params?.outputSchema as {
+      properties: {
+        candidate: {
+          properties: {
+            atomicChanges: {
+              items: { properties: { operation: { anyOf: Array<Record<string, any>> } } };
+            };
+          };
+        };
+      };
+    };
+    const updateNode =
+      outputSchema.properties.candidate.properties.atomicChanges.items.properties.operation.anyOf.find(
+        (schema) => schema.properties?.type?.enum?.includes('update-node'),
+      );
+    expect(updateNode?.properties.patch).toMatchObject({
+      additionalProperties: false,
+      required: ['name', 'text'],
+    });
     client.shutdown();
+  });
+
+  it('replaces a globally cached pre-versioned client after a schema hot reload', () => {
+    const shutdown = vi.fn();
+    const stale = { shutdown } as unknown as CodexAppServer;
+    globalThis.__codesignCodexClients = new Map([['fake-codex', stale]]);
+
+    const current = getCodexClient('fake-codex');
+
+    expect(current).not.toBe(stale);
+    expect(shutdown).toHaveBeenCalledOnce();
+    current.shutdown();
+    globalThis.__codesignCodexClients.clear();
   });
 
   it('reuses one App Server process but creates a fresh ephemeral thread per generation', async () => {
@@ -330,7 +363,7 @@ describe('Codex App Server JSONL transport', () => {
     client.shutdown();
   });
 
-  it('maps login, model, rate-limit, cancellation, and protocol failures without exposing detail', async () => {
+  it('keeps public failure messages generic while retaining backend diagnostics', async () => {
     for (const [message, category] of [
       ['authentication required for private account token', 'missing-login'],
       ['model gpt-secret is unavailable', 'model-unavailable'],
@@ -341,6 +374,7 @@ describe('Codex App Server JSONL transport', () => {
       const failure = asProviderFailure(new Error(message));
       expect(failure.category).toBe(category);
       expect(failure.message).not.toContain('private');
+      expect(failure.diagnostic?.message).toBe(message);
     }
 
     const fake = fakeProcess({
@@ -350,6 +384,39 @@ describe('Codex App Server JSONL transport', () => {
     await expect(client.proposeCandidate('No secret should escape')).rejects.toThrow(
       'unsupported protocol operation',
     );
+    client.shutdown();
+  });
+
+  it('preserves the exact failed-turn message and generation stage', async () => {
+    const fake = fakeProcess({ complete: false });
+    const client = new CodexAppServer('fake-codex', undefined, () => fake.child);
+    const pending = client.proposeCandidate('Inspect a failed turn');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    fake.stdout.write(
+      `${JSON.stringify({
+        method: 'turn/completed',
+        params: {
+          threadId: 'thread-1',
+          turn: {
+            id: 'turn-1',
+            status: 'failed',
+            error: { message: 'Structured output schema rejected before inference' },
+          },
+        },
+      })}\n`,
+    );
+
+    const cause = await pending.catch((error) => error as Error);
+    const failure = asProviderFailure(cause);
+    expect(failure).toMatchObject({
+      category: 'protocol-failure',
+      diagnostic: {
+        stage: 'generation',
+        errorName: 'CodexTurnError',
+        message: 'Structured output schema rejected before inference',
+      },
+    });
     client.shutdown();
   });
 

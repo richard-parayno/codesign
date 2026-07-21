@@ -114,11 +114,7 @@ function parseCandidate(text: string) {
     .trim()
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```$/, '');
-  try {
-    return agentCandidateBatchSchema.parse(JSON.parse(trimmed) as unknown);
-  } catch (cause) {
-    throw asProviderFailure(cause);
-  }
+  return agentCandidateBatchSchema.parse(JSON.parse(trimmed) as unknown);
 }
 
 export class CodexCodesignProvider implements CodesignProvider {
@@ -186,20 +182,20 @@ export class CodexCodesignProvider implements CodesignProvider {
 
   async generate(input: ProviderGenerationInput) {
     if (!input.prompt) throw new ProviderFailure('protocol-failure');
+    let text: string;
     try {
-      const text = await this.client.proposeCandidate(
-        input.prompt,
-        input.signal,
-        input.visualInput,
-        {
-          model: input.model ?? this.model,
-          effort: input.effort ?? this.effort,
-          onTelemetry: input.onTelemetry,
-        },
-      );
+      text = await this.client.proposeCandidate(input.prompt, input.signal, input.visualInput, {
+        model: input.model ?? this.model,
+        effort: input.effort ?? this.effort,
+        onTelemetry: input.onTelemetry,
+      });
+    } catch (cause) {
+      throw asProviderFailure(cause, 'generation');
+    }
+    try {
       return parseCandidate(text);
     } catch (cause) {
-      throw asProviderFailure(cause);
+      throw asProviderFailure(cause, 'output-validation');
     }
   }
 }

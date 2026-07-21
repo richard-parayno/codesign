@@ -65,10 +65,13 @@ function body(action: 'complete' | 'vary' = 'complete') {
   };
 }
 
-async function post(value: unknown) {
+async function post(value: unknown, requestId?: string) {
   const request = new Request('http://localhost/api/agent', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(requestId ? { 'x-codesign-request-id': requestId } : {}),
+    },
     body: JSON.stringify(value),
   });
   return POST({ request } as Parameters<typeof POST>[0]);
@@ -76,6 +79,7 @@ async function post(value: unknown) {
 
 beforeEach(() => {
   vi.spyOn(console, 'info').mockImplementation(() => {});
+  vi.spyOn(console, 'error').mockImplementation(() => {});
   mockProvider.status.mockReset();
   mockProvider.generate.mockReset();
   mockProvider.status.mockResolvedValue({
@@ -156,6 +160,39 @@ describe('POST /api/agent', () => {
     expect(backendEvents.some((line) => line.includes('"phase":"prompt-sent"'))).toBe(true);
     expect(backendEvents.some((line) => line.includes('"totalTokens":240'))).toBe(true);
     expect(backendEvents.join(' ')).not.toContain('Complete the supplied design scene');
+  });
+
+  it('logs and returns the underlying provider failure with its request stage', async () => {
+    mockProvider.generate.mockRejectedValueOnce(
+      new Error('output schema rejected candidate.atomicChanges at column 42'),
+    );
+
+    const response = await post(body(), 'codesign-diagnostic-test');
+    const value = await response.json();
+
+    expect(response.status).toBe(502);
+    expect(value).toMatchObject({
+      requestId: 'codesign-diagnostic-test',
+      category: 'protocol-failure',
+      diagnostic: {
+        stage: 'generation',
+        errorName: 'Error',
+        message: 'output schema rejected candidate.atomicChanges at column 42',
+      },
+      telemetry: {
+        phase: 'failed',
+        failure: {
+          stage: 'generation',
+          category: 'protocol-failure',
+          message: 'output schema rejected candidate.atomicChanges at column 42',
+        },
+      },
+    });
+    const errorLines = vi.mocked(console.error).mock.calls.map(([line]) => String(line));
+    expect(errorLines).toHaveLength(1);
+    expect(errorLines[0]).toContain('[codesign:ai:error]');
+    expect(errorLines[0]).toContain('codesign-diagnostic-test');
+    expect(errorLines[0]).toContain('output schema rejected candidate.atomicChanges at column 42');
   });
 
   it('reports unsupported vocabulary instead of exposing a dead action', async () => {

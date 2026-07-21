@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { codesignFailureStages } from './failure';
 
 export const codesignTelemetryPhaseSchema = z.enum([
   'preparing',
@@ -19,6 +20,21 @@ export const codesignTokenUsageSchema = z.object({
   modelContextWindow: z.number().int().positive().nullable(),
 });
 
+export const codesignFailureDiagnosticSchema = z.object({
+  stage: z.enum(codesignFailureStages),
+  category: z.enum([
+    'missing-login',
+    'model-unavailable',
+    'rate-limited',
+    'cancelled',
+    'protocol-failure',
+    'unavailable',
+  ]),
+  message: z.string().min(1).max(4_000),
+  errorName: z.string().min(1).max(120),
+  code: z.string().max(120).optional(),
+});
+
 export const codesignTelemetryEventSchema = z.object({
   requestId: z.string().min(1).max(120),
   sequence: z.number().int().nonnegative(),
@@ -33,6 +49,8 @@ export const codesignTelemetryEventSchema = z.object({
   outputCharacters: z.number().int().nonnegative().optional(),
   durationMs: z.number().int().nonnegative().optional(),
   usage: codesignTokenUsageSchema.optional(),
+  renderedPrompt: z.string().max(2_000_000).optional(),
+  failure: codesignFailureDiagnosticSchema.optional(),
 });
 
 export type CodesignTelemetryPhase = z.infer<typeof codesignTelemetryPhaseSchema>;

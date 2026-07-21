@@ -304,6 +304,41 @@ describe('CanvasSessionService', () => {
     await service.dispose();
   });
 
+  it('allows move operations to mutate the selected subtree but not unrelated nodes', async () => {
+    const document = sourceDocument();
+    const service = new CanvasSessionService();
+    const target = input(document);
+    target.pinnedNodeIds = [];
+    target.target.mutationScope.existingNodeIds = ['group'];
+    const session = await service.createSession(target);
+
+    await expect(
+      service.dispatch(session.id, 'candidate.apply_changes', {
+        candidateRevisionId: session.candidateRevisionId,
+        changes: [
+          {
+            operation: {
+              id: 'move-authorized-subtree',
+              type: 'move',
+              actor: 'agent',
+              targetIds: ['group'],
+              dx: 8,
+              dy: 0,
+            },
+            evidenceNodeIds: ['group'],
+            summary: 'Moved the selected group and its children.',
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    const state = (await service.dispatch(session.id, 'candidate.get_state', {
+      nodeIds: ['group', 'editable', 'pinned-child'],
+    })) as { nodes: { items: DesignNode[] } };
+    expect(state.nodes.items.map((node) => node.bounds.x)).toEqual([28, 48, 168]);
+    expect(document.nodes.unrelated.bounds.x).toBe(500);
+    await service.dispose();
+  });
+
   it('supports dependency-ordered nested creates', async () => {
     const service = new CanvasSessionService();
     const session = await service.createSession(input(sourceDocument()));

@@ -459,9 +459,14 @@ function validateIndirectMutations(
   after: DesignDocument,
   operation: DesignOperation,
 ) {
+  const explicitTargets = operation.type === 'create' ? [] : operationTargets(operation);
+  const authorizedSubtree = ['move', 'delete'].includes(operation.type)
+    ? childrenOf(before, explicitTargets)
+    : new Set<string>();
   const mutable = new Set([
     ...session.target.mutationScope.existingNodeIds,
     ...session.createdNodeIds,
+    ...authorizedSubtree,
     ...(operation.type === 'create' ? [operation.node.id] : []),
   ]);
   const structuralParents = new Set(session.target.mutationScope.insertionParentIds);

@@ -4839,19 +4839,6 @@
         <span aria-hidden="true">◎</span><strong>No selection</strong>
         <p>Select an object to inspect its geometry, appearance, fidelity, and origin.</p>
       </div>
-      <section>
-        <h3>Co-design starts from selection</h3>
-        <p class="muted">
-          Select a frame or object, then choose Complete with Codesign beside the selection.
-          Selection alone never generates or changes anything.
-        </p>
-      </section>
-      <section>
-        <h3>Generator boundary</h3>
-        <p class="muted">
-          {agentStatus}. Candidates are structured, scoped, and applied only after your decision.
-        </p>
-      </section>
     {/if}
   </aside>
   <div class="live" aria-live="polite">{error || notice}</div>

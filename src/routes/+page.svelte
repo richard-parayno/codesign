@@ -1826,11 +1826,15 @@
     editingTextId = node.id;
     editingTextDraft = node.text ?? '';
     selection = [node.id];
+    logAction('text-editing.started', {
+      nodeId: node.id,
+      source: 'canvas-content',
+    });
     await tick();
     inlineTextEditor?.focus();
     inlineTextEditor?.select();
   }
-  function startTextEditing(event: MouseEvent, node: DesignNode) {
+  function startTextEditing(event: MouseEvent | KeyboardEvent, node: DesignNode) {
     event.preventDefault();
     event.stopPropagation();
     void beginTextEditing(node);
@@ -1840,7 +1844,9 @@
     const text = editingTextDraft;
     editingTextId = '';
     editingTextDraft = '';
-    if (commit && nodeId && document.nodes[nodeId]?.text !== text)
+    if (!nodeId) return;
+    const changed = document.nodes[nodeId]?.text !== text;
+    if (commit && changed)
       apply({
         id: uid('op'),
         type: 'update-node',
@@ -1848,6 +1854,11 @@
         targetIds: [nodeId],
         patch: { text },
       });
+    logAction(commit ? 'text-editing.committed' : 'text-editing.cancelled', {
+      nodeId,
+      changed: commit && changed,
+      characterCount: text.length,
+    });
   }
   function clippingFrameId(node: DesignNode) {
     let parent = node.parentId ? document.nodes[node.parentId] : undefined;
@@ -3300,6 +3311,8 @@
         {#each renderedNodes as node (node.id)}
           {@const bounds = transientBounds[node.id] ?? node.bounds}
           {@const textLayout = textPosition(node, bounds)}
+          {@const textY =
+            bounds.y + Math.min(contentInset(node) + node.style.fontSize, bounds.height - 7)}
           <g
             id={`node-${node.id}`}
             class:selected={selection.includes(node.id)}
@@ -3311,7 +3324,9 @@
             aria-label={node.name}
             style={`opacity:${node.style.opacity};${clippingFrameId(node) ? `clip-path:url(#clip-${clippingFrameId(node)})` : ''}`}
             onpointerdown={(event) => nodeDown(event, node)}
-            ondblclick={(event) => startTextEditing(event, node)}
+            ondblclick={(event) => {
+              if (node.kind !== 'text' && canEditNodeText(node)) startTextEditing(event, node);
+            }}
             oncontextmenu={(event) => openContextMenu(event, node)}
           >
             {#if codesignReviewActive && reviewObservationScope.nodeIds.includes(node.id) && (reviewObservationScope.rootId === node.id || (!reviewObservationScope.rootId && (!node.parentId || !reviewObservationScope.nodeIds.includes(node.parentId))))}
@@ -3400,20 +3415,53 @@
                 height={Math.max(0, bounds.height - contentInset(node) * 2)}
                 rx={Math.max(0, node.style.radius - 2)}
               />{/if}
-            {#if !node.componentBinding && (node.text || node.semantics) && editingTextId !== node.id}<text
-                class="node-label"
-                x={textLayout.x}
-                text-anchor={textLayout.anchor}
-                y={bounds.y +
-                  Math.min(
-                    contentInset(node) + (node.componentBinding ? 28 : node.style.fontSize),
-                    bounds.height - 7,
-                  )}
-                style={`font-size:${node.style.fontSize}px;font-weight:${node.style.fontWeight};fill:${node.style.textColor}`}
-                >{node.text ?? node.semantics?.role}</text
-              >{/if}
+            {#if !node.componentBinding && (node.text || node.semantics) && editingTextId !== node.id}
+              {#if node.kind === 'text'}
+                <text
+                  class="node-label editable-text"
+                  role="button"
+                  tabindex="0"
+                  aria-label={`Edit ${node.name} text`}
+                  x={textLayout.x}
+                  text-anchor={textLayout.anchor}
+                  y={textY}
+                  style={`font-size:${node.style.fontSize}px;font-weight:${node.style.fontWeight};fill:${node.style.textColor}`}
+                  onpointerdown={(event) => {
+                    event.stopPropagation();
+                    if (event.button === 0 && !preview) selection = [node.id];
+                  }}
+                  ondblclick={(event) => startTextEditing(event, node)}
+                  onkeydown={(event) => {
+                    if (event.key === 'Enter' || event.key === 'F2') startTextEditing(event, node);
+                  }}>{node.text ?? node.semantics?.role}</text
+                >
+              {:else}
+                <text
+                  class="node-label"
+                  x={textLayout.x}
+                  text-anchor={textLayout.anchor}
+                  y={textY}
+                  style={`font-size:${node.style.fontSize}px;font-weight:${node.style.fontWeight};fill:${node.style.textColor}`}
+                  >{node.text ?? node.semantics?.role}</text
+                >
+              {/if}
+            {/if}
             {#if editingTextId === node.id}
-              <foreignObject x={bounds.x} y={bounds.y} width={bounds.width} height={bounds.height}>
+              <rect
+                class="text-editing-boundary"
+                x={bounds.x - 1 / zoom}
+                y={bounds.y - 1 / zoom}
+                width={bounds.width + 2 / zoom}
+                height={bounds.height + 2 / zoom}
+                rx={Math.max(0, node.style.radius)}
+              />
+              <foreignObject
+                class="inline-text-editor-shell"
+                x={bounds.x + contentInset(node)}
+                y={bounds.y + contentInset(node)}
+                width={Math.max(1, bounds.width - contentInset(node) * 2)}
+                height={Math.max(1, bounds.height - contentInset(node) * 2)}
+              >
                 <textarea
                   bind:this={inlineTextEditor}
                   bind:value={editingTextDraft}
@@ -4266,7 +4314,11 @@
           <label
             >Content<textarea
               rows="3"
-              value={selectedNodes.every((item) => item.text === node.text) ? node.text : ''}
+              value={editingTextId === node.id
+                ? editingTextDraft
+                : selectedNodes.every((item) => item.text === node.text)
+                  ? node.text
+                  : ''}
               placeholder={selectedNodes.every((item) => item.text === node.text)
                 ? 'Text content'
                 : 'Mixed'}
@@ -5117,6 +5169,10 @@
   .node-label {
     pointer-events: none;
   }
+  .node-label.editable-text {
+    cursor: text;
+    pointer-events: bounding-box;
+  }
   .canvas-node-name {
     fill: #505b67;
     stroke: #f7f8fa;
@@ -5283,11 +5339,23 @@
     width: 100%;
     height: 100%;
     resize: none;
-    border: 1px solid #2672ad;
+    overflow: hidden;
+    border: 0;
     outline: 0;
-    padding: 4px;
-    background: #ffffffee;
+    padding: 0;
+    background: transparent;
+    caret-color: #176ca8;
     font-family: inherit;
+  }
+  .inline-text-editor-shell {
+    overflow: visible;
+  }
+  .text-editing-boundary {
+    fill: none;
+    stroke: #2672ad;
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+    pointer-events: none;
   }
   .draft {
     fill: #b9cbe044;

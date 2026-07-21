@@ -51,7 +51,7 @@ function input(document: DesignDocument, ttlMs?: number): CanvasSessionCreateInp
   return {
     document,
     action: 'complete',
-    requestedFidelity: 'component',
+    requestedFidelity: 'wireframe',
     pinnedNodeIds: ['pinned-child'],
     ttlMs,
     target: {
@@ -149,6 +149,35 @@ describe('CanvasSessionService', () => {
     })) as { nodes: { items: Array<{ name: string }> } };
     expect(state.nodes.items[0].name).toBe('Candidate rectangle');
     expect(document).toEqual(acceptedBefore);
+    await service.dispose();
+  });
+
+  it('omits deleted editable nodes from the default candidate state slice', async () => {
+    const service = new CanvasSessionService();
+    const session = await service.createSession(input(sourceDocument()));
+    const applied = (await service.dispatch(session.id, 'candidate.apply_changes', {
+      candidateRevisionId: session.candidateRevisionId,
+      changes: [
+        {
+          operation: {
+            id: 'delete-editable',
+            type: 'delete',
+            actor: 'agent',
+            targetIds: ['editable'],
+          },
+          evidenceNodeIds: ['editable'],
+          summary: 'Replaced the editable primitive with a component-backed node.',
+        },
+      ],
+    })) as { candidateRevisionId: string };
+
+    const state = (await service.dispatch(session.id, 'candidate.get_state', {})) as {
+      candidateRevisionId: string;
+      nodes: { items: Array<{ id: string }> };
+    };
+
+    expect(state.candidateRevisionId).toBe(applied.candidateRevisionId);
+    expect(state.nodes.items.map((item) => item.id)).not.toContain('editable');
     await service.dispose();
   });
 
@@ -476,6 +505,66 @@ describe('CanvasSessionService', () => {
       ids: ['Button'],
     })) as { components: Array<{ props: object }> };
     expect(description.components[0].props).toHaveProperty('variant');
+    await service.dispose();
+  });
+
+  it('rejects primitive-only component fidelity and accepts a bound manifest component', async () => {
+    const service = new CanvasSessionService();
+    const componentInput = input(sourceDocument());
+    componentInput.requestedFidelity = 'component';
+    const session = await service.createSession(componentInput);
+
+    await service.dispatch(session.id, 'candidate.apply_changes', {
+      candidateRevisionId: session.candidateRevisionId,
+      changes: [
+        {
+          operation: {
+            type: 'create',
+            name: 'Hand-built control',
+            kind: 'rectangle',
+            parentId: 'group',
+            bounds: { x: 60, y: 200, width: 120, height: 36 },
+          },
+          evidenceNodeIds: ['group'],
+          summary: 'Added a primitive control.',
+        },
+      ],
+    });
+
+    expect(await service.dispatch(session.id, 'candidate.validate', {})).toMatchObject({
+      ok: false,
+      diagnostics: [expect.objectContaining({ code: 'component-fidelity-missing-component' })],
+    });
+    await expect(service.dispatch(session.id, 'candidate.submit', {})).rejects.toMatchObject({
+      code: 'candidate-invalid',
+    });
+
+    const state = (await service.dispatch(session.id, 'candidate.get_state', {})) as {
+      candidateRevisionId: string;
+    };
+    await service.dispatch(session.id, 'components.describe', { ids: ['Button'] });
+    await service.dispatch(session.id, 'candidate.apply_changes', {
+      candidateRevisionId: state.candidateRevisionId,
+      changes: [
+        {
+          operation: {
+            type: 'create',
+            name: 'Primary action',
+            kind: 'instance',
+            parentId: 'group',
+            bounds: { x: 60, y: 250, width: 120, height: 36 },
+            componentBinding: { componentId: 'Button', props: { variant: 'default' } },
+          },
+          evidenceNodeIds: ['group'],
+          summary: 'Used the installed Button component for the primary action.',
+        },
+      ],
+    });
+
+    expect(await service.dispatch(session.id, 'candidate.validate', {})).toMatchObject({
+      ok: true,
+      diagnostics: [],
+    });
     await service.dispose();
   });
 

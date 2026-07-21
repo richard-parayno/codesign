@@ -251,13 +251,14 @@ const descriptions: Record<CanvasToolName, string> = {
   'scene.get_nodes': 'Read exact scene nodes and optionally their descendants or siblings.',
   'scene.render': 'Render the immutable source or copy-on-write candidate scene for inspection.',
   'components.search':
-    'Search the installed shadcn-svelte component manifest. At component, visual, or production fidelity, prefer compatible results over hand-built standard controls.',
+    'Search the installed shadcn-svelte component manifest. At component, visual, or production fidelity, a compatible component is required in the edited region; do not submit a primitive-only replacement for a standard control.',
   'components.describe':
     'Read exact shadcn-svelte component contracts. Instantiate a result with create kind instance and componentBinding using the exact component ID and props.',
   'candidate.get_state': 'Read a compact view of candidate state and accumulated changes.',
   'candidate.apply_changes':
     'Apply 1-24 atomic create, move, resize, delete, promote, style, update-node, or reparent operations. Each change requires evidenceNodeIds and summary. For create, put name, kind, parentId, bounds, style, layout, and text directly on the operation. Internal operation ID, node ID, screen ID, provenance, child IDs, and omitted defaults are assigned by Codesign.',
-  'candidate.validate': 'Validate candidate scope, hierarchy, geometry, components, and rendering.',
+  'candidate.validate':
+    'Validate candidate scope, hierarchy, geometry, components, and rendering. Component, visual, and production fidelity fail validation when the edited region has no component-bound node.',
   'candidate.submit': 'Freeze and submit a valid candidate for human review.',
 };
 
@@ -413,16 +414,47 @@ function normalizeToolArguments(tool: CanvasToolName, value: unknown) {
         };
       }
       if (operation.type === 'resize') return rawChange;
+      if (
+        operation.type === 'move' &&
+        typeof operation.nodeId === 'string' &&
+        operation.bounds &&
+        typeof operation.bounds === 'object'
+      ) {
+        return {
+          ...change,
+          operation: {
+            type: 'resize',
+            ...(typeof operation.id === 'string' ? { id: operation.id } : {}),
+            ...(operation.actor === 'agent' ? { actor: 'agent' } : {}),
+            targetId: operation.nodeId,
+            bounds: operation.bounds,
+          },
+        };
+      }
       const targetIds =
         operation.targetIds ??
-        (typeof operation.targetId === 'string' ? [operation.targetId] : undefined);
-      const { targetId: _targetId, updates, ...operationWithoutAliases } = operation;
+        (typeof operation.targetId === 'string'
+          ? [operation.targetId]
+          : typeof operation.nodeId === 'string'
+            ? [operation.nodeId]
+            : undefined);
+      const {
+        targetId: _targetId,
+        nodeId: _nodeId,
+        updates,
+        style,
+        ...operationWithoutAliases
+      } = operation;
       return {
         ...change,
         operation: {
           ...operationWithoutAliases,
           ...(targetIds ? { targetIds } : {}),
-          ...(!operation.patch && updates ? { patch: updates } : {}),
+          ...(!operation.patch && updates
+            ? { patch: updates }
+            : !operation.patch && operation.type === 'style' && style
+              ? { patch: style }
+              : {}),
         },
       };
     }),

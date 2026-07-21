@@ -87,19 +87,21 @@ async function completeSession(
   const state = (await service.dispatch(sessionId, 'candidate.get_state', {})) as {
     candidateRevisionId: string;
   };
+  await service.dispatch(sessionId, 'components.describe', { ids: ['Button'] });
   const argumentsValue = {
     candidateRevisionId: state.candidateRevisionId,
     changes: [
       {
         operation: {
-          id: 'operation-agent-style',
-          type: 'style' as const,
+          id: 'operation-agent-promote',
+          type: 'promote' as const,
           actor: 'agent' as const,
           targetIds: ['region'],
-          patch: { radius: 12 },
+          componentId: 'Button',
+          props: { variant: 'default' },
         },
         evidenceNodeIds: ['region'],
-        summary: 'Matched the selected region to the surrounding visual language.',
+        summary: 'Promoted the selected region to the installed Button component.',
       },
     ],
   };
@@ -119,7 +121,7 @@ async function completeSession(
     result: applied,
     candidateMutation: {
       candidateRevisionId: (applied as { candidateRevisionId: string }).candidateRevisionId,
-      appliedOperationIds: ['operation-agent-style'],
+      appliedOperationIds: ['operation-agent-promote'],
     },
   });
   await service.dispatch(sessionId, 'candidate.validate', {});

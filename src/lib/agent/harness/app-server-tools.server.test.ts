@@ -226,6 +226,65 @@ describe('Canvas App Server tools', () => {
     );
   });
 
+  it('normalizes node-based style and absolute move aliases from agent retries', async () => {
+    const dispatch = vi.fn(async () => ({ ok: true }));
+    const adapter = new CanvasAppServerToolDispatcher(service(dispatch), 'session-1');
+
+    await adapter.dispatch({
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      callId: 'call-operation-aliases',
+      namespace: null,
+      tool: 'candidate_apply_changes',
+      arguments: {
+        candidateRevisionId: 'revision-source',
+        changes: [
+          {
+            operation: {
+              type: 'style',
+              nodeId: 'node-1',
+              style: { fill: '#ffffff' },
+            },
+            evidenceNodeIds: ['node-1'],
+            summary: 'Styled the selected node.',
+          },
+          {
+            operation: {
+              type: 'move',
+              nodeId: 'node-1',
+              bounds: { x: 10, y: 20, width: 100, height: 80 },
+            },
+            evidenceNodeIds: ['node-1'],
+            summary: 'Placed the selected node at exact bounds.',
+          },
+        ],
+      },
+    });
+
+    expect(dispatch).toHaveBeenCalledWith(
+      'session-1',
+      'candidate.apply_changes',
+      expect.objectContaining({
+        changes: [
+          expect.objectContaining({
+            operation: {
+              type: 'style',
+              targetIds: ['node-1'],
+              patch: { fill: '#ffffff' },
+            },
+          }),
+          expect.objectContaining({
+            operation: {
+              type: 'resize',
+              targetId: 'node-1',
+              bounds: { x: 10, y: 20, width: 100, height: 80 },
+            },
+          }),
+        ],
+      }),
+    );
+  });
+
   it('preserves the singular targetId required by resize operations', async () => {
     const dispatch = vi.fn(async () => ({ ok: true }));
     const adapter = new CanvasAppServerToolDispatcher(service(dispatch), 'session-1');

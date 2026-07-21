@@ -320,13 +320,31 @@
     document.currentRevisionId !== activeGenerationSourceRevisionId
   )
     abortGenerationForSourceDrift();
-  $: renderedNodes =
-    compareSourceActive && sourceSnapshot
-      ? orderedScreenNodes(sourceSnapshot, document.activeScreenId)
-      : visibleNodes;
   $: ghostSnapshot = liveCandidateDocument
     ? canvasSnapshot(liveCandidateDocument)
     : activeCandidateSnapshot;
+  $: reviewSourceNodes = sourceSnapshot
+    ? orderedScreenNodes(sourceSnapshot, document.activeScreenId)
+    : visibleNodes;
+  $: candidateChangedNodeIds = new Set(
+    ghostSnapshot && ghostSourceSnapshot
+      ? [
+          ...Object.keys(ghostSourceSnapshot.nodes).filter((id) => {
+            const candidate = ghostSnapshot?.nodes[id];
+            return (
+              !candidate ||
+              JSON.stringify(ghostSourceSnapshot?.nodes[id]) !== JSON.stringify(candidate)
+            );
+          }),
+          ...Object.keys(ghostSnapshot.nodes).filter((id) => !ghostSourceSnapshot?.nodes[id]),
+        ]
+      : [],
+  );
+  $: renderedNodes = codesignReviewActive
+    ? compareSourceActive
+      ? reviewSourceNodes
+      : reviewSourceNodes.filter((node) => !candidateChangedNodeIds.has(node.id))
+    : visibleNodes;
   $: ghostNodes = ghostSnapshot
     ? Object.values(ghostSnapshot.nodes).filter((node) => {
         if (node.screenId !== document.activeScreenId) return false;
@@ -2583,6 +2601,12 @@
       currentZoom >= 1.75
     );
   }
+  function layerKindLabel(node: DesignNode) {
+    if (node.projectComponent)
+      return node.projectComponent.role === 'main' ? 'Main component' : 'Instance';
+    if (node.componentBinding) return `shadcn · ${node.componentBinding.componentId}`;
+    return node.kind === 'rectangle' ? 'Shape' : node.kind;
+  }
   function layerDragStart(event: DragEvent, nodeId: string) {
     layerDrag = { sourceId: nodeId };
     event.dataTransfer?.setData('text/plain', nodeId);
@@ -2629,7 +2653,11 @@
     selection = [sourceId];
   }
 
-  async function generateCandidates(action: CodesignAction, rerollCandidateId?: string) {
+  async function generateCandidates(
+    action: CodesignAction,
+    rerollCandidateId?: string,
+    generationFidelity: Fidelity = requestedFidelity,
+  ) {
     if (!selection.length) {
       showError(
         'Select a frame or object before generating a candidate',
@@ -2665,7 +2693,7 @@
       observationScope: observationScope.kind,
       observationCount: observationScope.nodeIds.length,
       sourceRevisionId: document.currentRevisionId,
-      requestedFidelity,
+      requestedFidelity: generationFidelity,
       model: selectedAiModel,
       reasoningEffort: selectedAiEffort,
       rerollCandidateId: rerollCandidateId ?? '',
@@ -2690,7 +2718,7 @@
         body: JSON.stringify({
           projectId: activeProjectId,
           action,
-          requestedFidelity,
+          requestedFidelity: generationFidelity,
           providerOptions: { model: selectedAiModel, effort: selectedAiEffort },
           target,
           pinnedNodeIds: document.pinnedNodeIds,
@@ -2922,8 +2950,11 @@
   function rerollCandidate(candidateId: string) {
     const candidate = document.candidates[candidateId];
     if (!candidate) return;
+    const run = document.generationRuns[candidate.generationRunId];
+    if (!run) return;
+    requestedFidelity = candidate.fidelity;
     documentStore.replaceMetadata(recordReroll(document, candidate.generationRunId));
-    void generateCandidates(document.generationRuns[candidate.generationRunId].action, candidateId);
+    void generateCandidates(run.action, candidateId, candidate.fidelity);
   }
   function toggleSourceComparison(compare: boolean) {
     if (!activeCandidate) return;
@@ -3399,7 +3430,7 @@
                 <span class="proposed-checkbox-spacer" aria-hidden="true"></span>
               {/if}
               <button onclick={() => selectProposedLayer(row.node.id)}>
-                <span class="layer-kind">Proposed {row.node.kind}</span>
+                <span class="layer-kind">Proposed {layerKindLabel(row.node)}</span>
                 <span class="layer-name">{row.node.name}</span>
               </button>
             </div>
@@ -3438,13 +3469,7 @@
               ></span>{/if}{#if editingLayerId === row.node.id && editingLayerSource === 'layers'}<div
                 class="layer-select"
               >
-                <span class="layer-kind"
-                  >{row.node.componentBinding
-                    ? 'Component'
-                    : row.node.kind === 'rectangle'
-                      ? 'Shape'
-                      : row.node.kind}</span
-                ><input
+                <span class="layer-kind">{layerKindLabel(row.node)}</span><input
                   class="layer-name-input"
                   bind:this={layerNameInput}
                   bind:value={editingLayerName}
@@ -3475,17 +3500,9 @@
                   });
                 }}
                 ondblclick={(event) => startLayerRename(event, row.node)}
-                ><span class="layer-kind"
-                  >{row.node.projectComponent
-                    ? row.node.projectComponent.role === 'main'
-                      ? 'Main component'
-                      : 'Instance'
-                    : row.node.componentBinding
-                      ? 'Component'
-                      : row.node.kind === 'rectangle'
-                        ? 'Shape'
-                        : row.node.kind}</span
-                ><span class="layer-name">{row.node.name}</span></button
+                ><span class="layer-kind">{layerKindLabel(row.node)}</span><span class="layer-name"
+                  >{row.node.name}</span
+                ></button
               >{/if}
           </div>{/each}
       </div>
@@ -3525,7 +3542,9 @@
         : preview
           ? 'Click a connected object to navigate · Esc to exit'
           : codesignReviewActive
-            ? 'Blue: can change · Amber: focus only · Gray dashed: can reference · Purple: insertion parent · Green: editable region · Candidate ghosts never block the canvas'
+            ? compareSourceActive
+              ? 'Source view · Select Show candidate to return to the proposal'
+              : 'Candidate view · Proposed changes are shown in place without overlapping the source'
             : tool === 'frame'
               ? `${framePresetById(framePresetId)?.name ?? 'Custom frame'} · ${frameSize.width}×${frameSize.height} · Drag custom or place preset`
               : `${tool[0].toUpperCase() + tool.slice(1)} tool · Scroll to pan · Pinch to zoom · Right-click for actions`}
@@ -3942,22 +3961,27 @@
             {/if}
           {/each}
         {/if}
-        {#if codesignReviewActive && ghostSnapshot}
-          <g
-            class:source-comparison={compareSourceActive}
-            class="candidate-ghost"
-            aria-hidden="true"
-          >
+        {#if codesignReviewActive && ghostSnapshot && !compareSourceActive}
+          <g class="candidate-preview" aria-hidden="true">
             {#each ghostNodes as node (node.id)}
-              <g
-                class:highlighted-ghost={Boolean(
-                  proposedSelectionId === node.id ||
-                  (highlightedChangeId &&
-                    document.atomicChanges[highlightedChangeId]?.trace.affectedNodeIds.includes(
-                      node.id,
-                    )),
-                )}
-              >
+              {@const candidateHighlighted = Boolean(
+                proposedSelectionId === node.id ||
+                (highlightedChangeId &&
+                  document.atomicChanges[highlightedChangeId]?.trace.affectedNodeIds.includes(
+                    node.id,
+                  )),
+              )}
+              <g class:highlighted-candidate={candidateHighlighted}>
+                {#if candidateHighlighted}
+                  <rect
+                    class="candidate-change-boundary"
+                    x={node.bounds.x - 3 / zoom}
+                    y={node.bounds.y - 3 / zoom}
+                    width={node.bounds.width + 6 / zoom}
+                    height={node.bounds.height + 6 / zoom}
+                    rx={Math.max(node.style.radius, 3)}
+                  />
+                {/if}
                 {#if !node.componentBinding}
                   <rect
                     x={node.bounds.x}
@@ -3967,6 +3991,7 @@
                     rx={node.style.radius}
                     fill={node.style.fill}
                     stroke={node.style.stroke}
+                    stroke-width={node.style.strokeWidth}
                   />
                 {/if}
                 {#if node.componentBinding}
@@ -3975,7 +4000,6 @@
                       {node}
                       bounds={node.bounds}
                       nodes={ghostSnapshot.nodes}
-                      ghost
                     />
                   {/if}
                 {/if}
@@ -4065,7 +4089,7 @@
             >{preview
               ? 'Preview actions'
               : contextNode
-                ? `${selection.length > 1 ? `${selection.length} selected · ` : ''}${contextNode.projectComponent ? (contextNode.projectComponent.role === 'main' ? 'Main component' : 'Component instance') : contextNode.componentBinding ? 'Component' : contextNode.kind}`
+                ? `${selection.length > 1 ? `${selection.length} selected · ` : ''}${layerKindLabel(contextNode)}`
                 : 'Canvas actions'}</span
           >
         </div>
@@ -5691,34 +5715,22 @@
     vector-effect: non-scaling-stroke;
     pointer-events: none;
   }
-  .candidate-ghost {
-    opacity: 0.72;
+  .candidate-preview {
     pointer-events: none;
   }
-  .candidate-ghost rect {
+  .candidate-preview .candidate-change-boundary {
+    fill: none;
     stroke: #855e0c;
     stroke-width: 2;
     stroke-dasharray: 7 4;
     vector-effect: non-scaling-stroke;
   }
-  .candidate-ghost text {
-    font-weight: 650;
+  .candidate-preview text {
     pointer-events: none;
   }
-  .candidate-ghost .highlighted-ghost rect {
+  .candidate-preview .highlighted-candidate .candidate-change-boundary {
     stroke: #b7472a;
     stroke-width: 4;
-  }
-  .candidate-ghost.source-comparison {
-    opacity: 0.42;
-  }
-  .candidate-ghost.source-comparison rect {
-    fill: transparent;
-    stroke: #5f6872;
-    stroke-dasharray: 3 4;
-  }
-  .candidate-ghost.source-comparison text {
-    opacity: 0.35;
   }
   .handle {
     fill: #fff;

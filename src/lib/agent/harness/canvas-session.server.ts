@@ -287,7 +287,10 @@ function nodeSummary(node: DesignNode) {
   };
 }
 
-function diagnosticsFor(document: DesignDocument) {
+const COMPONENT_FIDELITIES = new Set(['component', 'visual', 'production']);
+
+function diagnosticsFor(session: StoredSession) {
+  const document = session.candidate;
   const diagnostics: SessionDiagnostic[] = [];
   for (const [id, node] of Object.entries(document.nodes)) {
     if (id !== node.id)
@@ -336,6 +339,50 @@ function diagnosticsFor(document: DesignDocument) {
       seen.add(parentId);
       parentId = document.nodes[parentId]?.parentId;
     }
+  }
+  if (COMPONENT_FIDELITIES.has(session.requestedFidelity)) {
+    const candidateScopeIds = childrenOf(document, [
+      ...session.target.mutationScope.existingNodeIds,
+      ...session.createdNodeIds,
+    ]);
+    const candidateHasComponent = [...candidateScopeIds].some((id) =>
+      Boolean(document.nodes[id]?.componentBinding),
+    );
+    if (!candidateHasComponent)
+      diagnostics.push({
+        code: 'component-fidelity-missing-component',
+        message: `${session.requestedFidelity} fidelity requires a compatible installed component in the edited region`,
+        nodeIds: session.target.focusNodeIds,
+        repair:
+          'Search and describe a compatible component, then create an instance with componentBinding or promote an existing primitive before submitting.',
+      });
+    const introducedComponentIds = new Set(
+      [...candidateScopeIds].flatMap((id) => {
+        const candidateBinding = document.nodes[id]?.componentBinding;
+        const sourceBinding = session.source.nodes[id]?.componentBinding;
+        return candidateBinding && differs(candidateBinding, sourceBinding)
+          ? [candidateBinding.componentId]
+          : [];
+      }),
+    );
+    const describedComponentIds = new Set(
+      session.traces
+        .filter((trace) => trace.tool === 'components.describe')
+        .flatMap((trace) => trace.componentIds),
+    );
+    const undescribedComponentIds = [...introducedComponentIds].filter(
+      (componentId) => !describedComponentIds.has(componentId),
+    );
+    if (undescribedComponentIds.length)
+      diagnostics.push({
+        code: 'component-contract-not-described',
+        message: `New component bindings require an inspected contract: ${undescribedComponentIds.join(', ')}`,
+        nodeIds: [...candidateScopeIds].filter((id) =>
+          undescribedComponentIds.includes(document.nodes[id]?.componentBinding?.componentId ?? ''),
+        ),
+        repair:
+          'Call components.describe for each listed component, verify its props, then validate again.',
+      });
   }
   return diagnostics;
 }
@@ -911,7 +958,10 @@ export class CanvasSessionService implements CanvasSessionServiceContract {
   }
 
   private candidateState(session: StoredSession, input: z.infer<typeof candidateStateSchema>) {
-    const defaultIds = [...session.target.mutationScope.existingNodeIds, ...session.createdNodeIds];
+    const defaultIds = [
+      ...session.target.mutationScope.existingNodeIds,
+      ...session.createdNodeIds,
+    ].filter((id) => Boolean(session.candidate.nodes[id]));
     const ids = input.nodeIds?.length ? input.nodeIds : defaultIds;
     if (ids.some((id) => !session.candidate.nodes[id]))
       throw new CanvasSessionError('node-not-found', 'Candidate slice contains an unknown node');
@@ -1009,7 +1059,7 @@ export class CanvasSessionService implements CanvasSessionServiceContract {
   }
 
   private validate(session: StoredSession) {
-    const diagnostics = diagnosticsFor(session.candidate);
+    const diagnostics = diagnosticsFor(session);
     if (!session.changes.length)
       diagnostics.push({
         code: 'empty-candidate',

@@ -13,6 +13,4 @@
       pnpm.install.enable = true;
     };
   };
-
-  packages = [ pkgs.git ];
 }

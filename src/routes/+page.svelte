@@ -167,7 +167,6 @@
   let connectSource = '';
   let agentStatus = 'Checking Codex App Server…';
   let providerConnected = true;
-  let providerAccount = '';
   let providerPlan = '';
   let loadingCandidate = false;
   let generationController: AbortController | null = null;
@@ -621,7 +620,6 @@
       if (!response.ok) throw new Error(value.error?.message ?? 'Provider status unavailable');
       agentStatus = value.message;
       providerConnected = Boolean(value.connected);
-      providerAccount = value.status?.accountLabel ?? '';
       providerPlan = value.status?.planType ?? '';
     } catch (cause) {
       providerConnected = false;
@@ -717,6 +715,9 @@
     } finally {
       aiSettingsLoading = false;
     }
+  }
+  async function refreshSettingsDiagnostics() {
+    await Promise.all([refreshProviderStatus(), refreshAiIntegrationStatus()]);
   }
   function openSettings() {
     contextMenu = null;
@@ -2824,18 +2825,6 @@
           ? `Codex${providerPlan ? ` · ${providerPlan}` : ''}`
           : 'Codex · signed out'}</span
       >
-      {#if providerConnected}
-        <button title={providerAccount || agentStatus} onclick={signOutOfCodex}
-          ><span class="button-icon" aria-hidden="true">◎</span>Sign out</button
-        >
-      {:else}
-        <button title={agentStatus} onclick={signInToCodex}
-          ><span class="button-icon" aria-hidden="true">◎</span>Sign in to Codex</button
-        >
-      {/if}
-      <button title="Refresh Codex connection status" onclick={refreshProviderStatus}
-        ><span class="button-icon" aria-hidden="true">↻</span>Refresh provider</button
-      >
       <button title="Open editor and Codesign settings" onclick={openSettings}>Settings</button>
       <button title="Undo · Ctrl/⌘ Z" onclick={() => undo('toolbar')}
         ><span class="button-icon" aria-hidden="true">↶</span>Undo</button
@@ -3864,7 +3853,7 @@
         onFrameOrientationChange={setFrameOrientation}
         onResetViewport={() => resetViewport('settings')}
         onAiSectionOpen={refreshAiIntegrationStatus}
-        onRefresh={refreshAiIntegrationStatus}
+        onRefresh={refreshSettingsDiagnostics}
         onModelChange={selectAiModel}
         onEffortChange={selectAiEffort}
         onReset={resetAiSettings}

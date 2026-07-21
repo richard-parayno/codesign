@@ -335,8 +335,16 @@
           </p>
 
           <div class="account-actions">
+            <div>
+              <strong>Provider account</strong>
+              <small>
+                {integration.status?.connected
+                  ? 'Signing out disconnects Codesign generation from this account.'
+                  : 'Sign in to enable Codesign generation on this machine.'}
+              </small>
+            </div>
             {#if integration.status?.connected}
-              <button type="button" onclick={onSignOut}>Sign out of Codex</button>
+              <button type="button" class="danger" onclick={onSignOut}>Sign out of Codex</button>
             {:else}
               <button type="button" disabled={!integration.runtime?.detected} onclick={onSignIn}
                 >Sign in to Codex</button
@@ -623,7 +631,30 @@
   }
   .account-actions {
     display: flex;
-    justify-content: flex-end;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border-top: 1px solid #e1e5e9;
+    padding-top: 12px;
+  }
+  .account-actions > div {
+    min-width: 0;
+  }
+  .account-actions strong {
+    font-size: 11px;
+  }
+  .account-actions .danger {
+    flex: none;
+    border-color: #c9948d;
+    background: #fff5f3;
+    color: #9b3127;
+  }
+  .account-actions .danger:hover:not(:disabled) {
+    border-color: #a94a3e;
+    background: #fee9e5;
+  }
+  .account-actions button {
+    flex: none;
   }
   .field-grid {
     display: grid;
@@ -753,7 +784,8 @@
       grid-template-columns: 1fr;
     }
     .section-heading,
-    .effective-setting {
+    .effective-setting,
+    .account-actions {
       align-items: stretch;
       flex-direction: column;
     }

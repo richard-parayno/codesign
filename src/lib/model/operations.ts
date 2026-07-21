@@ -146,6 +146,50 @@ function hierarchyContains(document: DesignDocument, ancestorId: string, nodeId:
   return descendants(document, [ancestorId]).has(nodeId);
 }
 
+function hierarchyDepth(document: DesignDocument, nodeId: string) {
+  let depth = 0;
+  let parentId = document.nodes[nodeId]?.parentId;
+  const seen = new Set<string>();
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId);
+    depth += 1;
+    parentId = document.nodes[parentId]?.parentId;
+  }
+  return depth;
+}
+
+function recomputeAncestorGroupBounds(
+  document: DesignDocument,
+  nodeIds: string[],
+  touch: (node: DesignNode) => void,
+) {
+  const groupIds = new Set<string>();
+  for (const nodeId of nodeIds) {
+    let parentId = document.nodes[nodeId]?.parentId;
+    const seen = new Set<string>();
+    while (parentId && !seen.has(parentId)) {
+      seen.add(parentId);
+      const parent = document.nodes[parentId];
+      if (!parent) break;
+      if (parent.kind === 'group') groupIds.add(parent.id);
+      parentId = parent.parentId;
+    }
+  }
+  for (const groupId of [...groupIds].sort(
+    (first, second) => hierarchyDepth(document, second) - hierarchyDepth(document, first),
+  )) {
+    const group = document.nodes[groupId];
+    const children = group.childIds.map((id) => document.nodes[id]).filter(Boolean);
+    if (!children.length) continue;
+    const left = Math.min(...children.map((child) => child.bounds.x));
+    const top = Math.min(...children.map((child) => child.bounds.y));
+    const right = Math.max(...children.map((child) => child.bounds.x + child.bounds.width));
+    const bottom = Math.max(...children.map((child) => child.bounds.y + child.bounds.height));
+    group.bounds = { x: left, y: top, width: right - left, height: bottom - top };
+    touch(group);
+  }
+}
+
 function removeNodeMetadata(document: DesignDocument, node: DesignNode) {
   if (node.entityId) {
     for (const representationId of document.entities[node.entityId]?.representationIds ?? [])
@@ -416,10 +460,12 @@ function mutateOperation(document: DesignDocument, operation: DesignOperation) {
         document.nodes[id].bounds.y += operation.dy;
         touch(document.nodes[id]);
       }
+      recomputeAncestorGroupBounds(document, operation.targetIds, touch);
       break;
     case 'resize':
       document.nodes[operation.targetId].bounds = clone(operation.bounds);
       touch(document.nodes[operation.targetId]);
+      recomputeAncestorGroupBounds(document, [operation.targetId], touch);
       break;
     case 'delete': {
       const removed = descendants(document, operation.targetIds);

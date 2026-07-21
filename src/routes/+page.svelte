@@ -63,6 +63,7 @@
     type SmartGuide,
     type SpacingGuide,
   } from '$lib/editor/geometry';
+  import { groupedCanvasContextTarget, groupedCanvasSelectionTarget } from '$lib/editor/selection';
   import { logAction } from '$lib/debug/action-log';
   import { deriveGenerationTarget } from '$lib/agent/generation-target';
   import { captureSceneSnapshot } from '$lib/agent/visual-snapshot.client';
@@ -159,7 +160,7 @@
   let layerNameInput: HTMLInputElement;
   let canvasNameInput: HTMLInputElement;
   type CanvasGesture = {
-    mode: 'draw' | 'move' | 'duplicate' | 'resize' | 'pan' | 'marquee';
+    mode: 'draw' | 'move' | 'duplicate' | 'resize' | 'pan' | 'marquee' | 'frame-marquee';
     pointerId: number;
     startX: number;
     startY: number;
@@ -170,10 +171,12 @@
     previewIds?: string[];
     handle?: ResizeHandle;
     additive?: boolean;
+    frameId?: string;
     duplicatePayload?: CodesignClipboardPayload;
   };
   let canvasElement: SVGSVGElement;
   let gesture: CanvasGesture | null = null;
+  let lastCanvasNodePointerDown = { nodeId: '', timestamp: 0 };
   let componentDropActive = false;
   let connectSource = '';
   let agentStatus = 'Checking Codex App Server…';
@@ -1790,6 +1793,19 @@
       { x: p.x, y: p.y, width: 0.01, height: 0.01 },
     );
   }
+  function movementParentForRoots(
+    p: { x: number; y: number },
+    rootIds: string[],
+    excludedIds: string[],
+  ) {
+    const parentIds = new Set(rootIds.map((id) => document.nodes[id]?.parentId));
+    if (parentIds.size === 1) {
+      const parentId = [...parentIds][0];
+      const parent = parentId ? document.nodes[parentId] : undefined;
+      if (parent?.kind === 'group') return parent;
+    }
+    return frameUnderPoint(p, excludedIds);
+  }
   function resetGesturePreview() {
     transientBounds = {};
     smartGuides = [];
@@ -1837,6 +1853,7 @@
   function startTextEditing(event: MouseEvent | KeyboardEvent, node: DesignNode) {
     event.preventDefault();
     event.stopPropagation();
+    if (editingTextId === node.id) return;
     void beginTextEditing(node);
   }
   function finishTextEditing(commit: boolean) {
@@ -1876,18 +1893,54 @@
       return { x: bounds.x + bounds.width - contentInset(node), anchor: 'end' as const };
     return { x: bounds.x + contentInset(node), anchor: 'start' as const };
   }
+  function pointIsInFrameInterior(node: DesignNode, p: { x: number; y: number }) {
+    const edgeBand = Math.min(8 / zoom, node.bounds.width / 4, node.bounds.height / 4);
+    return (
+      p.x > node.bounds.x + edgeBand &&
+      p.x < node.bounds.x + node.bounds.width - edgeBand &&
+      p.y > node.bounds.y + edgeBand &&
+      p.y < node.bounds.y + node.bounds.height - edgeBand
+    );
+  }
+  function beginFrameMarquee(event: PointerEvent, frame: DesignNode) {
+    const p = point(event);
+    beginCanvasGesture(event, {
+      mode: 'frame-marquee',
+      frameId: frame.id,
+      startX: p.x,
+      startY: p.y,
+      lastX: p.x,
+      lastY: p.y,
+      additive: event.shiftKey,
+    });
+    marquee = { x: p.x, y: p.y, width: 1, height: 1 };
+  }
+  function isCanvasPanPointer(event: PointerEvent) {
+    return event.button === 1 || (event.button === 0 && spacePressed);
+  }
+  function beginCanvasPan(event: PointerEvent) {
+    contextMenu = null;
+    const p = { x: event.clientX, y: event.clientY };
+    beginCanvasGesture(event, {
+      mode: 'pan',
+      startX: p.x,
+      startY: p.y,
+      lastX: p.x,
+      lastY: p.y,
+    });
+  }
+  function captureCanvasPan(event: PointerEvent) {
+    if (preview || event.target === event.currentTarget || !isCanvasPanPointer(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    beginCanvasPan(event);
+  }
   function canvasDown(event: PointerEvent) {
     contextMenu = null;
     if (preview) return;
-    if (event.button === 1 || (event.button === 0 && spacePressed)) {
-      const p = { x: event.clientX, y: event.clientY };
-      beginCanvasGesture(event, {
-        mode: 'pan',
-        startX: p.x,
-        startY: p.y,
-        lastX: p.x,
-        lastY: p.y,
-      });
+    if (isCanvasPanPointer(event)) {
+      event.preventDefault();
+      beginCanvasPan(event);
       return;
     }
     if (event.button !== 0) return;
@@ -1927,7 +1980,7 @@
         width: Math.max(1, Math.abs(p.x - gesture.startX)),
         height: Math.max(1, Math.abs(p.y - gesture.startY)),
       };
-    if (gesture.mode === 'marquee') {
+    if (gesture.mode === 'marquee' || gesture.mode === 'frame-marquee') {
       marquee = {
         x: Math.min(gesture.startX, p.x),
         y: Math.min(gesture.startY, p.y),
@@ -1968,6 +2021,7 @@
     const completedGesture = gesture.mode;
     let createdTextNode: DesignNode | undefined;
     const p = gesture.mode === 'pan' ? null : point(event);
+    const completedGestureDistance = p ? Math.hypot(p.x - gesture.startX, p.y - gesture.startY) : 0;
     if (gesture.mode === 'draw' && draft && draft.width > 8 && draft.height > 8) {
       const nodeId = uid('node');
       const opId = uid('op');
@@ -2014,6 +2068,34 @@
         : [];
       selection = gesture.additive ? [...new Set([...selection, ...picked])] : picked;
       logAction('selection.marquee', { nodeIds: selection, additive: Boolean(gesture.additive) });
+    } else if (gesture.mode === 'frame-marquee') {
+      const distance = p ? Math.hypot(p.x - gesture.startX, p.y - gesture.startY) : 0;
+      const dragged = distance >= 3 / zoom;
+      const frame = gesture.frameId ? document.nodes[gesture.frameId] : undefined;
+      if (!dragged) {
+        if (!gesture.additive) selection = [];
+        logAction('selection.frame-interior-click', {
+          frameId: frame?.id ?? '',
+          action: gesture.additive ? 'preserved' : 'cleared',
+          nodeIds: selection,
+          additive: Boolean(gesture.additive),
+        });
+      } else {
+        const childIds = new Set(frame?.childIds ?? []);
+        const picked = marquee
+          ? marqueeSelectedIds(
+              visibleNodes.filter((node) => childIds.has(node.id)),
+              marquee,
+              event.altKey ? 'contain' : 'intersect',
+            )
+          : [];
+        selection = gesture.additive ? [...new Set([...selection, ...picked])] : picked;
+        logAction('selection.frame-marquee', {
+          frameId: frame?.id ?? '',
+          nodeIds: selection,
+          additive: Boolean(gesture.additive),
+        });
+      }
     } else if (gesture.mode === 'move' && p) {
       const roots = selectionRootIds();
       const reference = roots[0];
@@ -2025,7 +2107,7 @@
       if (dx || dy)
         operations.push({ id: uid('op'), type: 'move', actor: 'user', targetIds: roots, dx, dy });
       const excluded = descendantNodeIds(document, roots);
-      const parent = frameUnderPoint(p, excluded);
+      const parent = movementParentForRoots(p, roots, excluded);
       const currentParents = new Set(roots.map((id) => document.nodes[id]?.parentId));
       if (currentParents.size !== 1 || !currentParents.has(parent?.id))
         operations.push({
@@ -2050,7 +2132,7 @@
       };
       const createdRoots = payload.rootIds.map((id) => idMap[id]);
       const excluded = descendantNodeIds(document, payload.rootIds);
-      const parent = frameUnderPoint(p, excluded);
+      const parent = movementParentForRoots(p, payload.rootIds, excluded);
       const operations: DesignOperation[] = [duplicate];
       const currentParents = new Set(payload.rootIds.map((id) => document.nodes[id]?.parentId));
       if (currentParents.size !== 1 || !currentParents.has(parent?.id))
@@ -2081,22 +2163,30 @@
     marquee = null;
     resetGesturePreview();
     releaseCanvasPointer(pointerId);
+    if (
+      (completedGesture === 'move' || completedGesture === 'duplicate') &&
+      completedGestureDistance >= 3 / zoom
+    )
+      lastCanvasNodePointerDown = { nodeId: '', timestamp: 0 };
     if (completedGesture === 'pan') scheduleViewportLog('middle-drag');
     if (createdTextNode) void beginTextEditing(createdTextNode);
+  }
+  function repeatedCanvasNodePointerDown(event: PointerEvent, nodeId: string) {
+    return (
+      lastCanvasNodePointerDown.nodeId === nodeId &&
+      event.timeStamp - lastCanvasNodePointerDown.timestamp <= 450
+    );
+  }
+  function rememberCanvasNodePointerDown(event: PointerEvent, nodeId: string) {
+    lastCanvasNodePointerDown = { nodeId, timestamp: event.timeStamp };
   }
   function nodeDown(event: PointerEvent, node: DesignNode) {
     event.stopPropagation();
     contextMenu = null;
     if (event.button !== 0) return;
     if (spacePressed) {
-      const p = { x: event.clientX, y: event.clientY };
-      beginCanvasGesture(event, {
-        mode: 'pan',
-        startX: p.x,
-        startY: p.y,
-        lastX: p.x,
-        lastY: p.y,
-      });
+      event.preventDefault();
+      beginCanvasPan(event);
       return;
     }
     if (preview) {
@@ -2114,18 +2204,51 @@
       startDraw(event);
       return;
     }
+    const groupedTarget = groupedCanvasSelectionTarget(document, node.id);
+    const repeatedPointerDown = repeatedCanvasNodePointerDown(event, node.id);
+    rememberCanvasNodePointerDown(event, node.id);
+    if (
+      (event.detail >= 2 || repeatedPointerDown) &&
+      groupedTarget &&
+      groupedTarget.id !== node.id
+    ) {
+      event.preventDefault();
+      lastCanvasNodePointerDown = { nodeId: '', timestamp: 0 };
+      selection = [node.id];
+      logAction('selection.deep-selected', {
+        source: 'canvas-double-click',
+        nodeId: node.id,
+        groupId: groupedTarget.id,
+      });
+      return;
+    }
+    const p = point(event);
+    const preserveDirectSelection = selection.length === 1 && selection[0] === node.id;
+    const deepSelection = event.metaKey || event.ctrlKey || preserveDirectSelection;
+    const selectionTarget = groupedCanvasSelectionTarget(document, node.id, deepSelection) ?? node;
+    if (
+      selectionTarget.id === node.id &&
+      node.kind === 'frame' &&
+      pointIsInFrameInterior(node, p)
+    ) {
+      beginFrameMarquee(event, node);
+      return;
+    }
     selection = event.shiftKey
-      ? selection.includes(node.id)
-        ? selection.filter((id) => id !== node.id)
-        : [...selection, node.id]
-      : [node.id];
+      ? selection.includes(selectionTarget.id)
+        ? selection.filter((id) => id !== selectionTarget.id)
+        : [...selection, selectionTarget.id]
+      : [selectionTarget.id];
     if (!selection.length) return;
     logAction('selection.changed', {
       source: 'canvas',
       nodeIds: selection,
       additive: event.shiftKey,
+      hitNodeId: node.id,
+      resolvedNodeId: selectionTarget.id,
+      deepSelection: event.metaKey || event.ctrlKey,
+      preservedDirectSelection: preserveDirectSelection,
     });
-    const p = point(event);
     const previewIds = descendantNodeIds(document, selectionRootIds());
     const originalBounds = Object.fromEntries(
       previewIds.map((id) => [id, structuredClone(document.nodes[id].bounds)]),
@@ -2143,6 +2266,39 @@
       originalBounds,
       previewIds,
       duplicatePayload: event.altKey ? createClipboardPayload(document, selection) : undefined,
+    });
+  }
+  function textNodeDown(event: PointerEvent, node: DesignNode) {
+    event.stopPropagation();
+    if (
+      event.button === 0 &&
+      !preview &&
+      !spacePressed &&
+      tool === 'select' &&
+      repeatedCanvasNodePointerDown(event, node.id)
+    ) {
+      event.preventDefault();
+      lastCanvasNodePointerDown = { nodeId: '', timestamp: 0 };
+      void beginTextEditing(node);
+      return;
+    }
+    nodeDown(event, node);
+  }
+  function nodeDoubleClick(event: MouseEvent, node: DesignNode) {
+    if (canEditNodeText(node)) {
+      startTextEditing(event, node);
+      return;
+    }
+    const groupedTarget = groupedCanvasSelectionTarget(document, node.id);
+    if (!groupedTarget || groupedTarget.id === node.id) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (gesture) cancelCanvasGesture();
+    selection = [node.id];
+    logAction('selection.deep-selected', {
+      source: 'canvas-double-click',
+      nodeId: node.id,
+      groupId: groupedTarget.id,
     });
   }
   function resizeDown(event: PointerEvent, handle: ResizeHandle) {
@@ -2213,17 +2369,22 @@
   async function openContextMenu(event: MouseEvent, node?: DesignNode) {
     event.preventDefault();
     event.stopPropagation();
-    if (node && !selection.includes(node.id)) selection = [node.id];
+    const target = node
+      ? (groupedCanvasContextTarget(document, node.id, selection) ?? node)
+      : undefined;
+    if (target && !selection.includes(target.id)) selection = [target.id];
     const width = 236;
-    const height = preview ? 110 : node ? 560 : 300;
+    const height = preview ? 110 : target ? 560 : 300;
     contextMenu = {
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
       y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
-      nodeId: node?.id,
+      nodeId: target?.id,
     };
     logAction('context-menu.opened', {
-      target: node ? 'node' : 'canvas',
-      nodeId: node?.id ?? '',
+      target: target ? 'node' : 'canvas',
+      hitNodeId: node?.id ?? '',
+      nodeId: target?.id ?? '',
+      resolvedToGroup: Boolean(node && target && node.id !== target.id),
       selectionCount: selection.length,
     });
     await tick();
@@ -3244,6 +3405,7 @@
       role="application"
       aria-label="Design canvas"
       style={`background-color:${canvasBackground}`}
+      onpointerdowncapture={captureCanvasPan}
       onpointerdown={canvasDown}
       onpointermove={canvasMove}
       onpointerup={canvasUp}
@@ -3324,9 +3486,7 @@
             aria-label={node.name}
             style={`opacity:${node.style.opacity};${clippingFrameId(node) ? `clip-path:url(#clip-${clippingFrameId(node)})` : ''}`}
             onpointerdown={(event) => nodeDown(event, node)}
-            ondblclick={(event) => {
-              if (node.kind !== 'text' && canEditNodeText(node)) startTextEditing(event, node);
-            }}
+            ondblclick={(event) => nodeDoubleClick(event, node)}
             oncontextmenu={(event) => openContextMenu(event, node)}
           >
             {#if codesignReviewActive && reviewObservationScope.nodeIds.includes(node.id) && (reviewObservationScope.rootId === node.id || (!reviewObservationScope.rootId && (!node.parentId || !reviewObservationScope.nodeIds.includes(node.parentId))))}
@@ -3426,10 +3586,7 @@
                   text-anchor={textLayout.anchor}
                   y={textY}
                   style={`font-size:${node.style.fontSize}px;font-weight:${node.style.fontWeight};fill:${node.style.textColor}`}
-                  onpointerdown={(event) => {
-                    event.stopPropagation();
-                    if (event.button === 0 && !preview) selection = [node.id];
-                  }}
+                  onpointerdown={(event) => textNodeDown(event, node)}
                   ondblclick={(event) => startTextEditing(event, node)}
                   onkeydown={(event) => {
                     if (event.key === 'Enter' || event.key === 'F2') startTextEditing(event, node);
@@ -3936,7 +4093,15 @@
                   <dd><kbd>{commandLabel}+D</kbd></dd>
                 </div>
                 <div>
-                  <dt>Create component from frame</dt>
+                  <dt>Select child inside group</dt>
+                  <dd><kbd>{commandLabel}+Click</kbd></dd>
+                </div>
+                <div>
+                  <dt>Enter group and select child</dt>
+                  <dd><kbd>Double-click</kbd></dd>
+                </div>
+                <div>
+                  <dt>Create component from frame or group</dt>
                   <dd><kbd>{commandLabel}+Alt+K</kbd></dd>
                 </div>
                 <div>

@@ -638,6 +638,34 @@ describe('design operations', () => {
     expect(document.nodes.b).toMatchObject({ parentId: undefined, bounds: grouped.nodes.b.bounds });
   });
 
+  it('keeps an individually moved child inside its group and recomputes group bounds', () => {
+    let document = applyOperationBatch(blankDocument(), [
+      { id: 'create-backdrop', type: 'create', actor: 'user', node: node('backdrop', 20, 30) },
+      { id: 'create-child', type: 'create', actor: 'user', node: node('child', 80, 50) },
+    ]);
+    document = applyOperation(document, {
+      id: 'group-layers',
+      type: 'group',
+      actor: 'user',
+      targetIds: ['backdrop', 'child'],
+      group: container('group', 0, 0, 'group'),
+    });
+    document = applyOperation(document, {
+      id: 'move-child',
+      type: 'move',
+      actor: 'user',
+      targetIds: ['child'],
+      dx: 180,
+      dy: 80,
+    });
+
+    expect(document.nodes.child).toMatchObject({
+      parentId: 'group',
+      bounds: { x: 260, y: 130, width: 200, height: 48 },
+    });
+    expect(document.nodes.group.bounds).toEqual({ x: 20, y: 30, width: 440, height: 148 });
+  });
+
   it('reorders one or more layers predictably within their own sibling stack', () => {
     let document = applyOperationBatch(
       blankDocument(),

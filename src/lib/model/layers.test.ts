@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { demoCheckpoint } from './checkpoint';
 import {
+  containingContainerForBounds,
   containingFrameForBounds,
   descendantNodeIds,
   isComponentTreeNode,
@@ -94,6 +95,28 @@ describe('layer hierarchy', () => {
     expect(
       containingFrameForBounds(paintOrder, { x: 480, y: 380, width: 100, height: 80 }),
     ).toBeUndefined();
+  });
+
+  it('chooses the deepest topmost group or frame that fully contains a layer', () => {
+    let document = blankDocument();
+    for (const item of [
+      node('outer', 'frame', { x: 0, y: 0, width: 500, height: 400 }),
+      node('inner-group', 'group', { x: 50, y: 50, width: 250, height: 200 }, 'outer'),
+    ])
+      document = applyOperation(document, {
+        id: `create-${item.id}`,
+        type: 'create',
+        actor: 'user',
+        node: item,
+      });
+    const paintOrder = orderedScreenNodes(document, 'screen-1');
+
+    expect(
+      containingContainerForBounds(paintOrder, { x: 80, y: 80, width: 100, height: 80 })?.id,
+    ).toBe('inner-group');
+    expect(
+      containingContainerForBounds(paintOrder, { x: 280, y: 220, width: 100, height: 80 })?.id,
+    ).toBe('outer');
   });
 
   it('identifies every descendant in a project component tree', () => {

@@ -122,3 +122,13 @@ export function containingFrameForBounds(nodesInPaintOrder: DesignNode[], bounds
     .reverse()
     .find((node) => node.kind === 'frame' && containsBounds(node.bounds, bounds));
 }
+
+/** Returns the topmost, deepest group or frame that fully contains the proposed bounds. */
+export function containingContainerForBounds(nodesInPaintOrder: DesignNode[], bounds: Bounds) {
+  return [...nodesInPaintOrder]
+    .reverse()
+    .find(
+      (node) =>
+        (node.kind === 'frame' || node.kind === 'group') && containsBounds(node.bounds, bounds),
+    );
+}

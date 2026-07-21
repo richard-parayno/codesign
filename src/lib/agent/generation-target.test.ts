@@ -236,6 +236,11 @@ describe('strict Codesign generation targeting', () => {
       eligible: true,
       invalidNodeIds: [],
     });
+    expect(inspectCodesignEligibility(document, ['loose'])).toMatchObject({
+      eligible: false,
+      invalidNodeIds: ['loose'],
+      reason: 'Every Codesign target must be a group, a frame, or contained in one.',
+    });
     expect(inspectCodesignEligibility(document, ['search-field', 'loose'])).toMatchObject({
       eligible: false,
       invalidNodeIds: ['loose'],

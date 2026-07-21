@@ -168,6 +168,9 @@
     padding-bottom: 11px;
     border-bottom: 1px solid #e1e4e8;
   }
+  header > div {
+    min-width: 0;
+  }
   header p,
   .metrics-column > p,
   .empty {
@@ -198,14 +201,18 @@
     margin: 0;
   }
   dl div {
+    min-width: 0;
     display: flex;
     justify-content: space-between;
     gap: 10px;
   }
   dt {
+    min-width: 0;
     color: #737c87;
+    overflow-wrap: anywhere;
   }
   dd {
+    min-width: 0;
     overflow: hidden;
     margin: 0;
     font-variant-numeric: tabular-nums;
@@ -284,16 +291,23 @@
     border-color: #3977aa;
   }
   li span {
+    min-width: 0;
     font-weight: 650;
+    overflow-wrap: anywhere;
   }
   li p {
+    min-width: 0;
     margin: 0;
     color: #5f6873;
     font-size: 11px;
+    overflow-wrap: anywhere;
   }
   li small {
+    min-width: 0;
     grid-column: 2;
+    overflow: hidden;
     color: #78818b;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
   li .failure-message {

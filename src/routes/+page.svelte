@@ -38,7 +38,7 @@
   import { demoCheckpoint } from '$lib/model/checkpoint';
   import { generateSvelte } from '$lib/model/codegen';
   import {
-    containingFrameForBounds,
+    containingContainerForBounds,
     descendantNodeIds,
     isComponentTreeNode,
     orderedScreenNodes,
@@ -583,6 +583,11 @@
       if (command && event.altKey && key === 'k') {
         event.preventDefault();
         createProjectComponent();
+        return;
+      }
+      if (command && event.altKey && key === 'g') {
+        event.preventDefault();
+        frameSelection();
         return;
       }
       if (command && key === 'g') {
@@ -1304,14 +1309,20 @@
     });
   }
   function groupSelection() {
-    if (selection.length < 2) return;
+    const roots = selectionRootIds();
+    if (!roots.length) return;
+    const rootNodes = roots.map((id) => document.nodes[id]).filter(Boolean);
+    if (new Set(rootNodes.map((node) => node.parentId)).size !== 1) {
+      showError('Select layers that share the same parent.', 'Couldn’t group selection');
+      return;
+    }
     const groupId = uid('group');
-    const first = selectedNodes[0];
+    const first = rootNodes[0];
     apply({
       id: uid('op'),
       type: 'group',
       actor: 'user',
-      targetIds: selection,
+      targetIds: roots,
       group: {
         id: groupId,
         name: 'Group',
@@ -1325,6 +1336,60 @@
       },
     });
     selection = [groupId];
+  }
+  function frameSelection() {
+    const roots = selectionRootIds();
+    if (!roots.length) return;
+    const rootNodes = roots.map((id) => document.nodes[id]).filter(Boolean);
+    const parentIds = new Set(rootNodes.map((node) => node.parentId));
+    if (parentIds.size !== 1) {
+      showError('Select layers that share the same parent.', 'Couldn’t frame selection');
+      return;
+    }
+    const parentId = rootNodes[0]?.parentId;
+    const siblingIds = parentId
+      ? (document.nodes[parentId]?.childIds ?? [])
+      : (currentScreen?.rootIds ?? []);
+    const rootSet = new Set(roots);
+    const insertionIndex = siblingIds.findIndex((id) => rootSet.has(id));
+    const bounds = collectiveSelectionBounds(rootNodes);
+    if (!bounds || insertionIndex < 0) return;
+    const frameId = uid('node');
+    const createOperationId = uid('op');
+    const operations: DesignOperation[] = [
+      {
+        id: createOperationId,
+        type: 'create',
+        actor: 'user',
+        node: {
+          id: frameId,
+          name: 'Frame',
+          kind: 'frame',
+          screenId: document.activeScreenId,
+          parentId,
+          childIds: [],
+          bounds,
+          style: { ...defaultStyle, fill: 'transparent' },
+          provenance: { actor: 'user', operationId: createOperationId },
+        },
+      },
+      {
+        id: uid('op'),
+        type: 'reparent',
+        actor: 'user',
+        targetIds: roots,
+        parentId: frameId,
+      },
+      {
+        id: uid('op'),
+        type: 'reparent',
+        actor: 'user',
+        targetIds: [frameId],
+        parentId,
+        index: insertionIndex,
+      },
+    ];
+    if (applyBatch(operations, 'frame-selection')) selection = [frameId];
   }
   function ungroupSelection() {
     const groups = selectedNodes.filter((node) => node.kind === 'group');
@@ -1631,7 +1696,7 @@
       width: frameSize.width,
       height: frameSize.height,
     };
-    const parentFrame = containingFrameForBounds(visibleNodes, bounds);
+    const parentContainer = containingContainerForBounds(visibleNodes, bounds);
     const nodeId = uid('node');
     const operationId = uid('op');
     apply({
@@ -1643,7 +1708,7 @@
         name: framePresetById(framePresetId)?.name ?? 'Custom frame',
         kind: 'frame',
         screenId: document.activeScreenId,
-        parentId: parentFrame?.id,
+        parentId: parentContainer?.id,
         childIds: [],
         bounds,
         style: { ...defaultStyle, fill: '#f7f8fa' },
@@ -1667,7 +1732,7 @@
         }
       : undefined;
     const parent = dropCenter
-      ? containingFrameForBounds(visibleNodes, droppedBounds!)
+      ? containingContainerForBounds(visibleNodes, droppedBounds!)
       : selectedParent &&
           (selectedParent.kind === 'frame' ||
             selectedParent.kind === 'group' ||
@@ -1803,7 +1868,7 @@
       width: root.bounds.width,
       height: root.bounds.height,
     };
-    const parent = dropCenter ? containingFrameForBounds(visibleNodes, bounds) : undefined;
+    const parent = dropCenter ? containingContainerForBounds(visibleNodes, bounds) : undefined;
     const materialized = instantiateProjectComponent(definition, {
       screenId: document.activeScreenId,
       origin: { x: bounds.x, y: bounds.y },
@@ -1929,9 +1994,9 @@
       ]),
     );
   }
-  function frameUnderPoint(p: { x: number; y: number }, excludedIds: string[]) {
+  function containerUnderPoint(p: { x: number; y: number }, excludedIds: string[]) {
     const excluded = new Set(excludedIds);
-    return containingFrameForBounds(
+    return containingContainerForBounds(
       visibleNodes.filter((node) => !excluded.has(node.id)),
       { x: p.x, y: p.y, width: 0.01, height: 0.01 },
     );
@@ -1941,13 +2006,7 @@
     rootIds: string[],
     excludedIds: string[],
   ) {
-    const parentIds = new Set(rootIds.map((id) => document.nodes[id]?.parentId));
-    if (parentIds.size === 1) {
-      const parentId = [...parentIds][0];
-      const parent = parentId ? document.nodes[parentId] : undefined;
-      if (parent?.kind === 'group') return parent;
-    }
-    return frameUnderPoint(p, excludedIds);
+    return containerUnderPoint(p, excludedIds);
   }
   function resetGesturePreview() {
     transientBounds = {};
@@ -2168,13 +2227,13 @@
     if (gesture.mode === 'draw' && draft && draft.width > 8 && draft.height > 8) {
       const nodeId = uid('node');
       const opId = uid('op');
-      const parentFrame = containingFrameForBounds(visibleNodes, draft);
+      const parentContainer = containingContainerForBounds(visibleNodes, draft);
       const node: DesignNode = {
         id: nodeId,
         name: tool === 'text' ? 'Text label' : tool === 'frame' ? 'Frame' : 'Rectangle',
         kind: tool as 'frame' | 'rectangle' | 'text',
         screenId: document.activeScreenId,
-        parentId: parentFrame?.id,
+        parentId: parentContainer?.id,
         childIds: [],
         bounds: draft,
         style: {
@@ -2189,7 +2248,7 @@
       logAction('layer.created', {
         nodeId,
         kind: node.kind,
-        parentId: parentFrame?.id ?? null,
+        parentId: parentContainer?.id ?? null,
         screenId: node.screenId,
       });
       if (node.kind === 'frame') {
@@ -2544,6 +2603,10 @@
   function groupFromContext() {
     contextMenu = null;
     selectedNodes.some((node) => node.kind === 'group') ? ungroupSelection() : groupSelection();
+  }
+  function frameFromContext() {
+    contextMenu = null;
+    frameSelection();
   }
   function reorderFromContext(direction: 'forward' | 'backward' | 'front' | 'back') {
     contextMenu = null;
@@ -4167,9 +4230,7 @@
             }}><span>Paste</span><kbd>{commandLabel}+V</kbd></button
           ><button role="menuitem" onclick={duplicateFromContext}
             ><span>Duplicate</span><kbd>{commandLabel}+D</kbd></button
-          >{#if selection.length > 1 || selectedNodes.some((node) => node.kind === 'group')}<button
-              role="menuitem"
-              onclick={groupFromContext}
+          >{#if selection.length}<button role="menuitem" onclick={groupFromContext}
               ><span
                 >{selectedNodes.some((node) => node.kind === 'group') ? 'Ungroup' : 'Group'}</span
               ><kbd
@@ -4177,6 +4238,8 @@
                   ? 'Shift+G'
                   : 'G'}</kbd
               ></button
+            ><button role="menuitem" onclick={frameFromContext}
+              ><span>Frame selection</span><kbd>{commandLabel}+Alt+G</kbd></button
             >{/if}
           <div class="menu-separator"></div>
           <button role="menuitem" onclick={() => reorderFromContext('forward')}
@@ -4319,6 +4382,10 @@
                 <div>
                   <dt>Ungroup</dt>
                   <dd><kbd>{commandLabel}+Shift+G</kbd></dd>
+                </div>
+                <div>
+                  <dt>Frame selection</dt>
+                  <dd><kbd>{commandLabel}+Alt+G</kbd></dd>
                 </div>
                 <div>
                   <dt>Bring forward</dt>

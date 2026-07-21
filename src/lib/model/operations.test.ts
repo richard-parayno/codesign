@@ -734,6 +734,85 @@ describe('design operations', () => {
     expect(document.nodes.b).toMatchObject({ parentId: undefined, bounds: grouped.nodes.b.bounds });
   });
 
+  it('allows one layer to be wrapped in a new group', () => {
+    let document = applyOperationBatch(blankDocument(), [
+      { id: 'create-before', type: 'create', actor: 'user', node: node('before', 0, 0) },
+      { id: 'create-only', type: 'create', actor: 'user', node: node('only', 80, 50) },
+      { id: 'create-after', type: 'create', actor: 'user', node: node('after', 500, 0) },
+    ]);
+    const originalBounds = structuredClone(document.nodes.only.bounds);
+
+    document = applyOperation(document, {
+      id: 'group-only',
+      type: 'group',
+      actor: 'user',
+      targetIds: ['only'],
+      group: container('single-group', 0, 0, 'group'),
+    });
+
+    expect(document.screens[0].rootIds).toEqual(['before', 'single-group', 'after']);
+    expect(document.nodes['single-group']).toMatchObject({
+      childIds: ['only'],
+      bounds: originalBounds,
+    });
+    expect(document.nodes.only).toMatchObject({ parentId: 'single-group', bounds: originalBounds });
+    expect(document.operations.at(-1)?.summary).toBe('Grouped 1 node');
+  });
+
+  it('allows one layer to be wrapped in a new frame as one transaction', () => {
+    let document = applyOperationBatch(blankDocument(), [
+      { id: 'create-before', type: 'create', actor: 'user', node: node('before', 0, 0) },
+      { id: 'create-only', type: 'create', actor: 'user', node: node('only', 80, 50) },
+      { id: 'create-after', type: 'create', actor: 'user', node: node('after', 500, 0) },
+    ]);
+    const originalBounds = structuredClone(document.nodes.only.bounds);
+    const startingRevision = document.revision;
+
+    document = applyOperationBatch(
+      document,
+      [
+        {
+          id: 'create-wrapper-frame',
+          type: 'create',
+          actor: 'user',
+          node: {
+            ...container('wrapper-frame', originalBounds.x, originalBounds.y),
+            bounds: originalBounds,
+          },
+        },
+        {
+          id: 'move-only-into-frame',
+          type: 'reparent',
+          actor: 'user',
+          targetIds: ['only'],
+          parentId: 'wrapper-frame',
+        },
+        {
+          id: 'restore-frame-stack-position',
+          type: 'reparent',
+          actor: 'user',
+          targetIds: ['wrapper-frame'],
+          index: 1,
+        },
+      ],
+      { transactionId: 'frame-selection' },
+    );
+
+    expect(document.revision).toBe(startingRevision + 1);
+    expect(document.screens[0].rootIds).toEqual(['before', 'wrapper-frame', 'after']);
+    expect(document.nodes['wrapper-frame']).toMatchObject({
+      childIds: ['only'],
+      bounds: originalBounds,
+    });
+    expect(document.nodes.only).toMatchObject({
+      parentId: 'wrapper-frame',
+      bounds: originalBounds,
+    });
+    expect(
+      new Set(document.operations.slice(-3).map((operation) => operation.transactionId)),
+    ).toEqual(new Set(['frame-selection']));
+  });
+
   it('keeps an individually moved child inside its group and recomputes group bounds', () => {
     let document = applyOperationBatch(blankDocument(), [
       { id: 'create-backdrop', type: 'create', actor: 'user', node: node('backdrop', 20, 30) },

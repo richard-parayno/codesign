@@ -108,6 +108,8 @@
 
   type Tool = 'select' | 'frame' | 'rectangle' | 'text' | 'connect';
   type EditorMode = 'edit' | 'preview';
+  // Inter's textarea font box sits one pixel below a 14px SVG text baseline.
+  const INTER_TEXTAREA_ASCENT_CORRECTION_EM = 1 / 14;
   const DEFAULT_CANVAS_BACKGROUND = '#edf0f3';
   const CANVAS_BACKGROUND_KEY = 'malleable.canvas-background.v1';
   const FRAME_SIZE_KEY = 'codesign.frame-size.v1';
@@ -3475,6 +3477,12 @@
           {@const textLayout = textPosition(node, bounds)}
           {@const textY =
             bounds.y + Math.min(contentInset(node) + node.style.fontSize, bounds.height - 7)}
+          {@const textLineHeight = node.style.fontSize * node.style.lineHeight}
+          {@const textEditorY =
+            textY -
+            node.style.fontSize -
+            (textLineHeight - node.style.fontSize) / 2 +
+            node.style.fontSize * INTER_TEXTAREA_ASCENT_CORRECTION_EM}
           <g
             id={`node-${node.id}`}
             class:selected={selection.includes(node.id)}
@@ -3615,9 +3623,9 @@
               <foreignObject
                 class="inline-text-editor-shell"
                 x={bounds.x + contentInset(node)}
-                y={bounds.y + contentInset(node)}
+                y={textEditorY}
                 width={Math.max(1, bounds.width - contentInset(node) * 2)}
-                height={Math.max(1, bounds.height - contentInset(node) * 2)}
+                height={Math.max(1, bounds.y + bounds.height - contentInset(node) - textEditorY)}
               >
                 <textarea
                   bind:this={inlineTextEditor}
@@ -5501,8 +5509,10 @@
   }
   .inline-text-editor {
     box-sizing: border-box;
+    display: block;
     width: 100%;
     height: 100%;
+    margin: 0;
     resize: none;
     overflow: hidden;
     border: 0;

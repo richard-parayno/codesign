@@ -268,10 +268,7 @@ A frame-level fidelity target applies by inheritance to unresolved descendants. 
 Use an inheritance model conceptually similar to:
 
 ```ts
-effectiveFidelity =
-  element.fidelityOverride ??
-  parent.effectiveFidelity ??
-  frame.targetFidelity;
+effectiveFidelity = element.fidelityOverride ?? parent.effectiveFidelity ?? frame.targetFidelity;
 ```
 
 Changing a parent target must produce an inspectable proposal. It must not silently overwrite pinned children, manual refinements, or element-level overrides.

@@ -57,8 +57,9 @@ function sourceDocument() {
   label.style = { ...label.style, textColor: '#fefefe', fontSize: 18 };
   label.componentBinding = {
     componentId: 'Button',
-    props: { label: 'Continue', nested: { emphasis: true } },
+    props: { variant: 'secondary', size: 'sm' },
   };
+  rectangle.kind = 'group';
   label.entityId = 'source-entity';
   for (const item of [frame, rectangle, label])
     next = applyOperationBatch(next, [
@@ -106,7 +107,7 @@ describe('editor clipboard', () => {
       style: { textColor: '#fefefe', fontSize: 18 },
       componentBinding: {
         componentId: 'Button',
-        props: { label: 'Continue', nested: { emphasis: true } },
+        props: { variant: 'secondary', size: 'sm' },
       },
     });
 
@@ -176,7 +177,7 @@ describe('editor clipboard', () => {
       text: 'Copied label',
       componentBinding: {
         componentId: 'Button',
-        props: { label: 'Continue', nested: { emphasis: true } },
+        props: { variant: 'secondary', size: 'sm' },
       },
     });
     expect(label.entityId).not.toBe('source-entity');

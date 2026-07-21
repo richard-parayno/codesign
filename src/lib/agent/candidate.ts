@@ -1,4 +1,9 @@
-import { validateComponentBinding } from '$lib/design-system/registry';
+import {
+  componentIds,
+  componentPropKeys,
+  validateComponentBinding,
+  validateComponentChild,
+} from '$lib/design-system/registry';
 import { applyOperation } from '$lib/model/operations';
 import {
   blankDocument,
@@ -23,18 +28,6 @@ export const PROMPT_VERSION = 'codesign-complete-v1';
 export const SUPPORTED_ACTIONS = ['complete'] as const satisfies readonly CodesignAction[];
 
 const MAX_KNOWN_NODE_IDS = 5_000;
-const componentIds = [
-  'Card',
-  'DataRow',
-  'DataTable',
-  'Sidebar',
-  'NavItem',
-  'Button',
-  'Input',
-  'Badge',
-  'Panel',
-] as const;
-
 const nullableStyleSchema = z.object({
   fill: z.string().nullable(),
   stroke: z.string().nullable(),
@@ -50,17 +43,10 @@ const nullableStyleSchema = z.object({
   density: z.enum(['compact', 'comfortable']).nullable(),
 });
 
-const componentPropsEnvelopeSchema = z.object({
-  density: z.enum(['compact', 'comfortable']).nullable(),
-  radius: z.enum(['small', 'medium']).nullable(),
-  interactive: z.boolean().nullable(),
-  collapsed: z.boolean().nullable(),
-  active: z.boolean().nullable(),
-  variant: z.enum(['primary', 'secondary', 'ghost']).nullable(),
-  size: z.enum(['small', 'medium']).nullable(),
-  tone: z.enum(['neutral', 'success', 'accent']).nullable(),
-  side: z.enum(['left', 'right']).nullable(),
-});
+const componentPropsEnvelopeSchema = z.record(
+  z.string(),
+  z.union([z.string(), z.number(), z.boolean(), z.null()]),
+);
 
 const wireNodeSchema = z.object({
   id: z.string().min(1),
@@ -74,8 +60,9 @@ const wireNodeSchema = z.object({
   text: z.string().max(500).nullable(),
   componentBinding: z
     .object({
-      componentId: z.enum(componentIds),
+      componentId: z.string().refine((id) => componentIds.includes(id)),
       props: componentPropsEnvelopeSchema,
+      slot: z.string().min(1).nullable(),
     })
     .nullable(),
 });
@@ -246,11 +233,9 @@ export type GenerationRequest = z.infer<typeof generationRequestSchema>;
 
 export class CandidateValidationError extends Error {}
 
-type BackendMetadata = {
-  backend: 'local' | 'codex';
+type GenerationMetadata = {
   model?: string;
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-  fallback?: boolean;
   contextNodeIds?: string[];
   contextRootId?: string;
   contextSummarized?: boolean;
@@ -395,8 +380,10 @@ function normalizeOperation(
     )
       throw new CandidateValidationError('Created node uses an unsupported insertion parent');
     const parent = simulation.nodes[source.parentId];
-    if (!parent || (parent.kind !== 'frame' && parent.kind !== 'group'))
-      throw new CandidateValidationError('Created node parent must be a frame or group');
+    if (!parent || !['frame', 'group', 'instance'].includes(parent.kind))
+      throw new CandidateValidationError(
+        'Created node parent must be a frame, group, or component',
+      );
   } else if (
     request.target.mutationScope.insertionParentIds.length > 0 ||
     request.target.observationScope.kind !== 'screen'
@@ -412,6 +399,7 @@ function normalizeOperation(
     ? {
         componentId: source.componentBinding.componentId,
         props: compactProps(source.componentBinding.props),
+        slot: source.componentBinding.slot ?? undefined,
       }
     : undefined;
   if (componentBinding) {
@@ -419,6 +407,21 @@ function normalizeOperation(
     if (!binding.ok) throw new CandidateValidationError(binding.error);
     if (source.kind !== 'instance')
       throw new CandidateValidationError('A component binding requires an instance node');
+  }
+  if (source.parentId) {
+    const parent = simulation.nodes[source.parentId];
+    if (parent?.componentBinding) {
+      if (!componentBinding)
+        throw new CandidateValidationError(
+          'Component slots only accept registered component parts',
+        );
+      const relationship = validateComponentChild(
+        parent.componentBinding.componentId,
+        componentBinding.componentId,
+        componentBinding.slot ?? 'default',
+      );
+      if (!relationship.ok) throw new CandidateValidationError(relationship.error);
+    }
   }
   const node: DesignNode = {
     id: source.id,
@@ -530,7 +533,7 @@ function validateWireDependencies(changes: z.infer<typeof wireAtomicChangeSchema
 
 export function createGenerationRun(
   request: GenerationRequest,
-  metadata: BackendMetadata,
+  metadata: GenerationMetadata,
 ): GenerationRun {
   return {
     id: metadata.runId,
@@ -545,11 +548,9 @@ export function createGenerationRun(
     contextSummarized: metadata.contextSummarized ?? false,
     snapshot: metadata.trustedSnapshot,
     candidateIds: [],
-    backend: metadata.backend,
-    provider: metadata.backend,
+    provider: 'codex',
     model: metadata.model,
     reasoningEffort: metadata.reasoningEffort,
-    fallback: metadata.fallback ?? false,
     promptVersion: PROMPT_VERSION,
     schemaVersion: CANDIDATE_SCHEMA_VERSION,
     contextSchemaVersion: metadata.contextSchemaVersion ?? 'codesign-scene-context-v1',
@@ -838,17 +839,12 @@ const styleProperties = {
   lineHeight: nullable({ type: 'number', exclusiveMinimum: 0 }),
   density: nullable(stringEnum(['compact', 'comfortable'])),
 };
-const propsProperties = {
-  density: nullable(stringEnum(['compact', 'comfortable'])),
-  radius: nullable(stringEnum(['small', 'medium'])),
-  interactive: nullable({ type: 'boolean' }),
-  collapsed: nullable({ type: 'boolean' }),
-  active: nullable({ type: 'boolean' }),
-  variant: nullable(stringEnum(['primary', 'secondary', 'ghost'])),
-  size: nullable(stringEnum(['small', 'medium'])),
-  tone: nullable(stringEnum(['neutral', 'success', 'accent'])),
-  side: nullable(stringEnum(['left', 'right'])),
-};
+const componentPropValue = nullable({
+  anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }],
+});
+const propsProperties = Object.fromEntries(
+  componentPropKeys.map((key) => [key, componentPropValue]),
+);
 const strictObject = (properties: Record<string, unknown>) => ({
   type: 'object',
   additionalProperties: false,
@@ -877,6 +873,7 @@ const wireNodeJsonSchema = strictObject({
     strictObject({
       componentId: stringEnum(componentIds),
       props: strictObject(propsProperties),
+      slot: nullable({ type: 'string' }),
     }),
   ),
 });
@@ -993,7 +990,6 @@ export type TrustedVisualInput =
 export type CandidateGenerationResponse = {
   run: GenerationRun;
   candidates: ReturnType<typeof normalizeCandidateBatch>[];
-  fallback: boolean;
   supportedActions: typeof SUPPORTED_ACTIONS;
   visualInputUsed: boolean;
   message?: string;

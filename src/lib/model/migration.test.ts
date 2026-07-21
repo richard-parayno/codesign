@@ -82,7 +82,7 @@ describe('v1 to v2 migration', () => {
     expect(isDesignDocumentV2(migrated)).toBe(true);
   });
 
-  it('migrates project metadata deterministically', () => {
+  it('migrates project metadata consistently', () => {
     const envelope = migrateProjectEnvelopeV1(
       {
         version: 1,
@@ -138,10 +138,18 @@ describe('v1 to v2 migration', () => {
           allowCreate: true,
         },
       },
-      provider: 'local',
+      provider: 'legacy',
+      legacyProvider: { id: 'local', fallback: false },
       contextSummarized: false,
-      fallback: false,
     });
+    expect(recovered?.projects[0].document.generationRuns['legacy-run']).not.toHaveProperty(
+      'backend',
+    );
+    expect(recovered?.projects[0].document.generationRuns['legacy-run']).not.toHaveProperty(
+      'fallback',
+    );
+    expect(recovered?.projects[0].document.nodes.row).toEqual(document.nodes.row);
+    expect(recovered?.projects[0].document.processEvents).toEqual(document.processEvents);
   });
 
   it('rejects structurally broken v1 documents before migration', () => {

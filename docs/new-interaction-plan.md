@@ -55,7 +55,7 @@ The canvas remains in the page for this pass so existing pointer behavior is not
 
 ## Agent schema
 
-Both local and Codex adapters consume a `GenerationRequest` containing source revision, action, requested fidelity, structured scene graph, separate observation/mutation IDs, pins, registry contract, and optional visual snapshot metadata. Both produce the same candidate batch schema.
+The Codex adapter consumes a `GenerationRequest` containing source revision, action, requested fidelity, structured scene graph, separate observation/mutation IDs, pins, registry contract, and optional visual snapshot metadata. It produces the validated candidate batch schema.
 
 Server validation owns backend/model/prompt metadata and rejects stale revisions, out-of-bound mutations, pinned targets, unknown IDs, invalid dependencies, invented components/props, and invalid before/after state. Model output never mutates the live document.
 
@@ -67,7 +67,7 @@ The pinned App Server supports typed `image` and `localImage` user inputs. This 
 - candidate schema/reference/scope/pin/dependency validation;
 - transaction all-or-nothing behavior, partial acceptance, reject, reroll, replay, and stale source handling;
 - fidelity inheritance and element override;
-- deterministic Complete candidates plus explicit rejection of unsupported actions;
+- predefined candidate fixtures plus explicit rejection of unsupported actions;
 - fake JSON-RPC candidate streaming, output schema, read-only sandbox, and typed visual input;
 - browser QA for blank design, explicit invocation, scopes, ghost preview, trace highlight, partial/all acceptance, reject/reroll, pinning, fidelity stops, history/source compare, reload, and migrated storage.
 
@@ -76,7 +76,7 @@ The pinned App Server supports typed `image` and `localImage` user inputs. This 
 - [x] Baseline verification and parallel audits
 - [x] v2 types, migration, revision/process helpers, and tests
 - [x] normalized local/Codex candidate contract and tests
-- [x] explicit Co-design mode and scope overlay
+- [x] inline Codesign invocation and temporary scope overlay in Edit
 - [x] candidate preview, atomic decisions, pin/reroll, and trace highlighting
 - [x] fidelity controls and process/source history
 - [x] stale intent-era UI/copy removal and Codesign naming
@@ -89,7 +89,7 @@ The pinned App Server supports typed `image` and `localImage` user inputs. This 
 - Arbitrary nested auto-layout and richer vector primitives
 - Full entity tree expansion across multiple fidelity representations
 - Production-fidelity code round-tripping
-- Live Codex generation is optional and limited to one deliberate smoke test after deterministic/fake tests
+- Live Codex generation is limited to one deliberate smoke test after fixture/fake-transport tests
 
 ## Known risks
 

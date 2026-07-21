@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { env } from '$env/dynamic/private';
 import { json } from '@sveltejs/kit';
 import {
   CandidateValidationError,
@@ -14,7 +13,6 @@ import {
   type GenerationRequest,
 } from '$lib/agent/candidate';
 import {
-  LocalCodesignProvider,
   ProviderFailure,
   applyProviderOptions,
   asProviderFailure,
@@ -116,21 +114,14 @@ function generationPrompt(request: GenerationRequest, run: GenerationRun, contex
 function runMetadata(
   request: GenerationRequest,
   context: SceneContext,
-  backend: 'local' | 'codex',
   settings: ReturnType<typeof providerSettings>,
   runId: string,
   createdAt: number,
   trusted?: TrustedVisualSnapshot,
-  fallback = false,
 ) {
   return createGenerationRun(request, {
-    backend,
-    model: backend === 'codex' ? settings.model : undefined,
-    reasoningEffort:
-      backend === 'codex'
-        ? (settings.effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max')
-        : undefined,
-    fallback,
+    model: settings.model,
+    reasoningEffort: settings.effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max',
     contextNodeIds: context.nodes.map((node) => node.id),
     contextRootId: context.coordinateSpace.observationRootId ?? undefined,
     contextSummarized: context.summarization.applied,
@@ -146,28 +137,6 @@ function runMetadata(
     runId,
     createdAt,
   });
-}
-
-async function generateLocal(
-  request: GenerationRequest,
-  context: SceneContext,
-  settings: ReturnType<typeof providerSettings>,
-  runId: string,
-  createdAt: number,
-  trusted?: TrustedVisualSnapshot,
-  fallback = false,
-  message?: string,
-): Promise<CandidateGenerationResponse> {
-  const run = runMetadata(request, context, 'local', settings, runId, createdAt, trusted, fallback);
-  const wire = await new LocalCodesignProvider().generate({ request, run });
-  return {
-    run,
-    candidates: [normalizeCandidateBatch(request, run, wire)],
-    fallback,
-    supportedActions: SUPPORTED_ACTIONS,
-    visualInputUsed: false,
-    message,
-  };
 }
 
 function errorResponse(cause: unknown) {
@@ -207,31 +176,12 @@ export async function POST({ request }) {
   try {
     validateGenerationRequest(input);
     const settings = applyProviderOptions(providerSettings(), input.providerOptions);
+    const provider = createProvider(settings);
+    const status = await provider.status();
+    if (!status.available) throw new ProviderFailure(status.failureCategory ?? 'unavailable');
+    if (!status.connected) throw new ProviderFailure('missing-login');
     const runId = `generation-${randomUUID()}`;
     const createdAt = Date.now();
-    if (settings.provider === 'local') {
-      if (!input.visualSnapshot) {
-        const context = sceneContext(input);
-        return json(await generateLocal(input, context, settings, runId, createdAt));
-      }
-      const response = await withTrustedVisualSnapshot(
-        { mimeType: input.visualSnapshot.mimeType, base64: input.visualSnapshot.data },
-        async (trusted) => {
-          if (
-            trusted.width !== input.visualSnapshot?.width ||
-            trusted.height !== input.visualSnapshot?.height
-          )
-            throw new VisualSnapshotError(
-              'Visual snapshot dimensions do not match the uploaded image',
-              'invalid-dimensions',
-            );
-          const context = sceneContext(input, trusted);
-          return generateLocal(input, context, settings, runId, createdAt, trusted);
-        },
-        { signal: request.signal },
-      );
-      return json(response);
-    }
     if (!input.visualSnapshot)
       throw new CandidateValidationError('AI scene generation requires a visual snapshot');
 
@@ -247,8 +197,8 @@ export async function POST({ request }) {
             'invalid-dimensions',
           );
         const context = sceneContext(input, trusted);
-        const run = runMetadata(input, context, 'codex', settings, runId, createdAt, trusted);
-        const relativeWire = await createProvider(settings).generate({
+        const run = runMetadata(input, context, settings, runId, createdAt, trusted);
+        const relativeWire = await provider.generate({
           request: input,
           run,
           prompt: generationPrompt(input, run, context),
@@ -261,7 +211,6 @@ export async function POST({ request }) {
         return {
           run,
           candidates: [normalizeCandidateBatch(input, run, wire)],
-          fallback: false,
           supportedActions: SUPPORTED_ACTIONS,
           visualInputUsed: true,
         } satisfies CandidateGenerationResponse;
@@ -270,68 +219,6 @@ export async function POST({ request }) {
     );
     return json(response);
   } catch (cause) {
-    const settings = (() => {
-      try {
-        return applyProviderOptions(providerSettings(), input.providerOptions);
-      } catch {
-        return undefined;
-      }
-    })();
-    if (
-      settings?.provider === 'codex' &&
-      env.CODESIGN_ALLOW_LOCAL_FALLBACK === 'true' &&
-      !(cause instanceof VisualSnapshotError) &&
-      !(cause instanceof CandidateValidationError) &&
-      asProviderFailure(cause).category !== 'cancelled'
-    ) {
-      try {
-        const fallbackRunId = `generation-${randomUUID()}`;
-        const fallbackCreatedAt = Date.now();
-        if (input.visualSnapshot) {
-          const fallback = await withTrustedVisualSnapshot(
-            { mimeType: input.visualSnapshot.mimeType, base64: input.visualSnapshot.data },
-            async (trusted) => {
-              if (
-                trusted.width !== input.visualSnapshot?.width ||
-                trusted.height !== input.visualSnapshot?.height
-              )
-                throw new VisualSnapshotError(
-                  'Visual snapshot dimensions do not match the uploaded image',
-                  'invalid-dimensions',
-                );
-              const context = sceneContext(input, trusted);
-              return generateLocal(
-                input,
-                context,
-                settings,
-                fallbackRunId,
-                fallbackCreatedAt,
-                trusted,
-                true,
-                'Codex was unavailable; explicit local fallback is active.',
-              );
-            },
-            { signal: request.signal },
-          );
-          return json(fallback);
-        }
-        const context = sceneContext(input);
-        return json(
-          await generateLocal(
-            input,
-            context,
-            settings,
-            fallbackRunId,
-            fallbackCreatedAt,
-            undefined,
-            true,
-            'Codex was unavailable; explicit local fallback is active.',
-          ),
-        );
-      } catch {
-        throw new ProviderFailure('protocol-failure');
-      }
-    }
     return errorResponse(cause);
   }
 }

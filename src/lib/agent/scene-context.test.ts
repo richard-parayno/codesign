@@ -5,6 +5,7 @@ import {
   SCENE_CONTEXT_PROMPT_VERSION,
   SCENE_CONTEXT_SCHEMA_VERSION,
   buildSceneContext,
+  defaultDesignSystemSnapshot,
   type SceneContextInput,
 } from './scene-context';
 
@@ -68,6 +69,23 @@ function input(
 }
 
 describe('buildSceneContext', () => {
+  it('exposes manifest roots, parts, and allowed component children to the model', () => {
+    const designSystem = defaultDesignSystemSnapshot();
+    const card = designSystem.components.find((component) => component.id === 'Card');
+    const header = designSystem.components.find((component) => component.id === 'Card.Header');
+    expect(card).toMatchObject({
+      kind: 'root',
+      allowedChildren: { default: ['Card.Header', 'Card.Content', 'Card.Footer'] },
+    });
+    expect(header).toMatchObject({
+      kind: 'part',
+      rootComponentId: 'Card',
+      allowedChildren: {
+        default: ['Card.Title', 'Card.Description', 'Card.Action'],
+      },
+    });
+  });
+
   it('includes the complete hierarchy in stable bottom-to-top paint order', () => {
     const scene = snapshot(
       [

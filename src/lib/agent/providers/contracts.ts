@@ -2,7 +2,7 @@ import type { ReasoningEffort } from '../../../../.generated/codex-app-server/Re
 import type { AgentCandidateBatch, GenerationRequest, TrustedVisualInput } from '../candidate';
 import type { GenerationRun } from '$lib/model/types';
 
-export type ProviderId = 'local' | 'codex';
+export type ProviderId = 'codex';
 export type ProviderFailureCategory =
   | 'missing-login'
   | 'model-unavailable'
@@ -72,7 +72,7 @@ export type ProviderCapabilities = {
   structuredCandidates: true;
   supportedActions: readonly ['complete'];
   visualInputs: readonly ('image' | 'localImage')[];
-  authentication: 'none' | 'app-server-chatgpt';
+  authentication: 'app-server-chatgpt';
   canStartLogin: boolean;
   canLogout: boolean;
   cancellation: boolean;

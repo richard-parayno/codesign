@@ -1,4 +1,4 @@
-import { validateComponentBinding } from '$lib/design-system/registry';
+import { validateComponentBinding, validateComponentChild } from '$lib/design-system/registry';
 import {
   operationSchema,
   type CanvasSnapshot,
@@ -231,6 +231,28 @@ export function validateOperation(document: DesignDocument, candidate: unknown):
       document.nodes[operation.node.parentId].screenId !== operation.node.screenId
     )
       throw new OperationError('Parent and child must share a screen');
+    if (operation.node.componentBinding) {
+      const binding = validateComponentBinding(
+        operation.node.componentBinding.componentId,
+        operation.node.componentBinding.props,
+      );
+      if (!binding.ok) throw new OperationError(binding.error);
+    }
+    if (operation.node.parentId) {
+      const parent = document.nodes[operation.node.parentId];
+      if (parent.kind !== 'frame' && parent.kind !== 'group' && parent.kind !== 'instance')
+        throw new OperationError('Only frames, groups, and component instances can contain layers');
+      if (parent.componentBinding) {
+        if (!operation.node.componentBinding)
+          throw new OperationError('Component slots only accept registered component parts');
+        const relationship = validateComponentChild(
+          parent.componentBinding.componentId,
+          operation.node.componentBinding.componentId,
+          operation.node.componentBinding.slot ?? 'default',
+        );
+        if (!relationship.ok) throw new OperationError(relationship.error);
+      }
+    }
   }
   if (operation.type === 'repeat') {
     if (new Set(operation.targetIds).size !== operation.targetIds.length)
@@ -241,9 +263,11 @@ export function validateOperation(document: DesignDocument, candidate: unknown):
   if (operation.type === 'update-node') {
     if (
       operation.patch.text !== undefined &&
-      targets.some((id) => document.nodes[id].kind !== 'text')
+      targets.some(
+        (id) => document.nodes[id].kind !== 'text' && !document.nodes[id].componentBinding,
+      )
     )
-      throw new OperationError('Text content can only be applied to text nodes');
+      throw new OperationError('Text content can only be applied to text or component nodes');
     if (
       operation.patch.clipContent !== undefined &&
       targets.some((id) => document.nodes[id].kind !== 'frame')
@@ -257,12 +281,25 @@ export function validateOperation(document: DesignDocument, candidate: unknown):
     if (operation.parentId) {
       const parent = document.nodes[operation.parentId];
       if (!parent) throw new OperationError('Parent does not exist');
-      if (parent.kind !== 'frame' && parent.kind !== 'group')
-        throw new OperationError('Only frames and groups can contain layers');
+      if (parent.kind !== 'frame' && parent.kind !== 'group' && parent.kind !== 'instance')
+        throw new OperationError('Only frames, groups, and component instances can contain layers');
       if (roots.some((id) => document.nodes[id].screenId !== parent.screenId))
         throw new OperationError('Parent and child must share a screen');
       if (roots.some((id) => id === parent.id || hierarchyContains(document, id, parent.id)))
         throw new OperationError('Reparenting would create a hierarchy cycle');
+      if (parent.componentBinding) {
+        for (const id of roots) {
+          const child = document.nodes[id];
+          if (!child.componentBinding)
+            throw new OperationError('Component slots only accept registered component parts');
+          const relationship = validateComponentChild(
+            parent.componentBinding.componentId,
+            child.componentBinding.componentId,
+            child.componentBinding.slot ?? 'default',
+          );
+          if (!relationship.ok) throw new OperationError(relationship.error);
+        }
+      }
     }
   }
   if (operation.type === 'group') {
@@ -412,9 +449,11 @@ function mutateOperation(document: DesignDocument, operation: DesignOperation) {
       break;
     case 'promote':
       for (const id of operation.targetIds) {
+        const slot = document.nodes[id].componentBinding?.slot;
         document.nodes[id].componentBinding = {
           componentId: operation.componentId,
           props: clone(operation.props),
+          ...(slot ? { slot } : {}),
         };
         document.nodes[id].kind = 'instance';
         touch(document.nodes[id]);

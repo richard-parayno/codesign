@@ -1,9 +1,18 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyOperation } from '$lib/model/operations';
 import { blankDocument, defaultStyle } from '$lib/model/types';
-import { demoCheckpoint } from '$lib/model/checkpoint';
-import { deriveGenerationTarget } from '$lib/agent/generation-target';
-import { stageCandidates, stageGenerationRun } from '$lib/model/codesign';
+import { candidateBatchFixture } from '$lib/agent/fixtures/candidate-batch-fixture';
+
+const mockProvider = vi.hoisted(() => ({
+  status: vi.fn(),
+  generate: vi.fn(),
+}));
+
+vi.mock('$lib/agent/providers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/agent/providers')>()),
+  createProvider: () => mockProvider,
+}));
+
 import { POST } from './+server';
 
 function body(action: 'complete' | 'vary' = 'complete') {
@@ -38,6 +47,13 @@ function body(action: 'complete' | 'vary' = 'complete') {
     },
     pinnedNodeIds: [],
     pinnedAtomicChanges: [],
+    visualSnapshot: {
+      id: 'snapshot-1',
+      mimeType: 'image/png',
+      width: 2,
+      height: 2,
+      data: 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAC0lEQVR4nGNgQAcAABIAAXfx+gAAAAAASUVORK5CYII=',
+    },
     document: {
       currentRevisionId: document.currentRevisionId,
       activeScreenId: document.activeScreenId,
@@ -58,65 +74,45 @@ async function post(value: unknown) {
   return POST({ request } as Parameters<typeof POST>[0]);
 }
 
-afterEach(() => {
-  delete process.env.CODESIGN_AGENT_BACKEND;
+beforeEach(() => {
+  mockProvider.status.mockReset();
+  mockProvider.generate.mockReset();
+  mockProvider.status.mockResolvedValue({
+    provider: 'codex',
+    available: true,
+    connected: true,
+    authMode: 'chatgpt',
+    planType: 'plus',
+    accountLabel: null,
+    message: 'Codex App Server is connected.',
+  });
+  mockProvider.generate.mockImplementation(({ request, run }) => {
+    const wire = candidateBatchFixture(request, run);
+    const origin = request.target.mutationScope.regions[0];
+    for (const change of wire.candidate.atomicChanges) {
+      if (change.operation.type !== 'create') continue;
+      change.operation.node.bounds.x -= origin.x;
+      change.operation.node.bounds.y -= origin.y;
+    }
+    return wire;
+  });
 });
 
 describe('POST /api/agent', () => {
-  it('returns a deterministic generation run and normalized candidate drafts', async () => {
-    process.env.CODESIGN_AGENT_BACKEND = 'local';
+  it('normalizes a mocked Codex response through the endpoint', async () => {
     const response = await post(body());
     const value = await response.json();
-
     expect(response.status).toBe(200);
     expect(value).toMatchObject({
-      run: {
-        action: 'complete',
-        backend: 'local',
-        requestedFidelity: 'component',
-        target: { mutationScope: { existingNodeIds: ['region'] } },
-      },
-      fallback: false,
+      run: { provider: 'codex', requestedFidelity: 'component' },
       supportedActions: ['complete'],
-      visualInputUsed: false,
+      visualInputUsed: true,
     });
+    expect(value).not.toHaveProperty('fallback');
     expect(value.candidates[0].atomicChanges).toHaveLength(4);
-    expect(value.candidates[0].atomicChanges[0]).toHaveProperty('before');
-    expect(value.candidates[0].atomicChanges[0]).toHaveProperty('after');
-  });
-
-  it('stages a JSON-roundtripped candidate against a fresh in-memory demo checkpoint', async () => {
-    process.env.CODESIGN_AGENT_BACKEND = 'local';
-    const document = demoCheckpoint();
-    const target = deriveGenerationTarget(document, ['sidebar']);
-    const response = await post({
-      projectId: 'demo-project',
-      action: 'complete',
-      requestedFidelity: 'wireframe',
-      target,
-      pinnedNodeIds: [],
-      pinnedAtomicChanges: [],
-      document: {
-        currentRevisionId: document.currentRevisionId,
-        activeScreenId: document.activeScreenId,
-        screenName: document.screens[0].name,
-        screenRootIds: document.screens[0].rootIds,
-        knownNodeIds: Object.keys(document.nodes),
-        nodes: Object.fromEntries(
-          target.observationScope.nodeIds.map((id) => [id, document.nodes[id]]),
-        ),
-      },
-    });
-    const value = await response.json();
-
-    expect(response.status).toBe(200);
-    expect(() =>
-      stageCandidates(stageGenerationRun(document, value.run), value.run.id, value.candidates),
-    ).not.toThrow();
   });
 
   it('reports unsupported vocabulary instead of exposing a dead action', async () => {
-    process.env.CODESIGN_AGENT_BACKEND = 'local';
     const response = await post(body('vary'));
     expect(response.status).toBe(422);
     await expect(response.json()).resolves.toMatchObject({
@@ -126,10 +122,47 @@ describe('POST /api/agent', () => {
   });
 
   it('rejects mutation scope that is not observable', async () => {
-    process.env.CODESIGN_AGENT_BACKEND = 'local';
     const invalid = body();
     invalid.target.observationScope.nodeIds = ['missing'];
     const response = await post(invalid);
     expect(response.status).toBe(400);
   });
+
+  it.each([
+    [
+      'signed out',
+      {
+        provider: 'codex',
+        available: true,
+        connected: false,
+        failureCategory: 'missing-login',
+        message: 'Sign in to Codex with ChatGPT to enable AI generation.',
+      },
+      401,
+      'missing-login',
+    ],
+    [
+      'unavailable',
+      {
+        provider: 'codex',
+        available: false,
+        connected: false,
+        failureCategory: 'unavailable',
+        message: 'The local Codex runtime is unavailable.',
+      },
+      503,
+      'unavailable',
+    ],
+  ])(
+    'returns %s status without manufacturing a candidate',
+    async (_label, status, code, category) => {
+      mockProvider.status.mockResolvedValue(status);
+
+      const response = await post(body());
+
+      expect(response.status).toBe(code);
+      await expect(response.json()).resolves.toMatchObject({ category });
+      expect(mockProvider.generate).not.toHaveBeenCalled();
+    },
+  );
 });

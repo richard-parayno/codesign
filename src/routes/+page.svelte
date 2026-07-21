@@ -23,7 +23,9 @@
     recordReroll,
     rejectCandidate,
     replayCandidate,
+    setFrameFidelity,
     setAtomicChangePinned,
+    setNodeFidelityOverride,
     setNodePinned,
     stageCandidates,
     stageGenerationRun,
@@ -64,11 +66,19 @@
   import { logAction } from '$lib/debug/action-log';
   import { deriveGenerationTarget } from '$lib/agent/generation-target';
   import { captureSceneSnapshot } from '$lib/agent/visual-snapshot.client';
-  import { componentRegistry } from '$lib/design-system/registry';
-  import CodesignPanel, {
+  import {
+    componentCatalog,
+    getDefaultComponentBlueprint,
+    resolveComponent,
+    validateComponentChild,
+  } from '$lib/design-system/registry';
+  import ComponentLibrary from '$lib/codesign/ComponentLibrary.svelte';
+  import ComponentCanvasRenderer from '$lib/codesign/ComponentCanvasRenderer.svelte';
+  import InlineCodesignToolbar, {
     type CandidateView,
     type ObservationScopeView,
-  } from '$lib/codesign/CodesignPanel.svelte';
+  } from '$lib/codesign/InlineCodesignToolbar.svelte';
+  import FidelityStops from '$lib/codesign/FidelityStops.svelte';
   import type { FidelityStopView } from '$lib/codesign/FidelityStops.svelte';
   import ProcessPanel, { type ProcessEventView } from '$lib/codesign/ProcessPanel.svelte';
   import SettingsDialog, {
@@ -78,12 +88,11 @@
   } from '$lib/codesign/SettingsDialog.svelte';
 
   type Tool = 'select' | 'frame' | 'rectangle' | 'text' | 'connect';
-  type EditorMode = 'edit' | 'codesign' | 'preview';
+  type EditorMode = 'edit' | 'preview';
   const DEFAULT_CANVAS_BACKGROUND = '#edf0f3';
   const CANVAS_BACKGROUND_KEY = 'malleable.canvas-background.v1';
   const FRAME_SIZE_KEY = 'codesign.frame-size.v1';
   const AI_SETTINGS_KEY = 'codesign.ai-settings.v1';
-  const DEFAULT_FIDELITY_KEY = 'codesign.default-fidelity.v1';
   let tool: Tool = 'select';
   let selection: string[] = [];
   let error = '';
@@ -92,7 +101,6 @@
   let preview = false;
   let bottomOpen = false;
   let bottomTab: 'process' | 'operations' | 'code' = 'process';
-  let inspectorTab: 'properties' | 'trace' = 'properties';
   let zoom = 1;
   let pan = { x: 0, y: 0 };
   let canvasBackground = DEFAULT_CANVAS_BACKGROUND;
@@ -149,8 +157,7 @@
   let canvasElement: SVGSVGElement;
   let gesture: CanvasGesture | null = null;
   let connectSource = '';
-  let backend: 'local' | 'codex' = 'local';
-  let agentStatus = 'Local rules ready';
+  let agentStatus = 'Checking Codex App Server…';
   let providerConnected = true;
   let providerAccount = '';
   let providerPlan = '';
@@ -166,8 +173,10 @@
   let pinnedAtomicIds: string[] = [];
   let highlightedChangeId = '';
   let compareSourceActive = false;
+  let proposedSelectionId = '';
+  let fidelityTargetNodeId = '';
   let activeProcessEventId = '';
-  let codesignStatus = 'Entering Co-design does not change your design.';
+  let codesignStatus = 'Selection alone never generates or changes anything.';
 
   $: document = $documentStore.present;
   $: pinnedAtomicIds = derivePinnedAtomicIds(document.processEvents);
@@ -178,13 +187,12 @@
   $: currentScreen =
     document.screens.find((screen) => screen.id === document.activeScreenId) ?? document.screens[0];
   $: visibleNodes = currentScreen ? orderedScreenNodes(document, currentScreen.id) : [];
-  $: generationTarget = selection.length ? deriveGenerationTarget(document, selection) : undefined;
-  $: mutationLabels = (generationTarget?.mutationScope.existingNodeIds ?? [])
-    .map((id) => document.nodes[id]?.name)
-    .filter((name): name is string => Boolean(name));
-  $: insertionLabels = (generationTarget?.mutationScope.insertionParentIds ?? [])
-    .map((id) => document.nodes[id]?.name)
-    .filter((name): name is string => Boolean(name));
+  $: eligibleGenerationSelection = selection.filter(
+    (id) => document.nodes[id]?.screenId === document.activeScreenId,
+  );
+  $: generationTarget = eligibleGenerationSelection.length
+    ? deriveGenerationTarget(document, eligibleGenerationSelection)
+    : undefined;
   $: generationCanGenerate = Boolean(
     generationTarget &&
     (generationTarget.mutationScope.existingNodeIds.length > 0 ||
@@ -225,6 +233,13 @@
     : [];
   $: activeCandidate =
     document.candidates[activeCandidateId] ?? runCandidates[runCandidates.length - 1];
+  $: activeCandidateRun = activeCandidate
+    ? document.generationRuns[activeCandidate.generationRunId]
+    : undefined;
+  $: reviewTarget = activeCandidateId ? activeCandidateRun?.target : generationTarget;
+  $: reviewObservationScope = activeCandidateId
+    ? (activeCandidateRun?.target.observationScope ?? observationScope)
+    : observationScope;
   $: activeCandidateSnapshot = activeCandidate
     ? document.revisions[activeCandidate.revisionId]?.snapshot
     : undefined;
@@ -243,6 +258,7 @@
         return !source || JSON.stringify(source) !== JSON.stringify(node);
       })
     : [];
+  $: proposedLayerRows = makeProposedLayerRows(ghostNodes, ghostSnapshot);
   $: candidateViews = makeCandidateViews(
     runCandidates,
     document,
@@ -250,6 +266,14 @@
     pinnedAtomicIds,
   );
   $: fidelityStops = makeFidelityStops(selectedNodes, document, runCandidates);
+  $: codesignReviewActive = Boolean(
+    (loadingCandidate && generationTarget) ||
+    (activeCandidateId && activeCandidate && reviewTarget),
+  );
+  $: if (selectedNodes[0]?.id !== fidelityTargetNodeId) {
+    fidelityTargetNodeId = selectedNodes[0]?.id ?? '';
+    if (selectedNodes[0]) requestedFidelity = effectiveFidelity(document, selectedNodes[0].id);
+  }
   $: processEventViews = makeProcessEventViews(document.processEvents, document);
   $: aiModelOptions = completeModelOptions(
     aiIntegration.models,
@@ -290,23 +314,20 @@
         selectedAiModel = savedAiSettings.model;
       if (['low', 'medium', 'high', 'xhigh', 'max'].includes(savedAiSettings?.effort ?? ''))
         selectedAiEffort = savedAiSettings!.effort!;
-      const savedFidelity = localStorage.getItem(DEFAULT_FIDELITY_KEY);
-      if (['wireframe', 'component', 'visual', 'production'].includes(savedFidelity ?? ''))
-        requestedFidelity = savedFidelity as Fidelity;
     } catch {
       // The editor still works when browser storage is unavailable.
     }
     void refreshProviderStatus();
     const keydown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement;
+      const target = event.target instanceof Element ? event.target : null;
       if (settingsOpen && event.key === 'Escape') {
         event.preventDefault();
         closeSettings('keyboard');
         return;
       }
       if (
-        target.matches('input, select, textarea, [contenteditable="true"]') ||
-        target.closest('dialog, [role="dialog"]')
+        target?.matches('input, select, textarea, [contenteditable="true"]') ||
+        target?.closest('dialog, [role="dialog"]')
       )
         return;
       const key = event.key.toLowerCase();
@@ -314,7 +335,6 @@
       if (command && key === 'enter') {
         event.preventDefault();
         if (!loadingCandidate && generationCanGenerate) {
-          setEditorMode('codesign');
           void generateCandidates('complete');
         }
         return;
@@ -450,8 +470,7 @@
     if (control.closest('.context-menu')) return 'context-menu';
     if (control.closest('.shortcuts-dialog')) return 'shortcuts-overlay';
     if (control.closest('.settings-dialog')) return 'settings';
-    if (control.closest('.context-bar')) return 'selection-toolbar';
-    if (control.closest('.codesign-panel')) return 'codesign';
+    if (control.closest('.inline-codesign')) return 'selection-toolbar';
     if (control.closest('.bottom-panel')) return 'bottom-panel';
     if (control.closest('.inspector')) return 'inspector';
     return 'editor';
@@ -483,13 +502,6 @@
     if (editorMode === nextMode) return;
     editorMode = nextMode;
     preview = nextMode === 'preview';
-    if (nextMode === 'codesign') {
-      bottomTab = 'process';
-      inspectorTab = 'trace';
-      codesignStatus = selection.length
-        ? 'Choose an action to generate a candidate. Your design is unchanged.'
-        : 'Select a frame or object to choose where Codesign may propose changes.';
-    }
     logAction('mode.changed', { mode: nextMode });
   }
   async function refreshProviderStatus() {
@@ -497,7 +509,6 @@
       const response = await fetch('/api/agent/status');
       const value = await response.json();
       if (!response.ok) throw new Error(value.error?.message ?? 'Provider status unavailable');
-      backend = value.backend;
       agentStatus = value.message;
       providerConnected = Boolean(value.connected);
       providerAccount = value.status?.accountLabel ?? '';
@@ -601,20 +612,11 @@
     contextMenu = null;
     shortcutsOpen = false;
     settingsOpen = true;
-    logAction('settings.opened', { backend });
+    logAction('settings.opened', { provider: 'codex' });
   }
   function closeSettings(source: 'button' | 'keyboard' | 'backdrop') {
     settingsOpen = false;
     logAction('settings.closed', { source });
-  }
-  function setDefaultFidelity(fidelity: Fidelity) {
-    requestedFidelity = fidelity;
-    try {
-      localStorage.setItem(DEFAULT_FIDELITY_KEY, fidelity);
-    } catch {
-      // Keep the in-memory preference when browser storage is unavailable.
-    }
-    logAction('settings.default-fidelity-changed', { fidelity });
   }
   function setFrameOrientation(orientation: FrameOrientation) {
     if (orientation === frameOrientation) return;
@@ -824,7 +826,7 @@
     }
   }
   function applyBatch(operations: DesignOperation[], label: string) {
-    if (!operations.length) return;
+    if (!operations.length) return false;
     const baseRevision = document.revision;
     try {
       documentStore.applyBatch(operations, `${label}-${uid('transaction')}`);
@@ -837,9 +839,11 @@
         baseRevision,
         nextRevision: baseRevision + 1,
       });
+      return true;
     } catch (cause) {
       error = cause instanceof Error ? cause.message : `${label} could not be applied`;
       logAction('operation.failed', { type: label, actor: 'user', baseRevision, message: error });
+      return false;
     }
   }
   function duplicateIdMap(payload: CodesignClipboardPayload) {
@@ -1007,6 +1011,19 @@
       4,
       Math.min(node.style.padding, (node.bounds.width - 8) / 2, (node.bounds.height - 8) / 2),
     );
+  }
+  function belongsToNativeComponentTree(node: DesignNode, nodes: Record<string, DesignNode>) {
+    let current = node.parentId ? nodes[node.parentId] : undefined;
+    const visited = new Set<string>();
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id);
+      if (current.componentBinding) {
+        const resolved = resolveComponent(current.componentBinding.componentId);
+        if (resolved && !resolved.part && resolved.root.renderStrategy === 'compound') return true;
+      }
+      current = current.parentId ? nodes[current.parentId] : undefined;
+    }
+    return false;
   }
   function contains(outer: DesignNode, inner: DesignNode) {
     return (
@@ -1198,6 +1215,8 @@
         .map((candidate) => candidate.fidelity),
     );
     const fidelities: Fidelity[] = ['structure', 'wireframe', 'component', 'visual', 'production'];
+    const currentIndex = fidelities.indexOf(current);
+    const inheritedFrom = selected ? fidelityInheritanceLabel(sourceDocument, selected) : undefined;
     return fidelities.map((fidelity) => {
       const representations = saved.filter((item) => item.fidelity === fidelity);
       const representation = representations.at(-1);
@@ -1209,16 +1228,42 @@
           versionCount: representations.length,
           representationId: representation?.id,
         };
-      if (fidelity === current) return { fidelity, state: 'current' };
+      if (fidelity === current) return { fidelity, state: 'current', inheritedFrom };
       if (representation) return { fidelity, state: 'saved', representationId: representation.id };
-      if (fidelity === 'wireframe' || fidelity === 'component')
-        return { fidelity, state: 'generate' };
+      if (fidelities.indexOf(fidelity) > currentIndex) return { fidelity, state: 'generate' };
       return {
         fidelity,
         state: 'unavailable',
-        disabledReason: 'This deterministic prototype does not generate this fidelity yet.',
+        disabledReason: 'No saved lower-fidelity representation exists for this selection.',
       };
     });
+  }
+  function fidelityInheritanceLabel(sourceDocument: typeof document, node: DesignNode) {
+    if (node.kind === 'frame' || sourceDocument.nodeFidelityOverrides[node.id]) return undefined;
+    let parentId = node.parentId;
+    while (parentId) {
+      const parent = sourceDocument.nodes[parentId];
+      if (!parent) break;
+      if (parent.kind === 'frame' && sourceDocument.frameFidelity[parent.id]) return parent.name;
+      parentId = parent.parentId;
+    }
+    return 'screen';
+  }
+  function makeProposedLayerRows(
+    nodes: DesignNode[],
+    snapshot?: { nodes: Record<string, DesignNode> },
+  ) {
+    const proposedIds = new Set(nodes.map((node) => node.id));
+    const depthFor = (node: DesignNode) => {
+      let depth = 0;
+      let parentId = node.parentId;
+      while (parentId && proposedIds.has(parentId)) {
+        depth += 1;
+        parentId = snapshot?.nodes[parentId]?.parentId;
+      }
+      return depth;
+    };
+    return nodes.map((node) => ({ node, depth: depthFor(node) }));
   }
   function makeProcessEventViews(
     events: ProcessEvent[],
@@ -1335,6 +1380,89 @@
     tool = 'select';
     persistFrameSize();
   }
+  function insertComponent(componentId: string) {
+    const definition = componentCatalog.find((component) => component.id === componentId);
+    const blueprint = getDefaultComponentBlueprint(componentId);
+    if (!definition || !blueprint?.length) return;
+    const selectedParent = selectedNodes[0];
+    const parent =
+      selectedParent &&
+      (selectedParent.kind === 'frame' ||
+        selectedParent.kind === 'group' ||
+        (selectedParent.kind === 'instance' &&
+          selectedParent.componentBinding &&
+          validateComponentChild(
+            selectedParent.componentBinding.componentId,
+            componentId,
+            'default',
+          ).ok))
+        ? selectedParent
+        : undefined;
+    const viewport = canvasElement.getBoundingClientRect();
+    const origin = parent
+      ? {
+          x: parent.bounds.x + Math.max(12, parent.style.padding),
+          y: parent.bounds.y + Math.max(12, parent.style.padding),
+        }
+      : {
+          x: (viewport.width / 2 - pan.x) / zoom - definition.defaultSize.width / 2,
+          y: (viewport.height / 2 - pan.y) / zoom - definition.defaultSize.height / 2,
+        };
+    const ids = new Map(blueprint.map((item) => [item.key, uid('node')]));
+    const childCount = Math.max(1, blueprint.length - 1);
+    const childHeight = Math.max(20, (definition.defaultSize.height - 24) / childCount);
+    const operations = blueprint.map((item, index): DesignOperation => {
+      const nodeId = ids.get(item.key)!;
+      const parentId = item.parentKey ? ids.get(item.parentKey) : parent?.id;
+      const operationId = uid('op');
+      const resolved = resolveComponent(item.componentId);
+      const isRoot = !item.parentKey;
+      const bounds = isRoot
+        ? { ...origin, ...definition.defaultSize }
+        : {
+            x: origin.x + 12,
+            y: origin.y + 12 + (index - 1) * childHeight,
+            width: Math.max(24, definition.defaultSize.width - 24),
+            height: Math.min(childHeight - 4, Math.max(20, definition.defaultSize.height - 24)),
+          };
+      return {
+        id: operationId,
+        type: 'create',
+        actor: 'user',
+        node: {
+          id: nodeId,
+          name: resolved?.part?.displayName ?? resolved?.root.displayName ?? item.componentId,
+          kind: 'instance',
+          screenId: document.activeScreenId,
+          parentId,
+          childIds: [],
+          bounds,
+          style: {
+            ...defaultStyle,
+            fill: isRoot ? '#ffffff' : 'transparent',
+            padding: isRoot ? 12 : 4,
+            radius: isRoot ? 8 : 4,
+          },
+          text: item.content,
+          componentBinding: {
+            componentId: item.componentId,
+            props: item.props,
+            slot: item.parentKey ? item.slot : undefined,
+          },
+          provenance: { actor: 'user', operationId },
+        },
+      };
+    });
+    if (!applyBatch(operations, 'insert-component')) return;
+    selection = [ids.get('root')!];
+    tool = 'select';
+    logAction('component.inserted', {
+      componentId,
+      rootId: ids.get('root')!,
+      nodeCount: operations.length,
+      parentId: parent?.id ?? '',
+    });
+  }
   function gestureDelta(event: PointerEvent) {
     if (!gesture) return { x: 0, y: 0 };
     const p = point(event);
@@ -1420,7 +1548,13 @@
     };
   }
   async function startTextEditing(event: MouseEvent, node: DesignNode) {
-    if (node.kind !== 'text' || preview) return;
+    const component = node.componentBinding
+      ? resolveComponent(node.componentBinding.componentId)
+      : undefined;
+    const editableComponentContent = Boolean(
+      component && (component.part?.editableContent || component.root.editableContent),
+    );
+    if ((node.kind !== 'text' && !editableComponentContent) || preview) return;
     event.preventDefault();
     event.stopPropagation();
     editingTextId = node.id;
@@ -1823,9 +1957,9 @@
     if (!contextNode) return;
     if (!selection.includes(contextNode.id)) selection = [contextNode.id];
     contextMenu = null;
-    setEditorMode('codesign');
     requestedFidelity = 'component';
-    codesignStatus = 'Choose Resolve to map the selected object to a registered component.';
+    codesignStatus = 'Component fidelity staged. Generate to propose a registered component.';
+    void generateCandidates('complete');
   }
   function deleteFromContext() {
     if (!contextNode) return;
@@ -1857,7 +1991,10 @@
     });
   }
   function layerCanCollapse(node: DesignNode) {
-    return (node.kind === 'frame' || node.kind === 'group') && node.childIds.length > 0;
+    return (
+      (node.kind === 'frame' || node.kind === 'group' || node.kind === 'instance') &&
+      node.childIds.length > 0
+    );
   }
   function toggleLayerCollapse(event: MouseEvent, node: DesignNode) {
     event.stopPropagation();
@@ -1938,7 +2075,9 @@
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     const ratio = (event.clientY - rect.top) / Math.max(1, rect.height);
     const position =
-      (target.kind === 'frame' || target.kind === 'group') && ratio > 0.28 && ratio < 0.72
+      (target.kind === 'frame' || target.kind === 'group' || target.kind === 'instance') &&
+      ratio > 0.28 &&
+      ratio < 0.72
         ? 'inside'
         : ratio < 0.5
           ? 'before'
@@ -1992,7 +2131,7 @@
     codesignStatus = 'Generating a candidate… Your design is unchanged.';
     logAction('codesign.requested', {
       action,
-      backend,
+      provider: 'codex',
       mutationScopeIds: selection,
       observationScope: observationScope.kind,
       observationCount: observationScope.nodeIds.length,
@@ -2054,7 +2193,6 @@
       const value = (await response.json()) as {
         run?: GenerationRun;
         candidates?: CandidateDraft[];
-        fallback?: boolean;
         message?: string;
       };
       if (!response.ok || !value.run || !value.candidates)
@@ -2083,14 +2221,12 @@
       highlightedChangeId = '';
       bottomOpen = true;
       bottomTab = 'process';
-      agentStatus = value.fallback ? 'Codex unavailable · local fallback' : agentStatus;
       codesignStatus = `${value.candidates.length} structured ${value.candidates.length === 1 ? 'candidate is' : 'candidates are'} ready for review.`;
       logAction('codesign.ready', {
         action,
         generationRunId: value.run.id,
         candidateIds: generatedIds,
-        backend: value.run.backend,
-        fallback: Boolean(value.fallback),
+        provider: value.run.provider,
       });
     } catch (cause) {
       if (requestId !== generationRequestId) return;
@@ -2134,6 +2270,7 @@
       (id) => candidate.decisions[id] === 'pending',
     );
     compareSourceActive = false;
+    proposedSelectionId = '';
     documentStore.replaceMetadata(viewCandidate(document, candidateId));
     codesignStatus = 'Candidate selected. Your design is unchanged.';
     logAction('codesign.candidate-viewed', { candidateId });
@@ -2188,6 +2325,7 @@
         acceptCandidateChanges(document, candidateId, acceptedIds, rejectedIds),
       );
       selectedAtomicIds = [];
+      proposedSelectionId = '';
       compareSourceActive = false;
       codesignStatus = rejectedIds.length
         ? `Accepted ${acceptedIds.length} and saved ${rejectedIds.length} as rejected.`
@@ -2201,6 +2339,7 @@
   function rejectActiveCandidate(candidateId: string) {
     documentStore.replaceMetadata(rejectCandidate(document, candidateId));
     selectedAtomicIds = [];
+    proposedSelectionId = '';
     codesignStatus = 'Candidate rejected and retained in process history.';
     logAction('codesign.rejected', { candidateId });
   }
@@ -2243,7 +2382,12 @@
   }
   function stageFidelity(fidelity: Fidelity) {
     requestedFidelity = fidelity;
-    codesignStatus = `${fidelity[0].toUpperCase() + fidelity.slice(1)} is staged as the target. Choose Complete to generate.`;
+    if (!generationCanGenerate) {
+      codesignStatus = 'Select an editable layer before generating a new representation.';
+      return;
+    }
+    codesignStatus = `${fidelity[0].toUpperCase() + fidelity.slice(1)} is the target. Generating a candidate…`;
+    void generateCandidates('complete');
   }
   function inspectFidelityCandidate(fidelity: Fidelity) {
     const candidate = runCandidates.find((item) => item.fidelity === fidelity);
@@ -2257,6 +2401,38 @@
     if (representation.rootNodeIds[0]) selection = [representation.rootNodeIds[0]];
     codesignStatus = `${fidelity[0].toUpperCase() + fidelity.slice(1)} representation selected.`;
     logAction('fidelity.navigated', { fidelity, representationId });
+  }
+  function setSelectedFidelity(fidelity: Fidelity) {
+    const node = selectedNodes[0];
+    if (!node) return;
+    const next =
+      node.kind === 'frame'
+        ? setFrameFidelity(document, node.id, fidelity)
+        : setNodeFidelityOverride(document, node.id, fidelity);
+    documentStore.replaceMetadata(next);
+    requestedFidelity = fidelity;
+    codesignStatus =
+      node.kind === 'frame'
+        ? `${node.name} now sets ${fidelity} fidelity for its descendants.`
+        : `${node.name} now overrides inherited fidelity with ${fidelity}.`;
+    logAction('fidelity.changed', { nodeId: node.id, fidelity, override: node.kind !== 'frame' });
+  }
+  function clearSelectedFidelityOverride() {
+    const node = selectedNodes[0];
+    if (!node || node.kind === 'frame') return;
+    const next = setNodeFidelityOverride(document, node.id);
+    documentStore.replaceMetadata(next);
+    requestedFidelity = effectiveFidelity(next, node.id);
+    codesignStatus = `${node.name} now inherits fidelity from its containing frame.`;
+    logAction('fidelity.override-cleared', { nodeId: node.id });
+  }
+  function selectProposedLayer(nodeId: string) {
+    proposedSelectionId = nodeId;
+    const change = activeCandidate?.atomicChangeIds
+      .map((id) => document.atomicChanges[id])
+      .find((item) => item?.trace.affectedNodeIds.includes(nodeId));
+    highlightedChangeId = change?.id ?? '';
+    logAction('codesign.proposed-layer-selected', { nodeId, changeId: highlightedChangeId });
   }
   function toggleSelectedNodePin(nodeId: string) {
     const pinned = !document.pinnedNodeIds.includes(nodeId);
@@ -2293,7 +2469,13 @@
     tool = 'select';
   }
   function changeStyle(patch: StylePatch) {
-    const targetIds = selectedNodes.filter((node) => !node.componentBinding).map((node) => node.id);
+    const keys = Object.keys(patch);
+    const textOnly = keys.every((key) =>
+      ['textColor', 'fontSize', 'fontWeight', 'textAlign', 'lineHeight'].includes(key),
+    );
+    const targetIds = selectedNodes
+      .filter((node) => !node.componentBinding || (textOnly && isEditableContentNode(node)))
+      .map((node) => node.id);
     if (targetIds.length)
       apply({
         id: uid('op'),
@@ -2379,8 +2561,16 @@
       'property-resize',
     );
   }
+  function isEditableContentNode(node: DesignNode) {
+    if (node.kind === 'text') return true;
+    if (!node.componentBinding) return false;
+    const component = resolveComponent(node.componentBinding.componentId);
+    return Boolean(
+      component && (component.part?.editableContent || component.root.editableContent),
+    );
+  }
   function updateSelectedText(text: string) {
-    const targetIds = selectedNodes.filter((node) => node.kind === 'text').map((node) => node.id);
+    const targetIds = selectedNodes.filter(isEditableContentNode).map((node) => node.id);
     if (targetIds.length)
       apply({ id: uid('op'), type: 'update-node', actor: 'user', targetIds, patch: { text } });
   }
@@ -2463,34 +2653,28 @@
     <div class="mode-switch" aria-label="Editor mode">
       <button class:active={editorMode === 'edit'} onclick={() => setEditorMode('edit')}
         >Edit</button
-      ><button class:active={editorMode === 'codesign'} onclick={() => setEditorMode('codesign')}
-        >Co-design</button
       ><button class:active={editorMode === 'preview'} onclick={() => setEditorMode('preview')}
         >Preview</button
       >
     </div>
     <div class="top-actions">
       <span class="status" title={agentStatus}
-        ><i aria-hidden="true" class:online={backend === 'codex'}></i>{backend === 'codex'
-          ? providerConnected
-            ? `Codex${providerPlan ? ` · ${providerPlan}` : ''}`
-            : 'Codex · signed out'
-          : 'Local'}</span
+        ><i aria-hidden="true" class:online={providerConnected}></i>{providerConnected
+          ? `Codex${providerPlan ? ` · ${providerPlan}` : ''}`
+          : 'Codex · signed out'}</span
       >
-      {#if backend === 'codex'}
-        {#if providerConnected}
-          <button title={providerAccount || agentStatus} onclick={signOutOfCodex}
-            ><span class="button-icon" aria-hidden="true">◎</span>Sign out</button
-          >
-        {:else}
-          <button title={agentStatus} onclick={signInToCodex}
-            ><span class="button-icon" aria-hidden="true">◎</span>Sign in to Codex</button
-          >
-        {/if}
-        <button title="Refresh Codex connection status" onclick={refreshProviderStatus}
-          ><span class="button-icon" aria-hidden="true">↻</span>Refresh provider</button
+      {#if providerConnected}
+        <button title={providerAccount || agentStatus} onclick={signOutOfCodex}
+          ><span class="button-icon" aria-hidden="true">◎</span>Sign out</button
+        >
+      {:else}
+        <button title={agentStatus} onclick={signInToCodex}
+          ><span class="button-icon" aria-hidden="true">◎</span>Sign in to Codex</button
         >
       {/if}
+      <button title="Refresh Codex connection status" onclick={refreshProviderStatus}
+        ><span class="button-icon" aria-hidden="true">↻</span>Refresh provider</button
+      >
       <button title="Open editor and Codesign settings" onclick={openSettings}>Settings</button>
       <button title="Undo · Ctrl/⌘ Z" onclick={() => undo('toolbar')}
         ><span class="button-icon" aria-hidden="true">↶</span>Undo</button
@@ -2587,6 +2771,7 @@
         <p>Drag for a custom frame, or place this preset at the canvas center.</p>
       </section>
     {/if}
+    <ComponentLibrary components={componentCatalog} onInsert={insertComponent} />
     <section class="outline">
       <div class="section-title">
         <span>Screens</span><button title="Duplicate screen" onclick={duplicateScreen}
@@ -2611,6 +2796,41 @@
       <div class="section-title layers-title">
         <span>Layers</span><small>{visibleNodes.length}</small>
       </div>
+      {#if codesignReviewActive && proposedLayerRows.length}
+        <div class="proposed-layers" aria-label="Proposed candidate layers">
+          <div class="proposed-layers-heading">
+            <span><i aria-hidden="true">✦</i> Proposed layers</span><small
+              >Candidate {Math.max(1, runCandidates.indexOf(activeCandidate!) + 1)}</small
+            >
+          </div>
+          {#each proposedLayerRows as row (row.node.id)}
+            {@const atomicChange = activeCandidate?.atomicChangeIds
+              .map((id) => document.atomicChanges[id])
+              .find((change) => change?.trace.affectedNodeIds.includes(row.node.id))}
+            <div
+              class="proposed-layer-row"
+              class:selected={proposedSelectionId === row.node.id}
+              style={`--layer-indent:${8 + row.depth * 14}px`}
+            >
+              {#if atomicChange}
+                <input
+                  type="checkbox"
+                  aria-label={`Include proposed ${row.node.name}`}
+                  checked={selectedAtomicIds.includes(atomicChange.id)}
+                  onchange={(event) =>
+                    toggleAtomicChange(atomicChange.id, event.currentTarget.checked)}
+                />
+              {:else}
+                <span class="proposed-checkbox-spacer" aria-hidden="true"></span>
+              {/if}
+              <button onclick={() => selectProposedLayer(row.node.id)}>
+                <span class="layer-kind">Proposed {row.node.kind}</span>
+                <span class="layer-name">{row.node.name}</span>
+              </button>
+            </div>
+          {/each}
+        </div>
+      {/if}
       <div class="layers" role="list" aria-label="Layers">
         {#each layerRows as row (row.node.id)}<div
             class="layer-row"
@@ -2722,7 +2942,7 @@
     <div class="canvas-help">
       {preview
         ? 'Click a connected object to navigate · Esc to exit'
-        : editorMode === 'codesign'
+        : codesignReviewActive
           ? 'Blue: can change · Amber: focus only · Gray dashed: can reference · Purple: insertion parent · Green: editable region · Candidate ghosts never block the canvas'
           : tool === 'frame'
             ? `${framePresetById(framePresetId)?.name ?? 'Custom frame'} · ${frameSize.width}×${frameSize.height} · Drag custom or place preset`
@@ -2770,8 +2990,8 @@
               document.nodes[transition.sourceNodeId].bounds.height / 2 -
               7}>→ state</text
           >{/each}
-        {#if editorMode === 'codesign' && generationTarget}
-          {#each generationTarget.mutationScope.regions as region}
+        {#if codesignReviewActive && reviewTarget}
+          {#each reviewTarget.mutationScope.regions as region}
             <rect
               class="editable-region-boundary"
               x={region.x}
@@ -2781,7 +3001,7 @@
               rx="3"
             />
           {/each}
-          {#each generationTarget.mutationScope.insertionParentIds as parentId}
+          {#each reviewTarget.mutationScope.insertionParentIds as parentId}
             {@const parent = document.nodes[parentId]}
             {#if parent}
               <rect
@@ -2812,7 +3032,7 @@
             ondblclick={(event) => startTextEditing(event, node)}
             oncontextmenu={(event) => openContextMenu(event, node)}
           >
-            {#if editorMode === 'codesign' && observationScope.nodeIds.includes(node.id) && (observationScope.rootId === node.id || (!observationScope.rootId && (!node.parentId || !observationScope.nodeIds.includes(node.parentId))))}
+            {#if codesignReviewActive && reviewObservationScope.nodeIds.includes(node.id) && (reviewObservationScope.rootId === node.id || (!reviewObservationScope.rootId && (!node.parentId || !reviewObservationScope.nodeIds.includes(node.parentId))))}
               <rect
                 class="observation-boundary"
                 x={bounds.x - 6 / zoom}
@@ -2822,7 +3042,7 @@
                 rx={Math.max(node.style.radius, 3)}
               />
             {/if}
-            {#if editorMode === 'codesign' && generationTarget?.mutationScope.existingNodeIds.includes(node.id)}
+            {#if codesignReviewActive && reviewTarget?.mutationScope.existingNodeIds.includes(node.id)}
               <rect
                 class="mutation-boundary"
                 x={bounds.x - 9 / zoom}
@@ -2831,7 +3051,7 @@
                 height={bounds.height + 18 / zoom}
                 rx={Math.max(node.style.radius, 3)}
               />
-            {:else if editorMode === 'codesign' && selection.includes(node.id)}
+            {:else if codesignReviewActive && selection.includes(node.id)}
               <rect
                 class="focus-boundary"
                 x={bounds.x - 9 / zoom}
@@ -2841,7 +3061,7 @@
                 rx={Math.max(node.style.radius, 3)}
               />
             {/if}
-            {#if editorMode === 'codesign' && highlightedChangeId && document.atomicChanges[highlightedChangeId]?.trace.evidenceNodeIds.includes(node.id)}
+            {#if codesignReviewActive && highlightedChangeId && document.atomicChanges[highlightedChangeId]?.trace.evidenceNodeIds.includes(node.id)}
               <rect
                 class="evidence-highlight"
                 x={bounds.x - 10 / zoom}
@@ -2851,18 +3071,25 @@
                 rx={Math.max(node.style.radius, 3)}
               />
             {/if}
-            <rect
-              class="node"
-              x={bounds.x}
-              y={bounds.y}
-              width={bounds.width}
-              height={bounds.height}
-              rx={node.style.radius}
-              fill={node.style.fill}
-              stroke={node.style.stroke}
-              stroke-width={node.style.strokeWidth}
-            />
-            {#if node.componentBinding || selection.includes(node.id)}<rect
+            {#if !node.componentBinding}
+              <rect
+                class="node"
+                x={bounds.x}
+                y={bounds.y}
+                width={bounds.width}
+                height={bounds.height}
+                rx={node.style.radius}
+                fill={node.style.fill}
+                stroke={node.style.stroke}
+                stroke-width={node.style.strokeWidth}
+              />
+            {/if}
+            {#if node.componentBinding}
+              {#if !belongsToNativeComponentTree(node, document.nodes)}
+                <ComponentCanvasRenderer {node} {bounds} nodes={document.nodes} {preview} />
+              {/if}
+            {/if}
+            {#if !node.componentBinding && selection.includes(node.id)}<rect
                 class="content-area"
                 x={bounds.x + contentInset(node)}
                 y={bounds.y + contentInset(node)}
@@ -2870,20 +3097,7 @@
                 height={Math.max(0, bounds.height - contentInset(node) * 2)}
                 rx={Math.max(0, node.style.radius - 2)}
               />{/if}
-            {#if node.componentBinding}<rect
-                class="component-accent"
-                x={bounds.x}
-                y={bounds.y}
-                width="4"
-                height={bounds.height}
-                rx="2"
-              /><text
-                class="component-name"
-                x={bounds.x + contentInset(node)}
-                y={bounds.y + Math.min(contentInset(node) + 11, bounds.height - 8)}
-                >{node.componentBinding.componentId} · {node.style.density ?? 'comfortable'}</text
-              >{/if}
-            {#if (node.text || node.semantics) && editingTextId !== node.id}<text
+            {#if !node.componentBinding && (node.text || node.semantics) && editingTextId !== node.id}<text
                 class="node-label"
                 x={textLayout.x}
                 text-anchor={textLayout.anchor}
@@ -3074,7 +3288,7 @@
             {/if}
           {/each}
         {/if}
-        {#if editorMode === 'codesign' && ghostSnapshot}
+        {#if codesignReviewActive && ghostSnapshot}
           <g
             class:source-comparison={compareSourceActive}
             class="candidate-ghost"
@@ -3083,22 +3297,35 @@
             {#each ghostNodes as node (node.id)}
               <g
                 class:highlighted-ghost={Boolean(
-                  highlightedChangeId &&
-                  document.atomicChanges[highlightedChangeId]?.trace.affectedNodeIds.includes(
-                    node.id,
-                  ),
+                  proposedSelectionId === node.id ||
+                  (highlightedChangeId &&
+                    document.atomicChanges[highlightedChangeId]?.trace.affectedNodeIds.includes(
+                      node.id,
+                    )),
                 )}
               >
-                <rect
-                  x={node.bounds.x}
-                  y={node.bounds.y}
-                  width={node.bounds.width}
-                  height={node.bounds.height}
-                  rx={node.style.radius}
-                  fill={node.style.fill}
-                  stroke={node.style.stroke}
-                />
-                {#if node.text}
+                {#if !node.componentBinding}
+                  <rect
+                    x={node.bounds.x}
+                    y={node.bounds.y}
+                    width={node.bounds.width}
+                    height={node.bounds.height}
+                    rx={node.style.radius}
+                    fill={node.style.fill}
+                    stroke={node.style.stroke}
+                  />
+                {/if}
+                {#if node.componentBinding}
+                  {#if !belongsToNativeComponentTree(node, ghostSnapshot.nodes)}
+                    <ComponentCanvasRenderer
+                      {node}
+                      bounds={node.bounds}
+                      nodes={ghostSnapshot.nodes}
+                      ghost
+                    />
+                  {/if}
+                {/if}
+                {#if node.text && !node.componentBinding}
                   <text
                     x={node.bounds.x + contentInset(node)}
                     y={node.bounds.y +
@@ -3131,18 +3358,46 @@
           >{/if}
       </g>
     </svg>
-    {#if selection.length && !preview}<div class="context-bar">
-        <span>{selection.length} selected</span><button
-          disabled={loadingCandidate || !generationCanGenerate}
-          title={`Complete with Codesign · ${commandLabel}+Enter`}
-          onclick={() => {
-            setEditorMode('codesign');
-            void generateCandidates('complete');
-          }}>Complete with Codesign</button
-        >{#if selectedNodes[0]?.componentBinding}<button onclick={generalize}
-            >Apply style to matching components</button
-          >{/if}
-      </div>{/if}
+    {#if (selection.length || codesignReviewActive) && !preview}
+      <InlineCodesignToolbar
+        selectionLabel={selection.length === 1
+          ? (selectedNodes[0]?.name ?? 'Selection')
+          : selection.length > 1
+            ? `${selection.length} layers selected`
+            : 'Saved candidate'}
+        canGenerate={generationCanGenerate}
+        {commandLabel}
+        statusMessage={codesignStatus}
+        busy={loadingCandidate}
+        observationScope={reviewObservationScope}
+        {observationScopes}
+        {fidelityStops}
+        {requestedFidelity}
+        candidates={candidateViews}
+        activeCandidateId={activeCandidate?.id}
+        highlightedChangeId={highlightedChangeId || undefined}
+        compareSource={compareSourceActive}
+        rerollDisabledReason={activeCandidate?.status === 'accepted' ||
+        activeCandidate?.status === 'partially-accepted'
+          ? 'Applied candidates cannot be rerolled.'
+          : undefined}
+        onObservationScopeChange={selectObservationScope}
+        onGenerate={generateCandidates}
+        onCancel={cancelGeneration}
+        onNavigateFidelity={navigateRepresentation}
+        onStageFidelity={stageFidelity}
+        onInspectFidelityCandidate={inspectFidelityCandidate}
+        onSelectCandidate={selectCandidate}
+        onToggleAtomicChange={toggleAtomicChange}
+        onTogglePin={toggleAtomicPin}
+        onHighlightChange={(changeId) => (highlightedChangeId = changeId ?? '')}
+        onCompareSource={toggleSourceComparison}
+        onAcceptAll={(candidateId) => acceptCandidate(candidateId, true)}
+        onAcceptSelected={(candidateId) => acceptCandidate(candidateId, false)}
+        onRejectCandidate={rejectActiveCandidate}
+        onReroll={rerollCandidate}
+      />
+    {/if}
 
     {#if contextMenu}<div
         class="context-menu"
@@ -3212,9 +3467,8 @@
               >{contextNode.clipContent ? 'Disable Clip content' : 'Enable Clip content'}</button
             >{/if}
           <div class="menu-separator"></div>
-          <button role="menuitem" onclick={promoteFromContext}>Open in Co-design</button><button
-            role="menuitem"
-            onclick={startConnectionFromContext}>Start connection</button
+          <button role="menuitem" onclick={promoteFromContext}>Complete with Codesign</button
+          ><button role="menuitem" onclick={startConnectionFromContext}>Start connection</button
           ><button class="danger" role="menuitem" onclick={deleteFromContext}
             ><span>Delete {selection.length > 1 ? 'selection' : 'element'}</span><kbd>Delete</kbd
             ></button
@@ -3405,7 +3659,6 @@
         {framePresetId}
         {frameOrientation}
         {frameSize}
-        {requestedFidelity}
         projectSummary={{
           name: activeProject?.name ?? 'Untitled design',
           projectCount: projects.length,
@@ -3414,7 +3667,6 @@
           revision: document.revision,
           storageMessage: storageWarning ?? 'Saved locally',
         }}
-        activeBackend={backend}
         integration={{ ...aiIntegration, models: aiModelOptions }}
         selectedModel={selectedAiModel}
         selectedEffort={selectedAiEffort}
@@ -3429,7 +3681,6 @@
           logAction('settings.frame-preset-changed', { presetId, ...frameSize });
         }}
         onFrameOrientationChange={setFrameOrientation}
-        onFidelityChange={setDefaultFidelity}
         onResetViewport={() => resetViewport('settings')}
         onAiSectionOpen={refreshAiIntegrationStatus}
         onRefresh={refreshAiIntegrationStatus}
@@ -3484,7 +3735,7 @@
                   >
                 </div>{/each}{#if !document.operations.length}<p>No applied operations yet.</p>{/if}
             </div>{:else}<div class="code-header">
-              <span>Read-only deterministic export</span><button
+              <span>Read-only Svelte projection</span><button
                 onclick={() => navigator.clipboard.writeText(code)}>Copy code</button
               >
             </div>
@@ -3495,53 +3746,9 @@
 
   <aside class="inspector">
     <div class="inspector-tabs">
-      <button
-        class:active={inspectorTab === 'properties'}
-        onclick={() => (inspectorTab = 'properties')}>Properties</button
-      ><button class:active={inspectorTab === 'trace'} onclick={() => (inspectorTab = 'trace')}
-        >Trace</button
-      >
+      <span>Properties</span>
     </div>
-    {#if inspectorTab === 'trace'}
-      <CodesignPanel
-        {mutationLabels}
-        {insertionLabels}
-        canGenerate={generationCanGenerate}
-        observationSummary={observationScopes.find(
-          (item) => item.scope.kind === observationScope.kind,
-        )?.label ?? 'Selection'}
-        {observationScope}
-        {observationScopes}
-        supportedActions={[{ action: 'complete' }]}
-        {fidelityStops}
-        run={latestRun}
-        candidates={candidateViews}
-        activeCandidateId={activeCandidate?.id}
-        highlightedChangeId={highlightedChangeId || undefined}
-        compareSource={compareSourceActive}
-        busy={loadingCandidate}
-        statusMessage={codesignStatus}
-        rerollDisabledReason={activeCandidate?.status === 'accepted' ||
-        activeCandidate?.status === 'partially-accepted'
-          ? 'Applied candidates cannot be rerolled.'
-          : undefined}
-        onObservationScopeChange={selectObservationScope}
-        onGenerate={generateCandidates}
-        onCancel={cancelGeneration}
-        onNavigateFidelity={navigateRepresentation}
-        onStageFidelity={stageFidelity}
-        onInspectFidelityCandidate={inspectFidelityCandidate}
-        onSelectCandidate={selectCandidate}
-        onToggleAtomicChange={toggleAtomicChange}
-        onTogglePin={toggleAtomicPin}
-        onHighlightChange={(changeId) => (highlightedChangeId = changeId ?? '')}
-        onCompareSource={toggleSourceComparison}
-        onAcceptAll={(candidateId) => acceptCandidate(candidateId, true)}
-        onAcceptSelected={(candidateId) => acceptCandidate(candidateId, false)}
-        onRejectCandidate={rejectActiveCandidate}
-        onReroll={rerollCandidate}
-      />
-    {:else if selectedNodes[0]}
+    {#if selectedNodes[0]}
       {@const node = selectedNodes[0]}
       <div class="selection-summary">
         <span class="kind-icon" aria-hidden="true">{node.componentBinding ? '◆' : '□'}</span>
@@ -3575,21 +3782,49 @@
             instead of raw fill or typography values.
           </p>
           {#if node.componentBinding}
-            {@const contract = componentRegistry[node.componentBinding.componentId]}
-            {#each Object.entries(contract?.allowedProps ?? {}) as [key, values]}
-              <label
-                >{key}<select
-                  value={String(node.componentBinding.props[key] ?? '')}
-                  onchange={(event) => {
-                    const selected = values.find(
-                      (value) => String(value) === event.currentTarget.value,
-                    );
-                    updateComponentOverride(node, key, selected);
-                  }}
-                  >{#each values as value}<option value={String(value)}>{String(value)}</option
-                    >{/each}</select
-                ></label
-              >
+            {@const resolvedComponent = resolveComponent(node.componentBinding.componentId)}
+            {#each Object.entries(resolvedComponent?.part ? {} : (resolvedComponent?.root.props ?? {})) as [key, definition]}
+              {#if definition.kind === 'boolean'}
+                <label class="checkbox-property">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(node.componentBinding.props[key] ?? definition.default)}
+                    onchange={(event) =>
+                      updateComponentOverride(node, key, event.currentTarget.checked)}
+                  />
+                  <span>{key}</span>
+                </label>
+              {:else if definition.options?.length}
+                <label
+                  >{key}<select
+                    value={String(node.componentBinding.props[key] ?? definition.default ?? '')}
+                    onchange={(event) => {
+                      const selected = definition.options?.find(
+                        (value) => String(value) === event.currentTarget.value,
+                      );
+                      updateComponentOverride(node, key, selected);
+                    }}
+                    >{#each definition.options as value}<option value={String(value)}
+                        >{String(value)}</option
+                      >{/each}</select
+                  ></label
+                >
+              {:else}
+                <label
+                  >{key}<input
+                    type={definition.kind === 'number' ? 'number' : 'text'}
+                    value={String(node.componentBinding.props[key] ?? definition.default ?? '')}
+                    onchange={(event) =>
+                      updateComponentOverride(
+                        node,
+                        key,
+                        definition.kind === 'number'
+                          ? Number(event.currentTarget.value)
+                          : event.currentTarget.value,
+                      )}
+                  /></label
+                >
+              {/if}
             {/each}
           {/if}
         {:else}
@@ -3675,7 +3910,7 @@
               : 'same component on screen'}</button
           >{/if}
       </section>
-      {#if selectedNodes.every((item) => item.kind === 'text')}
+      {#if selectedNodes.every(isEditableContentNode)}
         <section>
           <h3>Text</h3>
           <label
@@ -3751,12 +3986,51 @@
       {/if}
       <section>
         <h3>Fidelity and origin</h3>
-        <dl>
-          <dt>Fidelity</dt>
+        <dl class="fidelity-summary">
+          <dt>Current</dt>
           <dd>{effectiveFidelity(document, node.id)}</dd>
+          <dt>Source</dt>
+          <dd>
+            {node.kind === 'frame'
+              ? 'Set by this frame'
+              : document.nodeFidelityOverrides[node.id]
+                ? 'Element override'
+                : `Inherited from ${fidelityInheritanceLabel(document, node) ?? 'screen'}`}
+          </dd>
           <dt>Origin</dt>
           <dd>{node.provenance.actor === 'agent' ? 'AI' : 'Human'}</dd>
         </dl>
+        <FidelityStops
+          label={node.kind === 'frame' ? 'Frame representations' : 'Element representations'}
+          stops={fidelityStops}
+          onNavigate={navigateRepresentation}
+          onStageGeneration={stageFidelity}
+          onInspectCandidate={inspectFidelityCandidate}
+        />
+        {#if node.kind !== 'frame'}
+          <label>
+            Element fidelity override
+            <select
+              value={document.nodeFidelityOverrides[node.id] ?? ''}
+              onchange={(event) => {
+                const fidelity = event.currentTarget.value as Fidelity | '';
+                fidelity ? setSelectedFidelity(fidelity) : clearSelectedFidelityOverride();
+              }}
+            >
+              <option value="">Inherit from containing frame</option>
+              <option value="structure">Structure</option>
+              <option value="wireframe">Wireframe</option>
+              <option value="component">Component</option>
+              <option value="visual">Visual</option>
+              <option value="production">Production</option>
+            </select>
+          </label>
+          {#if document.nodeFidelityOverrides[node.id]}
+            <button class="wide" onclick={clearSelectedFidelityOverride}
+              >Clear fidelity override</button
+            >
+          {/if}
+        {/if}
         <button class="wide" onclick={() => toggleSelectedNodePin(node.id)}
           >{document.pinnedNodeIds.includes(node.id)
             ? 'Unpin element'
@@ -3771,7 +4045,7 @@
       <section>
         <h3>Co-design starts from selection</h3>
         <p class="muted">
-          Select a frame or object, switch to Co-design, then choose a visible generation action.
+          Select a frame or object, then choose Complete with Codesign beside the selection.
           Selection alone never generates or changes anything.
         </p>
       </section>
@@ -4142,6 +4416,81 @@
   .layers-title {
     margin-top: 10px;
     border-top: 1px solid #d6dae0;
+  }
+  .proposed-layers {
+    margin: 5px 0 7px;
+    padding: 4px;
+    border: 1px solid #d6b46f;
+    border-radius: 5px;
+    background: #fff9e9;
+  }
+  .proposed-layers-heading {
+    min-height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 6px;
+    color: #795516;
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .proposed-layers-heading i {
+    color: #b97920;
+    font-style: normal;
+  }
+  .proposed-layers-heading small {
+    color: #8b7651;
+    font-size: 9px;
+    font-weight: 500;
+  }
+  .proposed-layer-row {
+    min-height: 31px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding-left: var(--layer-indent, 8px);
+    border-radius: 3px;
+  }
+  .proposed-layer-row.selected {
+    background: #f4dfaa;
+    box-shadow: inset 2px 0 #9b6517;
+  }
+  .proposed-layer-row input {
+    flex: none;
+    margin: 0;
+    accent-color: #9b6517;
+  }
+  .proposed-checkbox-spacer {
+    width: 13px;
+  }
+  .proposed-layer-row button {
+    min-width: 0;
+    min-height: 29px;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border: 0;
+    background: transparent;
+    padding: 0;
+    color: #57482e;
+    text-align: left;
+    cursor: pointer;
+  }
+  .proposed-layer-row .layer-kind {
+    flex: none;
+    border-radius: 3px;
+    background: #f1dca7;
+    padding: 2px 4px;
+    color: #755215;
+    font-size: 8px;
+    text-transform: capitalize;
+  }
+  .proposed-layer-row .layer-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .layers {
     display: flex;
@@ -4604,36 +4953,6 @@
   .clickable {
     cursor: pointer;
   }
-  .context-bar {
-    position: absolute;
-    z-index: 5;
-    top: 48px;
-    left: 50%;
-    transform: translateX(-50%);
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px;
-    background: #202731;
-    color: white;
-    border-radius: 5px;
-    box-shadow: 0 4px 14px #11182730;
-  }
-  .context-bar span {
-    padding: 0 7px;
-    color: #c9d0d9;
-  }
-  .context-bar button {
-    height: 27px;
-    border: 0;
-    border-radius: 3px;
-    background: #394452;
-    color: white;
-    cursor: pointer;
-  }
-  .context-bar button:hover {
-    background: #4a596b;
-  }
   .context-menu {
     position: fixed;
     z-index: 40;
@@ -4908,24 +5227,17 @@
     background: #fafbfc;
     overflow: auto;
   }
-  .inspector :global(.codesign-panel) {
-    padding: 14px;
-  }
   .inspector-tabs {
     height: 41px;
     display: flex;
+    align-items: center;
+    padding: 0 14px;
     border-bottom: 1px solid #d5d9de;
-  }
-  .inspector-tabs button {
-    flex: 1;
-    border: 0;
-    border-bottom: 2px solid transparent;
-    background: transparent;
-    cursor: pointer;
-  }
-  .inspector-tabs button.active {
-    border-bottom-color: #286b9e;
-    color: #1f5d8d;
+    color: #47515d;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
   }
   .selection-summary {
     display: flex;
@@ -5142,8 +5454,7 @@
   .storage-warning span {
     color: #705a31;
   }
-  .preview .tools,
-  .preview .context-bar {
+  .preview .tools {
     opacity: 0.35;
     pointer-events: none;
   }

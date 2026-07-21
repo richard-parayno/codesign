@@ -1,4 +1,4 @@
-import { componentRegistry } from '../design-system/registry';
+import { componentCatalog } from '../design-system/registry';
 import type {
   Bounds,
   CanvasSnapshot,
@@ -32,6 +32,10 @@ export type SceneDesignSystemComponent = {
   importPath: string;
   allowedProps: Record<string, readonly unknown[]>;
   slots: readonly string[];
+  kind?: 'root' | 'part';
+  rootComponentId?: string;
+  editableContent?: boolean;
+  allowedChildren?: Readonly<Record<string, readonly string[]>>;
 };
 
 export type SceneDesignSystemSnapshot = {
@@ -95,7 +99,11 @@ export type SceneContextNode = {
   clipContent: boolean | null;
   style?: StyleProperties;
   text?: string | null;
-  componentBinding?: { componentId: string; props: Record<string, unknown> } | null;
+  componentBinding?: {
+    componentId: string;
+    props: Record<string, unknown>;
+    slot?: string;
+  } | null;
   repeaterId?: string | null;
   summary?: SceneNodeSummary;
 };
@@ -189,18 +197,44 @@ function stableRecord<T>(record: Record<string, T>): Record<string, T> {
 
 export function defaultDesignSystemSnapshot(): SceneDesignSystemSnapshot {
   return {
-    components: Object.values(componentRegistry)
+    components: componentCatalog
+      .flatMap((component) => [
+        {
+          id: component.id,
+          name: component.displayName,
+          importPath: component.importPath,
+          allowedProps: Object.fromEntries(
+            Object.entries(component.props).map(([key, definition]) => [
+              key,
+              definition.options?.length ? [...definition.options] : [definition.kind],
+            ]),
+          ),
+          slots: component.slots.map((slot) => slot.id),
+          kind: 'root' as const,
+          editableContent: component.editableContent,
+          allowedChildren: Object.fromEntries(
+            component.slots.map((slot) => [slot.id, [...slot.accepts]]),
+          ),
+        },
+        ...component.parts.map((part) => ({
+          id: part.id,
+          name: part.displayName,
+          importPath: component.importPath,
+          allowedProps: {},
+          slots: part.slots.map((slot) => slot.id),
+          kind: 'part' as const,
+          rootComponentId: component.id,
+          editableContent: part.editableContent,
+          allowedChildren: Object.fromEntries(
+            part.slots.map((slot) => [slot.id, [...slot.accepts]]),
+          ),
+        })),
+      ])
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((component) => ({
-        id: component.id,
-        name: component.name,
-        importPath: component.importPath,
-        allowedProps: Object.fromEntries(
-          Object.entries(component.allowedProps)
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([key, values]) => [key, [...values].map(stableUnknown)]),
-        ),
-        slots: [...component.slots],
+        ...component,
+        allowedProps: stableRecord(component.allowedProps),
+        allowedChildren: stableRecord(component.allowedChildren),
       })),
     tokens: {},
     primitiveKinds: ['frame', 'group', 'rectangle', 'text', 'instance'],
@@ -237,7 +271,7 @@ function orderedScreenNodes(snapshot: CanvasSnapshot, screenId: string): Ordered
   };
   (screen?.rootIds ?? []).forEach((id, index) => visit(id, index, [index]));
 
-  // Malformed/orphaned nodes remain visible to the model, but have a stable deterministic tail.
+  // Malformed/orphaned nodes remain visible to the model, but have a stable ordered tail.
   Object.values(snapshot.nodes)
     .filter((node) => node.screenId === screenId && !seen.has(node.id))
     .sort((a, b) => a.id.localeCompare(b.id))
@@ -421,7 +455,7 @@ function buildLayout(
   return { regions, siblingRelationships };
 }
 
-/** Builds the canonical deterministic model context used by all scene-generation backends. */
+/** Builds the canonical stable model context used by the scene-generation boundary. */
 export function buildSceneContext(input: SceneContextInput): SceneContext {
   const { snapshot } = input;
   const screen = snapshot.screens.find((item) => item.id === snapshot.activeScreenId);
@@ -502,6 +536,7 @@ export function buildSceneContext(input: SceneContextInput): SceneContext {
         ? {
             componentId: node.componentBinding.componentId,
             props: stableUnknown(node.componentBinding.props) as Record<string, unknown>,
+            ...(node.componentBinding.slot ? { slot: node.componentBinding.slot } : {}),
           }
         : null,
       repeaterId: node.repeaterId ?? null,

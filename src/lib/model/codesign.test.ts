@@ -75,10 +75,8 @@ function run(document: DesignDocument): GenerationRun {
     contextRootId: 'frame',
     contextSummarized: false,
     candidateIds: [],
-    backend: 'local',
-    provider: 'local',
+    provider: 'codex',
     reasoningEffort: 'high',
-    fallback: false,
     promptVersion: 'visual-autocomplete-v1',
     schemaVersion: '2',
     contextSchemaVersion: 'codesign-scene-context-v1',
@@ -187,6 +185,71 @@ describe('Codesign candidate foundation', () => {
       'generation-requested',
       'candidates-generated',
     ]);
+  });
+
+  it('keeps nested component identities and slots from ghost revision through acceptance', () => {
+    const source = baseDocument();
+    let document = stageGenerationRun(source, run(source), 10);
+    const cardNode = {
+      ...node('card', 'instance', 'frame'),
+      componentBinding: {
+        componentId: 'Card',
+        props: { density: 'compact', radius: 'small' },
+      },
+    };
+    const card = createChange(source, 'candidate-components', 'change-card', cardNode, []);
+    const headerNode = {
+      ...node('card-header', 'instance', 'card'),
+      componentBinding: { componentId: 'Card.Header', props: {}, slot: 'default' },
+    };
+    const header = createChange(card.after, 'candidate-components', 'change-header', headerNode, [
+      'change-card',
+    ]);
+    const titleNode = {
+      ...node('card-title', 'instance', 'card-header'),
+      text: 'Account overview',
+      componentBinding: { componentId: 'Card.Title', props: {}, slot: 'default' },
+    };
+    const title = createChange(header.after, 'candidate-components', 'change-title', titleNode, [
+      'change-header',
+    ]);
+    document = stageCandidates(
+      document,
+      'run-1',
+      [
+        {
+          id: 'candidate-components',
+          fidelity: 'component',
+          atomicChanges: [card.change, header.change, title.change],
+        },
+      ],
+      12,
+    );
+    const candidate = document.candidates['candidate-components'];
+    const ghost = document.revisions[candidate.revisionId].snapshot;
+    expect(ghost.nodes['card-title']).toMatchObject({
+      parentId: 'card-header',
+      text: 'Account overview',
+      componentBinding: { componentId: 'Card.Title', slot: 'default' },
+    });
+
+    const accepted = acceptCandidateChanges(
+      document,
+      candidate.id,
+      candidate.atomicChangeIds,
+      [],
+      13,
+    );
+    expect(accepted.nodes['card-title']).toMatchObject({
+      id: ghost.nodes['card-title'].id,
+      parentId: ghost.nodes['card-title'].parentId,
+      bounds: ghost.nodes['card-title'].bounds,
+      text: ghost.nodes['card-title'].text,
+      componentBinding: ghost.nodes['card-title'].componentBinding,
+    });
+    expect(accepted.nodes['card-title'].entityId).toBe(ghost.nodes['card-title'].entityId);
+    expect(accepted.nodes.card.childIds).toEqual(['card-header']);
+    expect(accepted.nodes['card-header'].childIds).toEqual(['card-title']);
   });
 
   it('accepts a dependency-closed subset transactionally with fresh operation IDs', () => {

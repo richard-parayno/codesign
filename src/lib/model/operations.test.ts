@@ -31,7 +31,7 @@ describe('design operations', () => {
     expect(defaultStyle.strokeWidth).toBeUndefined();
   });
 
-  it('applies the critical create and repeat slice deterministically', () => {
+  it('applies the critical create and repeat slice consistently', () => {
     let document = blankDocument();
     document = applyOperation(
       document,
@@ -346,17 +346,20 @@ describe('design operations', () => {
         parentId: 'frame',
         kind: 'instance',
         style: { ...defaultStyle, fill: '#123456', opacity: 0.6, radius: 18 },
-        componentBinding: {
-          componentId: 'Button',
-          props: { variant: 'primary', size: 'medium' },
-        },
+        componentBinding: { componentId: 'Card', props: { radius: 'medium' } },
       },
     });
     document = applyOperation(document, {
       id: 'create-grandchild',
       type: 'create',
       actor: 'user',
-      node: { ...node('grandchild', 72, 96), parentId: 'child', kind: 'text', text: 'Save' },
+      node: {
+        ...node('grandchild', 72, 96),
+        parentId: 'child',
+        kind: 'instance',
+        text: 'Save',
+        componentBinding: { componentId: 'Card.Content', props: {}, slot: 'default' },
+      },
     });
 
     const duplicated = applyOperation(document, {
@@ -382,17 +385,97 @@ describe('design operations', () => {
       bounds: { x: 84, y: 96 },
       style: { fill: '#123456', opacity: 0.6, radius: 18 },
       componentBinding: {
-        componentId: 'Button',
-        props: { variant: 'primary', size: 'medium' },
+        componentId: 'Card',
+        props: { radius: 'medium' },
       },
     });
     expect(duplicated.nodes['grandchild-copy']).toMatchObject({
       parentId: 'child-copy',
       bounds: { x: 96, y: 112 },
       text: 'Save',
+      componentBinding: { componentId: 'Card.Content', props: {}, slot: 'default' },
     });
     expect(duplicated.nodes['child-copy'].entityId).not.toBe(document.nodes.child.entityId);
     expect(duplicated.operations.at(-1)?.summary).toBe('Duplicated 2 nodes');
+  });
+
+  it('validates component bindings and slot relationships on create and preserves slots on prop edits', () => {
+    expect(() =>
+      applyOperation(blankDocument(), {
+        id: 'create-unknown-component',
+        type: 'create',
+        actor: 'user',
+        node: {
+          ...node('unknown', 0, 0),
+          kind: 'instance',
+          componentBinding: { componentId: 'Missing', props: {} },
+        },
+      }),
+    ).toThrow('Unknown component');
+
+    let document = applyOperation(blankDocument(), {
+      id: 'create-card',
+      type: 'create',
+      actor: 'user',
+      node: {
+        ...node('card', 0, 0),
+        kind: 'instance',
+        componentBinding: { componentId: 'Card', props: { radius: 'medium' } },
+      },
+    });
+    expect(() =>
+      applyOperation(document, {
+        id: 'create-plain-child',
+        type: 'create',
+        actor: 'user',
+        node: { ...node('plain', 8, 8), parentId: 'card', kind: 'text', text: 'Nope' },
+      }),
+    ).toThrow('registered component parts');
+    expect(() =>
+      applyOperation(document, {
+        id: 'create-invalid-part',
+        type: 'create',
+        actor: 'user',
+        node: {
+          ...node('title', 8, 8),
+          parentId: 'card',
+          kind: 'instance',
+          componentBinding: { componentId: 'Card.Title', props: {}, slot: 'default' },
+        },
+      }),
+    ).toThrow('not allowed');
+    document = applyOperation(document, {
+      id: 'create-header',
+      type: 'create',
+      actor: 'user',
+      node: {
+        ...node('header', 8, 8),
+        parentId: 'card',
+        kind: 'instance',
+        componentBinding: { componentId: 'Card.Header', props: {}, slot: 'default' },
+      },
+    });
+    document = applyOperation(document, {
+      id: 'create-title',
+      type: 'create',
+      actor: 'user',
+      node: {
+        ...node('title', 12, 12),
+        parentId: 'header',
+        kind: 'instance',
+        text: 'Title',
+        componentBinding: { componentId: 'Card.Title', props: {}, slot: 'default' },
+      },
+    });
+    document = applyOperation(document, {
+      id: 'edit-title-binding',
+      type: 'promote',
+      actor: 'user',
+      targetIds: ['title'],
+      componentId: 'Card.Title',
+      props: {},
+    });
+    expect(document.nodes.title.componentBinding?.slot).toBe('default');
   });
 
   it('rejects incomplete or colliding stable ID maps without touching the source', () => {
@@ -510,7 +593,7 @@ describe('design operations', () => {
         targetIds: ['outer'],
         parentId: 'leaf',
       }),
-    ).toThrow('frames and groups');
+    ).toThrow('frames, groups, and component instances');
     expect(document.nodes.outer.parentId).toBeUndefined();
   });
 

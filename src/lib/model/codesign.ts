@@ -284,7 +284,7 @@ export function stageGenerationRun(
       action: run.action,
       requestedFidelity: run.requestedFidelity,
       provider: run.provider,
-      model: run.model ?? 'deterministic-local',
+      model: run.model ?? 'legacy-unrecorded',
       reasoningEffort: run.reasoningEffort ?? 'none',
       focusNodeIds: run.target.focusNodeIds,
       observationKind: run.target.observationScope.kind,
@@ -303,7 +303,8 @@ export function stageGenerationRun(
       snapshotWidth: run.snapshot?.width ?? 0,
       snapshotHeight: run.snapshot?.height ?? 0,
       snapshotSha256: run.snapshot?.sha256 ?? 'none',
-      fallback: run.fallback,
+      legacyProvider: run.legacyProvider?.id ?? 'none',
+      legacyFallback: run.legacyProvider?.fallback ?? false,
     },
   });
   return document;

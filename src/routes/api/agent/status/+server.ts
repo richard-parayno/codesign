@@ -7,15 +7,12 @@ export async function GET() {
     const provider = createProvider(settings);
     const status = await provider.status();
     return privateJson({
-      backend: settings.provider,
+      provider: 'codex',
       available: status.available,
       connected: status.connected,
       status,
       descriptor: provider.descriptor,
-      configuration:
-        settings.provider === 'codex'
-          ? { model: settings.model, effort: settings.effort, runtime: 'project-pinned' }
-          : null,
+      configuration: { model: settings.model, effort: settings.effort, runtime: 'project-pinned' },
       supportedActions: ['complete'],
       message: status.message,
     });

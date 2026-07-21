@@ -53,7 +53,12 @@ export type DesignNode = {
   entityId?: string;
   /** @deprecated Archived during v1 migration and ignored by the v2 interaction. */
   semantics?: LegacyNodeSemantics;
-  componentBinding?: { componentId: string; props: Record<string, unknown> };
+  componentBinding?: {
+    componentId: string;
+    props: Record<string, unknown>;
+    /** Named manifest slot used when this component node is nested under another component. */
+    slot?: string;
+  };
   repeaterId?: string;
   provenance: { actor: Actor; operationId: string };
 };
@@ -236,11 +241,14 @@ export type GenerationRun = {
     sha256: string;
   };
   candidateIds: string[];
-  backend: 'local' | 'codex';
-  provider: 'local' | 'codex';
+  /** Current runs use Codex. `legacy` marks imported local runs and cannot generate. */
+  provider: 'codex' | 'legacy';
+  legacyProvider?: {
+    id: 'local';
+    fallback: boolean;
+  };
   model?: string;
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-  fallback: boolean;
   promptVersion: string;
   schemaVersion: string;
   contextSchemaVersion: string;
@@ -422,7 +430,11 @@ export const nodeSchema: z.ZodType<DesignNode> = z.object({
     })
     .optional(),
   componentBinding: z
-    .object({ componentId: z.string(), props: z.record(z.string(), z.unknown()) })
+    .object({
+      componentId: z.string(),
+      props: z.record(z.string(), z.unknown()),
+      slot: z.string().min(1).optional(),
+    })
     .optional(),
   repeaterId: z.string().optional(),
   provenance: z.object({ actor: z.enum(['user', 'agent']), operationId: z.string() }),
@@ -602,11 +614,15 @@ export const generationRunSchema: z.ZodType<GenerationRun> = z.object({
     })
     .optional(),
   candidateIds: z.array(z.string()),
-  backend: z.enum(['local', 'codex']),
-  provider: z.enum(['local', 'codex']),
+  provider: z.enum(['codex', 'legacy']),
+  legacyProvider: z
+    .object({
+      id: z.literal('local'),
+      fallback: z.boolean(),
+    })
+    .optional(),
   model: z.string().optional(),
   reasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
-  fallback: z.boolean(),
   promptVersion: z.string().min(1),
   schemaVersion: z.string().min(1),
   contextSchemaVersion: z.string().min(1),

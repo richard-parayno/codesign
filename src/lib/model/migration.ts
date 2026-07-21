@@ -513,8 +513,17 @@ export function recoverProjectEnvelopeV2(value: unknown): ProjectEnvelopeV2 | nu
       run.contextNodeIds ??= target?.observationScope?.nodeIds ?? [];
       run.contextRootId ??= target?.observationScope?.rootId;
       run.contextSummarized ??= false;
-      run.provider ??= run.backend === 'codex' ? 'codex' : 'local';
-      run.fallback ??= false;
+      const legacyBackend = run.backend;
+      const legacyProvider = run.provider;
+      const legacyFallback = run.fallback === true;
+      if (legacyBackend === 'local' || legacyProvider === 'local') {
+        run.provider = 'legacy';
+        run.legacyProvider = { id: 'local', fallback: legacyFallback };
+      } else {
+        run.provider = 'codex';
+      }
+      delete run.backend;
+      delete run.fallback;
       run.contextSchemaVersion ??= 'codesign-scene-context-v1-legacy-recovered';
       delete run.observationScope;
       delete run.mutationScopeIds;

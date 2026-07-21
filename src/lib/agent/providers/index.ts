@@ -11,7 +11,6 @@ import {
   type CodexLoginStart,
 } from '../codex-client.server';
 import { agentCandidateBatchSchema } from '../candidate';
-import { localCandidateBatch } from '../local';
 import {
   ProviderFailure,
   asProviderFailure,
@@ -24,20 +23,6 @@ import {
 } from './contracts';
 
 export * from './contracts';
-
-export const LOCAL_PROVIDER_DESCRIPTOR = {
-  id: 'local',
-  label: 'Deterministic local',
-  capabilities: {
-    structuredCandidates: true,
-    supportedActions: ['complete'],
-    visualInputs: [],
-    authentication: 'none',
-    canStartLogin: false,
-    canLogout: false,
-    cancellation: false,
-  },
-} as const satisfies ProviderDescriptor;
 
 export const CODEX_PROVIDER_DESCRIPTOR = {
   id: 'codex',
@@ -56,7 +41,6 @@ export const CODEX_PROVIDER_DESCRIPTOR = {
 const validEfforts = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 
 export type ProviderSettings = {
-  provider: ProviderId;
   model: string;
   effort: ReasoningEffort;
   command: string;
@@ -113,24 +97,15 @@ export function providerRuntimeStatus(
 
 /** Reads only process configuration; Codex authentication remains entirely App Server-owned. */
 export function providerSettings(environment: NodeJS.ProcessEnv = process.env): ProviderSettings {
-  const configuredProvider =
-    environment.CODESIGN_AGENT_BACKEND ?? environment.MALLEABLE_AGENT_BACKEND ?? 'local';
-  if (configuredProvider !== 'local' && configuredProvider !== 'codex')
-    throw new ProviderFailure('protocol-failure');
-  const model =
-    (environment.CODESIGN_CODEX_MODEL ?? environment.MALLEABLE_CODEX_MODEL)?.trim() ||
-    DEFAULT_CODEX_MODEL;
+  const model = environment.CODESIGN_CODEX_MODEL?.trim() || DEFAULT_CODEX_MODEL;
   const effort =
     (environment.CODESIGN_CODEX_EFFORT ?? DEFAULT_CODEX_EFFORT).trim().toLowerCase() ||
     DEFAULT_CODEX_EFFORT;
   if (!validEfforts.has(effort)) throw new ProviderFailure('protocol-failure');
   return {
-    provider: configuredProvider,
     model,
     effort,
-    command: resolveCodexCommand(
-      environment.CODESIGN_CODEX_COMMAND ?? environment.MALLEABLE_CODEX_COMMAND,
-    ),
+    command: resolveCodexCommand(environment.CODESIGN_CODEX_COMMAND),
   };
 }
 
@@ -143,30 +118,6 @@ function parseCandidate(text: string) {
     return agentCandidateBatchSchema.parse(JSON.parse(trimmed) as unknown);
   } catch (cause) {
     throw asProviderFailure(cause);
-  }
-}
-
-export class LocalCodesignProvider implements CodesignProvider {
-  readonly descriptor = LOCAL_PROVIDER_DESCRIPTOR;
-
-  async status(): Promise<ProviderStatus> {
-    return {
-      provider: 'local',
-      available: true,
-      connected: true,
-      authMode: null,
-      planType: null,
-      accountLabel: null,
-      message: 'Deterministic local generation is ready.',
-    };
-  }
-
-  async generate(input: ProviderGenerationInput) {
-    try {
-      return localCandidateBatch(input.request, input.run);
-    } catch (cause) {
-      throw asProviderFailure(cause);
-    }
   }
 }
 
@@ -253,7 +204,6 @@ export class CodexCodesignProvider implements CodesignProvider {
 }
 
 export function createProvider(settings = providerSettings()): CodesignProvider {
-  if (settings.provider === 'local') return new LocalCodesignProvider();
   return new CodexCodesignProvider(
     getCodexClient(settings.command, settings.model, settings.effort),
     settings.model,
@@ -262,9 +212,5 @@ export function createProvider(settings = providerSettings()): CodesignProvider 
 }
 
 export function configuredCodexProvider(settings = providerSettings()) {
-  return new CodexCodesignProvider(
-    getCodexClient(settings.command, settings.model, settings.effort),
-    settings.model,
-    settings.effort,
-  );
+  return createProvider(settings) as CodexCodesignProvider;
 }

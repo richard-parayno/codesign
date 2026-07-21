@@ -1,6 +1,4 @@
 <script lang="ts" module>
-  import type { Fidelity } from '$lib/model/types';
-
   export type AiReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
   export type AiModelOption = {
@@ -52,7 +50,6 @@
     framePresetId: string;
     frameOrientation: 'landscape' | 'portrait';
     frameSize: { width: number; height: number };
-    requestedFidelity: Fidelity;
     projectSummary: {
       name: string;
       projectCount: number;
@@ -61,7 +58,6 @@
       revision: number;
       storageMessage: string;
     };
-    activeBackend: 'local' | 'codex';
     integration: AiIntegrationView;
     selectedModel: string;
     selectedEffort: AiReasoningEffort;
@@ -72,7 +68,6 @@
     onResetCanvasBackground: () => void;
     onFramePresetChange: (presetId: string) => void;
     onFrameOrientationChange: (orientation: 'landscape' | 'portrait') => void;
-    onFidelityChange: (fidelity: Fidelity) => void;
     onResetViewport: () => void;
     onAiSectionOpen: () => void;
     onRefresh: () => void;
@@ -90,9 +85,7 @@
     framePresetId,
     frameOrientation,
     frameSize,
-    requestedFidelity,
     projectSummary,
-    activeBackend,
     integration,
     selectedModel,
     selectedEffort,
@@ -103,7 +96,6 @@
     onResetCanvasBackground,
     onFramePresetChange,
     onFrameOrientationChange,
-    onFidelityChange,
     onResetViewport,
     onAiSectionOpen,
     onRefresh,
@@ -253,28 +245,6 @@
           </div>
         </section>
 
-        <section class="settings-section" aria-labelledby="codesign-defaults-title">
-          <div class="section-heading">
-            <div>
-              <h3 id="codesign-defaults-title">Co-design defaults</h3>
-              <p>Set the starting fidelity for future candidate requests.</p>
-            </div>
-          </div>
-          <label class="single-field">
-            <span>Default target fidelity</span>
-            <select
-              value={requestedFidelity}
-              onchange={(event) => onFidelityChange(event.currentTarget.value as Fidelity)}
-            >
-              <option value="wireframe">Wireframe</option>
-              <option value="component">Component</option>
-              <option value="visual">Visual</option>
-              <option value="production">Production</option>
-            </select>
-            <small>You can still choose a different stop from the Co-design panel.</small>
-          </label>
-        </section>
-
         <section class="settings-section" aria-labelledby="project-settings-title">
           <div class="section-heading">
             <div>
@@ -327,10 +297,10 @@
 
           <dl class="status-grid">
             <div>
-              <dt>Active backend</dt>
+              <dt>Generation provider</dt>
               <dd>
-                <span class:good={activeBackend === 'codex'} class="status-dot"></span>
-                {activeBackend === 'codex' ? 'Codex App Server' : 'Deterministic local'}
+                <span class:good={integration.runtime?.detected} class="status-dot"></span>
+                Codex App Server
               </dd>
             </div>
             <div>
@@ -423,13 +393,6 @@
             <span>Effective for the next generation</span>
             <strong>{selectedModel} · {selectedEffort}</strong>
           </div>
-          {#if activeBackend !== 'codex'}
-            <p class="configuration-note">
-              The active backend is local. This model preference is saved, but AI generation
-              requires
-              <code>CODESIGN_AGENT_BACKEND=codex</code> on the SvelteKit server.
-            </p>
-          {/if}
           {#if integration.modelsMessage}
             <p class="configuration-note">{integration.modelsMessage}</p>
           {/if}
@@ -675,8 +638,7 @@
     margin-top: 14px;
   }
   .color-setting,
-  .setting-action,
-  .single-field {
+  .setting-action {
     display: grid;
     align-content: start;
     gap: 7px;
@@ -701,10 +663,6 @@
   }
   .setting-action button {
     align-self: end;
-  }
-  .single-field {
-    width: min(360px, 100%);
-    margin-top: 14px;
   }
   .size-readout {
     flex: none;

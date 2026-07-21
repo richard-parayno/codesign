@@ -3,6 +3,7 @@ import { demoCheckpoint } from './checkpoint';
 import {
   containingFrameForBounds,
   descendantNodeIds,
+  isComponentTreeNode,
   orderedScreenNodes,
   screenLayerRows,
 } from './layers';
@@ -93,6 +94,68 @@ describe('layer hierarchy', () => {
     expect(
       containingFrameForBounds(paintOrder, { x: 480, y: 380, width: 100, height: 80 }),
     ).toBeUndefined();
+  });
+
+  it('identifies every descendant in a project component tree', () => {
+    let document = blankDocument();
+    const componentRoot = node('component-root', 'frame', {
+      x: 0,
+      y: 0,
+      width: 400,
+      height: 300,
+    });
+    componentRoot.projectComponent = { componentId: 'component-sidebar', role: 'main' };
+
+    for (const item of [
+      componentRoot,
+      node('component-group', 'group', { x: 20, y: 20, width: 200, height: 160 }, 'component-root'),
+      node(
+        'component-child',
+        'rectangle',
+        { x: 40, y: 40, width: 80, height: 60 },
+        'component-group',
+      ),
+      node('ordinary-root', 'frame', { x: 450, y: 0, width: 300, height: 250 }),
+      node(
+        'ordinary-child',
+        'rectangle',
+        { x: 470, y: 20, width: 80, height: 60 },
+        'ordinary-root',
+      ),
+    ])
+      document = applyOperation(document, {
+        id: `create-${item.id}`,
+        type: 'create',
+        actor: 'user',
+        node: item,
+      });
+
+    expect(isComponentTreeNode(document, 'component-root')).toBe(true);
+    expect(isComponentTreeNode(document, 'component-group')).toBe(true);
+    expect(isComponentTreeNode(document, 'component-child')).toBe(true);
+    expect(isComponentTreeNode(document, 'ordinary-root')).toBe(false);
+    expect(isComponentTreeNode(document, 'ordinary-child')).toBe(false);
+  });
+
+  it('identifies children nested under a registered component binding', () => {
+    let document = blankDocument();
+    const bindingRoot = node('binding-root', 'frame', { x: 0, y: 0, width: 300, height: 200 });
+
+    for (const item of [
+      bindingRoot,
+      node('binding-child', 'text', { x: 20, y: 20, width: 120, height: 32 }, 'binding-root'),
+    ])
+      document = applyOperation(document, {
+        id: `create-${item.id}`,
+        type: 'create',
+        actor: 'user',
+        node: item,
+      });
+
+    document.nodes['binding-root'].componentBinding = { componentId: 'Card', props: {} };
+
+    expect(isComponentTreeNode(document, 'binding-child')).toBe(true);
+    expect(isComponentTreeNode(document, 'missing')).toBe(false);
   });
 
   it('ships the demo checkpoint with its visible layers nested under the application frame', () => {

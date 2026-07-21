@@ -37,6 +37,7 @@
   import {
     containingFrameForBounds,
     descendantNodeIds,
+    isComponentTreeNode,
     orderedScreenNodes,
     screenLayerRows,
   } from '$lib/model/layers';
@@ -3286,6 +3287,7 @@
             role="listitem"
             class:selected={selection.includes(row.node.id)}
             class:child-layer={row.depth > 0}
+            class:component-layer={isComponentTreeNode(document, row.node.id)}
             class:drop-before={layerDrag?.targetId === row.node.id &&
               layerDrag.position === 'before'}
             class:drop-inside={layerDrag?.targetId === row.node.id &&
@@ -5157,6 +5159,29 @@
   .layer-row.selected {
     background: #e3e9ef;
     color: #1e4d76;
+  }
+  .layer-row.component-layer {
+    color: #6841a5;
+  }
+  .layer-row.component-layer .layer-kind {
+    background: #eee7f8;
+    color: #7042ad;
+  }
+  .layer-row.component-layer .layer-action {
+    color: #7042ad;
+  }
+  .layer-row.component-layer .layer-action:hover,
+  .layer-row.component-layer .layer-action:focus-visible {
+    background: #e7dcf5;
+    color: #55258f;
+  }
+  .layer-row.component-layer .layer-name-input {
+    border-color: #7b4fba;
+    color: #55258f;
+  }
+  .layer-row.component-layer.selected {
+    background: #ebe2f6;
+    color: #55258f;
   }
   .layer-row.drop-before {
     box-shadow: inset 0 2px #2672ad;

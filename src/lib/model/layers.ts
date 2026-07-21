@@ -90,6 +90,23 @@ export function descendantNodeIds(
   return [...found];
 }
 
+/** Whether a layer is a component root or belongs to a component's node tree. */
+export function isComponentTreeNode(
+  document: Pick<DesignDocument, 'nodes'>,
+  nodeId: string,
+): boolean {
+  const seen = new Set<string>();
+  let node: DesignNode | undefined = document.nodes[nodeId];
+
+  while (node && !seen.has(node.id)) {
+    seen.add(node.id);
+    if (node.projectComponent || node.componentBinding) return true;
+    node = node.parentId ? document.nodes[node.parentId] : undefined;
+  }
+
+  return false;
+}
+
 function containsBounds(outer: Bounds, inner: Bounds) {
   return (
     outer.x <= inner.x &&

@@ -1,6 +1,19 @@
-import type { Fidelity } from '$lib/model/types';
+import type { Fidelity, Representation } from '$lib/model/types';
 
 export type CodesignStage = 'base' | 'wireframe' | 'component';
+
+export function activeCodesignStage(
+  representations: Array<Representation | undefined>,
+): CodesignStage {
+  const lastCodesignRepresentation = representations
+    .filter((representation): representation is Representation =>
+      Boolean(representation && representation.origin !== 'human'),
+    )
+    .at(-1);
+  return lastCodesignRepresentation
+    ? normalizeCodesignFidelity(lastCodesignRepresentation.fidelity)
+    : 'base';
+}
 
 export function normalizeCodesignFidelity(
   fidelity?: Fidelity,

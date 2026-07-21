@@ -118,8 +118,8 @@
   import InlineCodesignToolbar, {
     type CandidateView,
   } from '$lib/codesign/InlineCodesignToolbar.svelte';
-  import FidelityStops from '$lib/codesign/FidelityStops.svelte';
   import type { FidelityStopView } from '$lib/codesign/FidelityStops.svelte';
+  import { activeCodesignStage, type CodesignStage } from '$lib/codesign/fidelity-navigation';
   import ProcessPanel, { type ProcessEventView } from '$lib/codesign/ProcessPanel.svelte';
   import SettingsDialog, {
     type AiIntegrationView,
@@ -349,11 +349,8 @@
         .filter((candidate) => {
           const run = document.generationRuns[candidate.generationRunId];
           return (
-            candidate.sourceRevisionId === latestRun.sourceRevisionId &&
             run?.target.focusNodeIds.slice().sort().join(':') ===
-              latestRun.target.focusNodeIds.slice().sort().join(':') &&
-            run?.target.observationScope.nodeIds.slice().sort().join(':') ===
-              latestRun.target.observationScope.nodeIds.slice().sort().join(':')
+            latestRun.target.focusNodeIds.slice().sort().join(':')
           );
         })
         .sort((a, b) => a.createdAt - b.createdAt)
@@ -419,6 +416,7 @@
     selectedAtomicIds,
     pinnedAtomicIds,
   );
+  $: activeFidelityStage = codesignStageForSelection(selectedNodes, document);
   $: fidelityStops = makeFidelityStops(selectedNodes, document, runCandidates);
   $: codesignReviewActive = Boolean(
     (loadingCandidate && generationTarget) ||
@@ -537,13 +535,6 @@
         return;
       const key = event.key.toLowerCase();
       const command = event.metaKey || event.ctrlKey;
-      if (command && key === 'enter') {
-        event.preventDefault();
-        if (!loadingCandidate && generationCanGenerate) {
-          void generateCandidates('complete');
-        }
-        return;
-      }
       if (key === '/' && !command && !event.altKey) {
         event.preventDefault();
         shortcutsOpen ? closeShortcuts('keyboard') : openShortcuts('keyboard');
@@ -1474,13 +1465,11 @@
     candidates: CandidateRevision[],
   ): FidelityStopView[] {
     const selected = nodes[0];
-    const current = selected
-      ? codesignFidelity(effectiveFidelity(sourceDocument, selected.id))
-      : 'wireframe';
+    const currentStage = codesignStageForSelection(nodes, sourceDocument);
     const entity = selected?.entityId ? sourceDocument.entities[selected.entityId] : undefined;
     const saved = (entity?.representationIds ?? [])
       .map((id) => sourceDocument.representations[id])
-      .filter(Boolean);
+      .filter((representation) => representation && representation.origin !== 'human');
     const candidateFidelities = new Set(
       candidates
         .filter(
@@ -1493,13 +1482,12 @@
         .map((candidate) => candidate.fidelity),
     );
     const fidelities: Fidelity[] = ['wireframe', 'component'];
-    const currentIndex = fidelities.indexOf(current);
     const inheritedFrom = selected ? fidelityInheritanceLabel(sourceDocument, selected) : undefined;
     return fidelities.map((fidelity) => {
       const representations = saved.filter((item) => item.fidelity === fidelity);
       const representation = representations.at(-1);
       if (candidateFidelities.has(fidelity)) return { fidelity, state: 'candidate' };
-      if (fidelity === current) return { fidelity, state: 'current', inheritedFrom };
+      if (fidelity === currentStage) return { fidelity, state: 'current', inheritedFrom };
       if (representations.length > 1)
         return {
           fidelity,
@@ -1508,13 +1496,18 @@
           representationId: representation?.id,
         };
       if (representation) return { fidelity, state: 'saved', representationId: representation.id };
-      if (fidelities.indexOf(fidelity) > currentIndex) return { fidelity, state: 'generate' };
-      return {
-        fidelity,
-        state: 'unavailable',
-        disabledReason: 'No saved lower-fidelity representation exists for this selection.',
-      };
+      return { fidelity, state: 'generate' };
     });
+  }
+  function codesignStageForSelection(
+    nodes: DesignNode[],
+    sourceDocument: typeof document,
+  ): CodesignStage {
+    const selected = nodes[0];
+    const entity = selected?.entityId ? sourceDocument.entities[selected.entityId] : undefined;
+    return activeCodesignStage(
+      (entity?.representationIds ?? []).map((id) => sourceDocument.representations[id]),
+    );
   }
   function codesignFidelity(fidelity: Fidelity): Fidelity {
     return ['component', 'visual', 'production'].includes(fidelity) ? 'component' : 'wireframe';
@@ -2536,14 +2529,6 @@
     });
     await tick();
     contextMenuElement?.querySelector<HTMLButtonElement>('button')?.focus();
-  }
-  function promoteFromContext() {
-    if (!contextNode) return;
-    if (!selection.includes(contextNode.id)) selection = [contextNode.id];
-    contextMenu = null;
-    requestedFidelity = 'component';
-    codesignStatus = 'Component fidelity staged. Generate to propose a registered component.';
-    void generateCandidates('complete');
   }
   function deleteFromContext() {
     if (!contextNode) return;
@@ -3758,7 +3743,7 @@
                 stroke-width={node.style.strokeWidth}
               />
             {/if}
-            {#if node.projectComponent}
+            {#if node.projectComponent && selection.includes(node.id)}
               <rect
                 class="project-component-boundary"
                 class:main={node.projectComponent.role === 'main'}
@@ -3932,7 +3917,11 @@
           {/each}
         </g>
         {#if selectionBounds && !preview && editingTextId === ''}
-          <g class="collective-selection">
+          <g
+            class="collective-selection"
+            class:component-selection={selectedNodes.length === 1 &&
+              Boolean(selectedNodes[0]?.projectComponent)}
+          >
             <rect
               class="selection-box"
               x={selectionBounds.x - 2 / zoom}
@@ -4104,13 +4093,13 @@
             ? `${selection.length} layers selected`
             : 'Saved candidate'}
         canGenerate={generationCanGenerate}
-        {commandLabel}
         statusMessage={codesignToolbarStatus}
         busy={loadingCandidate}
         observationScope={reviewObservationScope}
         {observationScopes}
         {fidelityStops}
         fidelityResetKey={`${selection.join(',')}:${document.currentRevisionId}`}
+        {activeFidelityStage}
         candidates={candidateViews}
         activeCandidateId={activeCandidate?.id}
         highlightedChangeId={highlightedChangeId || undefined}
@@ -4121,7 +4110,6 @@
           : undefined}
         onObservationScopeChange={selectObservationScope}
         onScopePreviewChange={(open) => (scopePreviewActive = open)}
-        onGenerate={generateCandidates}
         onCancel={cancelGeneration}
         onStageFidelity={stageFidelity}
         onInspectFidelityCandidate={inspectFidelityCandidate}
@@ -4213,8 +4201,7 @@
               }}><span>Create component</span><kbd>{commandLabel}+Alt+K</kbd></button
             >{/if}
           <div class="menu-separator"></div>
-          <button role="menuitem" onclick={promoteFromContext}>Complete with Codesign</button
-          ><button class="danger" role="menuitem" onclick={deleteFromContext}
+          <button class="danger" role="menuitem" onclick={deleteFromContext}
             ><span>Delete {selection.length > 1 ? 'selection' : 'element'}</span><kbd>Delete</kbd
             ></button
           >{:else}<button
@@ -4377,10 +4364,6 @@
                 <div>
                   <dt>Edit text</dt>
                   <dd><kbd>Double-click</kbd></dd>
-                </div>
-                <div>
-                  <dt>Complete with Codesign</dt>
-                  <dd><kbd>{commandLabel}+Enter</kbd></dd>
                 </div>
                 <div>
                   <dt>Exit candidate review / clear selection</dt>
@@ -4888,13 +4871,6 @@
           <dt>Origin</dt>
           <dd>{node.provenance.actor === 'agent' ? 'AI' : 'Human'}</dd>
         </dl>
-        <FidelityStops
-          label={node.kind === 'frame' ? 'Frame representations' : 'Element representations'}
-          stops={fidelityStops}
-          resetKey={`${node.id}:${document.currentRevisionId}`}
-          onStageGeneration={stageFidelity}
-          onInspectCandidate={inspectFidelityCandidate}
-        />
         {#if node.kind !== 'frame'}
           <label>
             Element fidelity override
@@ -5726,6 +5702,9 @@
     vector-effect: non-scaling-stroke;
     pointer-events: none;
   }
+  .component-selection .selection-box {
+    stroke: #7655b5;
+  }
   .mutation-boundary,
   .focus-boundary,
   .observation-boundary,
@@ -5816,6 +5795,9 @@
     stroke-width: 1.5;
     vector-effect: non-scaling-stroke;
     cursor: nwse-resize;
+  }
+  .component-selection .handle {
+    stroke: #7655b5;
   }
   .handle-n,
   .handle-s {

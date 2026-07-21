@@ -2,7 +2,6 @@
   import type {
     AtomicChange,
     CandidateRevision,
-    CodesignAction,
     DerivationTrace,
     Fidelity,
     ObservationScope,
@@ -34,17 +33,18 @@
 
 <script lang="ts">
   import FidelityStops, { type FidelityStopView } from './FidelityStops.svelte';
+  import type { CodesignStage } from './fidelity-navigation';
 
   type Props = {
     selectionLabel: string;
     canGenerate: boolean;
-    commandLabel: string;
     statusMessage: string;
     busy: boolean;
     observationScope: ObservationScope;
     observationScopes: ObservationScopeView[];
     fidelityStops: FidelityStopView[];
     fidelityResetKey: string;
+    activeFidelityStage: CodesignStage;
     candidates: CandidateView[];
     activeCandidateId?: string;
     highlightedChangeId?: string;
@@ -52,7 +52,6 @@
     rerollDisabledReason?: string;
     onScopePreviewChange?: (open: boolean) => void;
     onObservationScopeChange: (scope: ObservationScope) => void;
-    onGenerate: (action: CodesignAction) => void;
     onCancel: () => void;
     onStageFidelity: (fidelity: Fidelity) => void;
     onInspectFidelityCandidate: (fidelity: Fidelity) => void;
@@ -70,13 +69,13 @@
   let {
     selectionLabel,
     canGenerate,
-    commandLabel,
     statusMessage,
     busy,
     observationScope,
     observationScopes,
     fidelityStops,
     fidelityResetKey,
+    activeFidelityStage,
     candidates,
     activeCandidateId,
     highlightedChangeId,
@@ -84,7 +83,6 @@
     rerollDisabledReason,
     onScopePreviewChange,
     onObservationScopeChange,
-    onGenerate,
     onCancel,
     onStageFidelity,
     onInspectFidelityCandidate,
@@ -114,6 +112,25 @@
   function traceFor(item: AtomicChangeView): DerivationTrace {
     return item.change.trace;
   }
+
+  function fidelityName(fidelity: Fidelity) {
+    return ['component', 'visual', 'production'].includes(fidelity) ? 'AI Hi-Fi' : 'AI Draft';
+  }
+
+  function statusName(candidate: CandidateRevision) {
+    if (candidate.status === 'candidate') return 'Ready for review';
+    if (candidate.status === 'partially-accepted') return 'Partially accepted';
+    return candidate.status[0].toUpperCase() + candidate.status.slice(1);
+  }
+
+  function createdLabel(candidate: CandidateRevision) {
+    return new Intl.DateTimeFormat(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    }).format(candidate.createdAt);
+  }
 </script>
 
 <section class="inline-codesign" aria-label="Codesign controls">
@@ -123,27 +140,58 @@
       <span><strong>{selectionLabel}</strong><small>{statusMessage}</small></span>
     </div>
 
+    {#if candidates.length && !busy}
+      <details class="history-menu">
+        <summary>Element History</summary>
+        <div class="history-popover">
+          <header>
+            <div>
+              <strong>Element History</strong>
+              <small>Codesign variations generated for this element.</small>
+            </div>
+            <span>{candidates.length} {candidates.length === 1 ? 'variation' : 'variations'}</span>
+          </header>
+          <div class="history-list">
+            {#each candidates as item, index (item.candidate.id)}
+              <article class:active={item.candidate.id === activeCandidate?.candidate.id}>
+                <div class="history-copy">
+                  <strong>Version {index + 1} · {fidelityName(item.candidate.fidelity)}</strong>
+                  <small>{createdLabel(item.candidate)}</small>
+                </div>
+                <span class="history-status">{statusName(item.candidate)}</span>
+                <button
+                  type="button"
+                  aria-pressed={item.candidate.id === activeCandidate?.candidate.id}
+                  onclick={() => onSelectCandidate(item.candidate.id)}
+                  >{item.candidate.id === activeCandidate?.candidate.id
+                    ? 'Viewing'
+                    : 'View'}</button
+                >
+              </article>
+            {/each}
+          </div>
+          {#if activeCandidate}
+            <footer>
+              <span>
+                <strong>{fidelityName(activeCandidate.candidate.fidelity)}</strong>
+                <small>Compare this variation with the canvas it started from.</small>
+              </span>
+              <button
+                type="button"
+                aria-pressed={compareSource}
+                onclick={() => onCompareSource(!compareSource)}
+                >{compareSource ? 'Show variation' : 'View starting canvas'}</button
+              >
+            </footer>
+          {/if}
+        </div>
+      </details>
+    {/if}
+
     {#if busy}
       <span class="progress" role="status"><i aria-hidden="true"></i>Generating candidate</span>
       <button type="button" onclick={onCancel}>Cancel</button>
     {:else if activeCandidate?.candidate.status === 'candidate'}
-      <div class="candidate-navigation" aria-label="Generated candidates">
-        {#each candidates as item, index (item.candidate.id)}
-          <button
-            type="button"
-            class:active={item.candidate.id === activeCandidate.candidate.id}
-            aria-label={`View candidate ${index + 1}`}
-            aria-pressed={item.candidate.id === activeCandidate.candidate.id}
-            onclick={() => onSelectCandidate(item.candidate.id)}>{index + 1}</button
-          >
-        {/each}
-      </div>
-      <button
-        type="button"
-        aria-pressed={compareSource}
-        onclick={() => onCompareSource(!compareSource)}
-        >{compareSource ? 'Show candidate' : 'Compare source'}</button
-      >
       <button
         class="primary"
         type="button"
@@ -238,48 +286,18 @@
       <button type="button" onclick={() => onRejectCandidate(activeCandidate.candidate.id)}
         >Reject</button
       >
-    {:else if activeCandidate}
-      <div class="candidate-navigation" aria-label="Recorded candidates">
-        {#each candidates as item, index (item.candidate.id)}
-          <button
-            type="button"
-            class:active={item.candidate.id === activeCandidate.candidate.id}
-            aria-label={`View candidate ${index + 1}`}
-            aria-pressed={item.candidate.id === activeCandidate.candidate.id}
-            onclick={() => onSelectCandidate(item.candidate.id)}>{index + 1}</button
-          >
-        {/each}
-      </div>
-      <span class="recorded-status">{activeCandidate.candidate.status}</span>
-      <button
-        type="button"
-        aria-pressed={compareSource}
-        onclick={() => onCompareSource(!compareSource)}
-        >{compareSource ? 'Show candidate' : 'Compare source'}</button
-      >
-      <button
-        type="button"
-        disabled={Boolean(rerollDisabledReason)}
-        title={rerollDisabledReason}
-        onclick={() => onReroll(activeCandidate.candidate.id)}>Reroll</button
-      >
-    {:else}
-      <button
-        class="primary"
-        type="button"
-        disabled={!canGenerate}
-        title={`Complete with Codesign · ${commandLabel}+Enter`}
-        onclick={() => onGenerate('complete')}>Complete with Codesign</button
-      >
     {/if}
 
     <details class="fidelity-menu">
-      <summary>Codesign detail</summary>
+      <summary>Codesign with AI</summary>
       <div class="fidelity-popover">
         <FidelityStops
           label="Selection fidelity"
           stops={fidelityStops}
           resetKey={fidelityResetKey}
+          activeStage={activeFidelityStage}
+          {canGenerate}
+          generationDisabledReason={statusMessage}
           onStageGeneration={onStageFidelity}
           onInspectCandidate={onInspectFidelityCandidate}
         />
@@ -347,6 +365,9 @@
   }
   .selection-context > span:last-child,
   .review-popover header div,
+  .history-popover header div,
+  .history-copy,
+  .history-popover footer > span,
   .change-list label span,
   .scope-popover label span {
     min-width: 0;
@@ -409,20 +430,6 @@
   details[open] > summary {
     background: #526274;
   }
-  .candidate-navigation {
-    display: flex;
-    gap: 2px;
-    padding: 2px;
-    border-radius: 4px;
-    background: #111827;
-  }
-  .candidate-navigation button {
-    min-width: 25px;
-    padding: 0 5px;
-  }
-  .candidate-navigation button.active {
-    background: #b97920;
-  }
   .progress {
     display: flex;
     align-items: center;
@@ -444,6 +451,7 @@
     }
   }
   .review-popover,
+  .history-popover,
   .fidelity-popover,
   .scope-popover {
     position: absolute;
@@ -459,8 +467,15 @@
     right: -138px;
     width: min(440px, calc(100vw - 40px));
   }
+  .history-popover {
+    left: 50%;
+    width: min(440px, calc(100vw - 40px));
+    transform: translateX(-50%);
+  }
   .review-popover header,
-  .review-popover footer {
+  .review-popover footer,
+  .history-popover header,
+  .history-popover footer {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -470,11 +485,53 @@
   .review-popover header {
     border-bottom: 1px solid #dce1e6;
   }
+  .history-popover header {
+    border-bottom: 1px solid #dce1e6;
+  }
   .review-popover header small,
+  .history-popover small,
   .change-list small,
   .scope-popover small {
     color: #687380;
     font-size: 9px;
+  }
+  .history-list {
+    max-height: 300px;
+    overflow: auto;
+    padding: 5px;
+  }
+  .history-list article {
+    display: grid;
+    grid-template-columns: minmax(150px, 1fr) auto auto;
+    align-items: center;
+    gap: 10px;
+    padding: 8px;
+    border-radius: 5px;
+  }
+  .history-list article + article {
+    border-top: 1px solid #e2e6ea;
+  }
+  .history-list article.active {
+    background: #eef6fc;
+  }
+  .history-status {
+    color: #53606d;
+    font-size: 9px;
+    white-space: nowrap;
+  }
+  .history-list button,
+  .history-popover footer button {
+    min-height: 26px;
+    border: 1px solid #c7cdd4;
+    background: white;
+    color: #33404d;
+  }
+  .history-list button[aria-pressed='true'] {
+    border-color: #7da8c9;
+    background: #e4f1fb;
+  }
+  .history-popover footer {
+    border-top: 1px solid #dce1e6;
   }
   .change-list {
     max-height: 330px;
@@ -542,9 +599,10 @@
     margin: 0;
   }
   .fidelity-popover {
-    right: 0;
-    width: min(520px, calc(100vw - 40px));
+    left: 50%;
+    width: min(440px, calc(100vw - 40px));
     padding: 12px;
+    transform: translateX(-50%);
   }
   .fidelity-popover p,
   .scope-popover p {

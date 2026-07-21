@@ -10,7 +10,7 @@
       : view === 'template'
         ? CODESIGN_PROMPT_TEMPLATE_INSPECTION.userTemplate
         : view === 'rendered'
-          ? (renderedPrompt ?? 'Run Complete with Codesign to inspect the rendered request.')
+          ? (renderedPrompt ?? 'Generate from Codesign with AI to inspect the rendered request.')
           : CODESIGN_PROMPT_TEMPLATE_INSPECTION.outputSchema;
 </script>
 

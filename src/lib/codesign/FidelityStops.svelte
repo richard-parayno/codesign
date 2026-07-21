@@ -24,6 +24,9 @@
     label?: string;
     stops: FidelityStopView[];
     resetKey?: string;
+    activeStage?: CodesignStage;
+    canGenerate?: boolean;
+    generationDisabledReason?: string;
     onStageGeneration: (fidelity: Fidelity) => void;
     onInspectCandidate: (fidelity: Fidelity) => void;
   };
@@ -32,6 +35,9 @@
     label = 'Fidelity',
     stops,
     resetKey,
+    activeStage = 'base',
+    canGenerate = true,
+    generationDisabledReason = 'Codesign needs an editable selection inside a group or frame.',
     onStageGeneration,
     onInspectCandidate,
   }: Props = $props();
@@ -70,17 +76,17 @@
 
   $effect(() => {
     void resetKey;
-    chosenStage = 'base';
+    chosenStage = activeStage;
     pendingFidelity = undefined;
   });
 
   function stateLabel(stop: SliderStop) {
-    if (stop.fidelity === 'base') return 'Live canvas';
-    if (stop.state === 'current') return 'Generate';
-    if (stop.state === 'saved') return 'Previously generated';
-    if (stop.state === 'generate') return 'Not generated';
-    if (stop.state === 'candidate') return 'Candidate';
-    if (stop.state === 'versions') return 'Previously generated';
+    if (stop.fidelity === 'base') return 'Original canvas';
+    if (stop.state === 'current') return 'Current applied';
+    if (stop.state === 'saved') return 'Previously applied';
+    if (stop.state === 'generate') return 'Available';
+    if (stop.state === 'candidate') return 'Review candidate';
+    if (stop.state === 'versions') return 'Previous versions';
     return 'Unavailable';
   }
 
@@ -97,6 +103,7 @@
       onInspectCandidate(stop.fidelity);
       return;
     }
+    if (!canGenerate) return;
     if (stop.fidelity !== 'base') pendingFidelity = stop.fidelity;
   }
 
@@ -149,7 +156,12 @@
       the slider alone never starts generation or restores history.
     </p>
   {:else if chosenStage === 'base'}
-    <p>Base is your current editable canvas. Returning here never restores an older revision.</p>
+    <p>
+      Base is the original editable canvas. Codesign generation is only available in AI Draft and AI
+      Hi-Fi.
+    </p>
+  {:else if !canGenerate && selectedStop?.state !== 'candidate'}
+    <p class="disabled-reason">{generationDisabledReason}</p>
   {:else if selectedStop?.inheritedFrom}
     <p>Inherited from {selectedStop.inheritedFrom}</p>
   {:else if selectedStop?.disabledReason}

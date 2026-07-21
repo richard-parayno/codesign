@@ -16,6 +16,7 @@ import {
   type DesignOperation,
   type Fidelity,
   type GenerationRun,
+  type ProjectComponentDefinition,
 } from './types';
 
 const clone = <T>(value: T): T => structuredClone(value);
@@ -60,6 +61,103 @@ function snapshotDocument(
     ...clone(snapshot),
     currentRevisionId: revisionId,
   };
+}
+
+function subtreeIds(nodes: Record<string, DesignNode>, rootId: string) {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const visit = (id: string) => {
+    const node = nodes[id];
+    if (!node || seen.has(id)) return;
+    seen.add(id);
+    ordered.push(id);
+    node.childIds.forEach(visit);
+  };
+  visit(rootId);
+  return ordered;
+}
+
+function containsComponentBinding(nodes: Record<string, DesignNode>, rootId: string) {
+  return subtreeIds(nodes, rootId).some((id) => Boolean(nodes[id]?.componentBinding));
+}
+
+function codesignComponentRoot(
+  document: DesignDocument,
+  run: GenerationRun,
+  operations: DesignOperation[],
+) {
+  for (const id of run.target.focusNodeIds) {
+    const node = document.nodes[id];
+    if (
+      node &&
+      (node.kind === 'frame' || node.kind === 'group' || node.componentBinding) &&
+      containsComponentBinding(document.nodes, id)
+    )
+      return node;
+  }
+
+  const createdIds = new Set(
+    operations.flatMap((operation) => (operation.type === 'create' ? [operation.node.id] : [])),
+  );
+  for (const operation of operations) {
+    if (operation.type !== 'create') continue;
+    const node = document.nodes[operation.node.id];
+    if (node?.componentBinding && (!node.parentId || !createdIds.has(node.parentId))) return node;
+  }
+  return undefined;
+}
+
+function codesignComponentName(document: DesignDocument, root: DesignNode) {
+  const name = root.name.trim().slice(0, 120);
+  if (name && !/^(frame|group|rectangle|shape|instance)( \d+)?$/i.test(name)) return name;
+  const binding = subtreeIds(document.nodes, root.id)
+    .map((id) => document.nodes[id]?.componentBinding?.componentId)
+    .find(Boolean);
+  return binding?.split('.').at(-1)?.slice(0, 120) || name || 'Codesign component';
+}
+
+function codesignComponentId(document: DesignDocument, root: DesignNode) {
+  if (root.projectComponent?.role === 'main') return root.projectComponent.componentId;
+  const existing = Object.values(document.projectComponents ?? {}).find(
+    (definition) => definition.sourceNodeId === root.id,
+  );
+  if (existing) return existing.id;
+  const base = `project-component-codesign-${root.id}`;
+  let id = base;
+  let suffix = 2;
+  while (document.projectComponents?.[id]) id = `${base}-${suffix++}`;
+  return id;
+}
+
+function promoteAcceptedCodesignComponent(
+  document: DesignDocument,
+  run: GenerationRun,
+  operations: DesignOperation[],
+  timestamp: number,
+) {
+  const root = codesignComponentRoot(document, run, operations);
+  if (!root) return;
+  if (root.projectComponent?.role === 'instance') return;
+
+  const id = codesignComponentId(document, root);
+  const previous = document.projectComponents?.[id];
+  const name = previous?.name ?? codesignComponentName(document, root);
+  root.name = name;
+  root.projectComponent = { componentId: id, role: 'main' };
+  const nodes = Object.fromEntries(
+    subtreeIds(document.nodes, root.id).map((nodeId) => [nodeId, clone(document.nodes[nodeId])]),
+  );
+  const definition: ProjectComponentDefinition = {
+    id,
+    name,
+    rootId: root.id,
+    sourceNodeId: root.id,
+    nodes,
+    createdAt: previous?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+  };
+  document.projectComponents ??= {};
+  document.projectComponents[id] = definition;
 }
 
 function operationMutationIds(operation: DesignOperation) {
@@ -604,6 +702,8 @@ function acceptChanges(
     candidateId,
     eventType: false,
   });
+  if (candidate.fidelity === 'component')
+    promoteAcceptedCodesignComponent(document, run, operations, timestamp);
   for (const nodeId of run.target.mutationScope.existingNodeIds) {
     const node = document.nodes[nodeId];
     if (!node) continue;
@@ -630,8 +730,10 @@ function acceptChanges(
   }
   const acceptedSnapshot = document.revisions[document.currentRevisionId]?.snapshot;
   if (acceptedSnapshot) {
+    acceptedSnapshot.nodes = clone(document.nodes);
     acceptedSnapshot.entities = clone(document.entities);
     acceptedSnapshot.representations = clone(document.representations);
+    acceptedSnapshot.projectComponents = clone(document.projectComponents ?? {});
   }
 
   const acceptedSet = new Set(ordered.map((change) => change.id));

@@ -1,6 +1,7 @@
 import type { ReasoningEffort } from '../../../../.generated/codex-app-server/ReasoningEffort';
 import type { AgentCandidateBatch, GenerationRequest, TrustedVisualInput } from '../candidate';
 import type { GenerationRun } from '$lib/model/types';
+import type { CodexTransportTelemetryEvent } from '../codex-client.server';
 
 export type ProviderId = 'codex';
 export type ProviderFailureCategory =
@@ -103,6 +104,7 @@ export type ProviderGenerationInput = {
   visualInput?: TrustedVisualInput;
   model?: string;
   effort?: ReasoningEffort;
+  onTelemetry?: (event: CodexTransportTelemetryEvent) => void;
 };
 
 export type ProviderModelOption = {

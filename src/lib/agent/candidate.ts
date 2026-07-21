@@ -22,6 +22,7 @@ import {
   type GenerationRun,
 } from '$lib/model/types';
 import { z } from 'zod';
+import type { CodesignTelemetryEvent } from './telemetry';
 
 export const CANDIDATE_SCHEMA_VERSION = 'codesign-candidate-batch-v1';
 export const PROMPT_VERSION = 'codesign-complete-v1';
@@ -992,5 +993,6 @@ export type CandidateGenerationResponse = {
   candidates: ReturnType<typeof normalizeCandidateBatch>[];
   supportedActions: typeof SUPPORTED_ACTIONS;
   visualInputUsed: boolean;
+  telemetry?: CodesignTelemetryEvent;
   message?: string;
 };

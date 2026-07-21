@@ -194,6 +194,7 @@ export class CodexCodesignProvider implements CodesignProvider {
         {
           model: input.model ?? this.model,
           effort: input.effort ?? this.effort,
+          onTelemetry: input.onTelemetry,
         },
       );
       return parseCandidate(text);

@@ -83,7 +83,23 @@ export type CodexLoginStart = {
 export type CodexGenerationOptions = {
   model?: string;
   effort?: ReasoningEffort;
+  onTelemetry?: (event: CodexTransportTelemetryEvent) => void;
 };
+
+export type CodexTransportTelemetryEvent =
+  | { type: 'output-started' }
+  | {
+      type: 'token-usage';
+      usage: {
+        totalTokens: number;
+        inputTokens: number;
+        cachedInputTokens: number;
+        outputTokens: number;
+        reasoningOutputTokens: number;
+        modelContextWindow: number | null;
+      };
+    }
+  | { type: 'turn-completed'; durationMs?: number };
 
 export type CodexModelSummary = {
   id: string;
@@ -170,6 +186,11 @@ export class CodexAppServer {
     }
   >();
   private earlyTurns = new Map<string, { text: string; completed: boolean; error?: string }>();
+  private threadTelemetryListeners = new Map<
+    string,
+    (event: CodexTransportTelemetryEvent) => void
+  >();
+  private outputStartedTurns = new Set<string>();
   private accountListeners = new Set<(event: CodexAccountEvent) => void>();
   private nextId = 1;
   private initialized: Promise<void> | null = null;
@@ -282,6 +303,14 @@ export class CodexAppServer {
       }
   }
 
+  private emitTelemetry(threadId: string, event: CodexTransportTelemetryEvent) {
+    try {
+      this.threadTelemetryListeners.get(threadId)?.(event);
+    } catch {
+      // Telemetry is observational and must never interrupt App Server protocol handling.
+    }
+  }
+
   onAccountEvent(listener: (event: CodexAccountEvent) => void) {
     this.accountListeners.add(listener);
     return () => this.accountListeners.delete(listener);
@@ -373,6 +402,7 @@ export class CodexAppServer {
     if (this.handleAccountNotification(message)) return;
 
     const params = message.params ?? {};
+    const threadId = typeof params.threadId === 'string' ? params.threadId : '';
     const turnId =
       typeof params.turnId === 'string'
         ? params.turnId
@@ -380,6 +410,10 @@ export class CodexAppServer {
           ? (params.turn as { id: string }).id
           : '';
     if (message.method === 'item/agentMessage/delta' && turnId) {
+      if (threadId && !this.outputStartedTurns.has(turnId)) {
+        this.outputStartedTurns.add(turnId);
+        this.emitTelemetry(threadId, { type: 'output-started' });
+      }
       const turn = this.turns.get(turnId);
       if (turn && typeof params.delta === 'string') turn.text += params.delta;
       else if (typeof params.delta === 'string') {
@@ -388,14 +422,60 @@ export class CodexAppServer {
         this.earlyTurns.set(turnId, early);
       }
     }
+    if (message.method === 'thread/tokenUsage/updated' && threadId) {
+      const tokenUsage = params.tokenUsage as
+        | {
+            last?: Record<string, unknown>;
+            modelContextWindow?: unknown;
+          }
+        | undefined;
+      const last = tokenUsage?.last;
+      const values = last
+        ? [
+            last.totalTokens,
+            last.inputTokens,
+            last.cachedInputTokens,
+            last.outputTokens,
+            last.reasoningOutputTokens,
+          ]
+        : [];
+      if (
+        values.length === 5 &&
+        values.every((value) => Number.isInteger(value) && Number(value) >= 0)
+      ) {
+        const contextWindow = tokenUsage?.modelContextWindow;
+        this.emitTelemetry(threadId, {
+          type: 'token-usage',
+          usage: {
+            totalTokens: Number(last!.totalTokens),
+            inputTokens: Number(last!.inputTokens),
+            cachedInputTokens: Number(last!.cachedInputTokens),
+            outputTokens: Number(last!.outputTokens),
+            reasoningOutputTokens: Number(last!.reasoningOutputTokens),
+            modelContextWindow:
+              contextWindow === null || contextWindow === undefined
+                ? null
+                : Number.isInteger(contextWindow) && Number(contextWindow) > 0
+                  ? Number(contextWindow)
+                  : null,
+          },
+        });
+      }
+    }
     if (message.method === 'turn/completed' && turnId) {
-      const status = (params.turn as { status?: string; error?: { message?: string } } | undefined)
-        ?.status;
+      const completedTurn = params.turn as
+        { status?: string; error?: { message?: string }; durationMs?: unknown } | undefined;
+      const status = completedTurn?.status;
       const failure =
-        status === 'failed'
-          ? ((params.turn as { error?: { message?: string } }).error?.message ??
-            'Codex turn failed')
-          : undefined;
+        status === 'failed' ? (completedTurn?.error?.message ?? 'Codex turn failed') : undefined;
+      if (threadId)
+        this.emitTelemetry(threadId, {
+          type: 'turn-completed',
+          ...(Number.isFinite(completedTurn?.durationMs) && Number(completedTurn?.durationMs) >= 0
+            ? { durationMs: Math.round(Number(completedTurn?.durationMs)) }
+            : {}),
+        });
+      this.outputStartedTurns.delete(turnId);
       const turn = this.turns.get(turnId);
       if (!turn) {
         const early = this.earlyTurns.get(turnId) ?? { text: '', completed: false };
@@ -423,6 +503,8 @@ export class CodexAppServer {
     }
     this.turns.clear();
     this.earlyTurns.clear();
+    this.threadTelemetryListeners.clear();
+    this.outputStartedTurns.clear();
   }
 
   private async createThread(model: string) {
@@ -550,63 +632,70 @@ export class CodexAppServer {
     const model = options.model?.trim() || this.model || DEFAULT_CODEX_MODEL;
     const effort = options.effort || this.effort || DEFAULT_CODEX_EFFORT;
     const threadId = await this.createThread(model);
-    if (signal?.aborted) throw new Error('Codex generation cancelled');
-    const input: UserInput[] = [{ type: 'text', text: prompt, text_elements: [] }];
-    if (visualInput) input.push(visualInput);
-    const params: TurnStartParams = {
-      threadId,
-      input,
-      approvalPolicy: 'never',
-      sandboxPolicy: { type: 'readOnly', networkAccess: false },
-      model,
-      effort,
-      summary: 'none',
-      outputSchema: candidateBatchOutputSchema as TurnStartParams['outputSchema'],
-    };
-    const response = (await this.request('turn/start', params, 15_000)) as {
-      turn?: { id?: string };
-    };
-    const turnId = response.turn?.id;
-    if (!turnId) throw new Error('Codex App Server did not return a turn ID');
-    if (signal?.aborted) {
-      this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
-      throw new Error('Codex generation cancelled');
-    }
-    return new Promise<string>((resolveTurn, rejectTurn) => {
-      const early = this.earlyTurns.get(turnId);
-      if (early?.completed) {
-        this.earlyTurns.delete(turnId);
-        early.error ? rejectTurn(new Error(early.error)) : resolveTurn(early.text);
-        return;
+    if (options.onTelemetry) this.threadTelemetryListeners.set(threadId, options.onTelemetry);
+    try {
+      if (signal?.aborted) throw new Error('Codex generation cancelled');
+      const input: UserInput[] = [{ type: 'text', text: prompt, text_elements: [] }];
+      if (visualInput) input.push(visualInput);
+      const params: TurnStartParams = {
+        threadId,
+        input,
+        approvalPolicy: 'never',
+        sandboxPolicy: { type: 'readOnly', networkAccess: false },
+        model,
+        effort,
+        summary: 'none',
+        outputSchema: candidateBatchOutputSchema as TurnStartParams['outputSchema'],
+      };
+      const response = (await this.request('turn/start', params, 15_000)) as {
+        turn?: { id?: string };
+      };
+      const turnId = response.turn?.id;
+      if (!turnId) throw new Error('Codex App Server did not return a turn ID');
+      if (signal?.aborted) {
+        this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
+        throw new Error('Codex generation cancelled');
       }
-      let settled = false;
-      const finish = (kind: 'resolve' | 'reject', value: string | Error) => {
-        if (settled) return;
-        settled = true;
-        signal?.removeEventListener('abort', abort);
-        if (kind === 'resolve') resolveTurn(value as string);
-        else rejectTurn(value as Error);
-      };
-      const timer = setTimeout(() => {
-        this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
-        this.turns.delete(turnId);
-        finish('reject', new Error('Codex generation timed out'));
-      }, 45_000);
-      const abort = () => {
-        clearTimeout(timer);
-        this.turns.delete(turnId);
-        this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
-        finish('reject', new Error('Codex generation cancelled'));
-      };
-      this.turns.set(turnId, {
-        text: early?.text ?? '',
-        resolve: (text) => finish('resolve', text),
-        reject: (error) => finish('reject', error),
-        timer,
+      return await new Promise<string>((resolveTurn, rejectTurn) => {
+        const early = this.earlyTurns.get(turnId);
+        if (early?.completed) {
+          this.earlyTurns.delete(turnId);
+          early.error ? rejectTurn(new Error(early.error)) : resolveTurn(early.text);
+          return;
+        }
+        let settled = false;
+        const finish = (kind: 'resolve' | 'reject', value: string | Error) => {
+          if (settled) return;
+          settled = true;
+          signal?.removeEventListener('abort', abort);
+          if (kind === 'resolve') resolveTurn(value as string);
+          else rejectTurn(value as Error);
+        };
+        const timer = setTimeout(() => {
+          this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
+          this.turns.delete(turnId);
+          this.outputStartedTurns.delete(turnId);
+          finish('reject', new Error('Codex generation timed out'));
+        }, 45_000);
+        const abort = () => {
+          clearTimeout(timer);
+          this.turns.delete(turnId);
+          this.outputStartedTurns.delete(turnId);
+          this.request('turn/interrupt', { threadId, turnId }, 3_000).catch(() => {});
+          finish('reject', new Error('Codex generation cancelled'));
+        };
+        this.turns.set(turnId, {
+          text: early?.text ?? '',
+          resolve: (text) => finish('resolve', text),
+          reject: (error) => finish('reject', error),
+          timer,
+        });
+        this.earlyTurns.delete(turnId);
+        signal?.addEventListener('abort', abort, { once: true });
       });
-      this.earlyTurns.delete(turnId);
-      signal?.addEventListener('abort', abort, { once: true });
-    });
+    } finally {
+      this.threadTelemetryListeners.delete(threadId);
+    }
   }
 
   shutdown() {

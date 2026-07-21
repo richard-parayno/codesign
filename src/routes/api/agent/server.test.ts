@@ -75,6 +75,7 @@ async function post(value: unknown) {
 }
 
 beforeEach(() => {
+  vi.spyOn(console, 'info').mockImplementation(() => {});
   mockProvider.status.mockReset();
   mockProvider.generate.mockReset();
   mockProvider.status.mockResolvedValue({
@@ -110,6 +111,51 @@ describe('POST /api/agent', () => {
     });
     expect(value).not.toHaveProperty('fallback');
     expect(value.candidates[0].atomicChanges).toHaveLength(4);
+  });
+
+  it('returns measured Codex usage and logs safe backend lifecycle events', async () => {
+    mockProvider.generate.mockImplementation(({ request, run, onTelemetry }) => {
+      onTelemetry?.({ type: 'output-started' });
+      onTelemetry?.({
+        type: 'token-usage',
+        usage: {
+          totalTokens: 240,
+          inputTokens: 180,
+          cachedInputTokens: 30,
+          outputTokens: 60,
+          reasoningOutputTokens: 12,
+          modelContextWindow: 200_000,
+        },
+      });
+      onTelemetry?.({ type: 'turn-completed', durationMs: 654 });
+      const wire = candidateBatchFixture(request, run);
+      const origin = request.target.mutationScope.regions[0];
+      for (const change of wire.candidate.atomicChanges) {
+        if (change.operation.type !== 'create') continue;
+        change.operation.node.bounds.x -= origin.x;
+        change.operation.node.bounds.y -= origin.y;
+      }
+      return wire;
+    });
+
+    const response = await post(body());
+    const value = await response.json();
+
+    expect(value.telemetry).toMatchObject({
+      phase: 'completed',
+      durationMs: 654,
+      usage: {
+        totalTokens: 240,
+        inputTokens: 180,
+        cachedInputTokens: 30,
+        outputTokens: 60,
+        reasoningOutputTokens: 12,
+      },
+    });
+    const backendEvents = vi.mocked(console.info).mock.calls.map(([line]) => String(line));
+    expect(backendEvents.some((line) => line.includes('"phase":"prompt-sent"'))).toBe(true);
+    expect(backendEvents.some((line) => line.includes('"totalTokens":240'))).toBe(true);
+    expect(backendEvents.join(' ')).not.toContain('Complete the supplied design scene');
   });
 
   it('reports unsupported vocabulary instead of exposing a dead action', async () => {

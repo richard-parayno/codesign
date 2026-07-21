@@ -124,7 +124,33 @@ function fakeProcess(
               `${JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: 'item-1', delta: 'Version":"ok"}' } })}\n`,
             );
             stdout.write(
-              `${JSON.stringify({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed', error: null } } })}\n`,
+              `${JSON.stringify({
+                method: 'thread/tokenUsage/updated',
+                params: {
+                  threadId,
+                  turnId,
+                  tokenUsage: {
+                    total: {
+                      totalTokens: 150,
+                      inputTokens: 100,
+                      cachedInputTokens: 20,
+                      outputTokens: 50,
+                      reasoningOutputTokens: 10,
+                    },
+                    last: {
+                      totalTokens: 150,
+                      inputTokens: 100,
+                      cachedInputTokens: 20,
+                      outputTokens: 50,
+                      reasoningOutputTokens: 10,
+                    },
+                    modelContextWindow: 200_000,
+                  },
+                },
+              })}\n`,
+            );
+            stdout.write(
+              `${JSON.stringify({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed', error: null, durationMs: 321 } } })}\n`,
             );
           });
       }
@@ -192,6 +218,33 @@ describe('Codex App Server JSONL transport', () => {
     expect(threads).toHaveLength(2);
     expect(threads.every((message) => message.params?.ephemeral === true)).toBe(true);
     expect(turns.map((message) => message.params?.threadId)).toEqual(['thread-1', 'thread-2']);
+    client.shutdown();
+  });
+
+  it('reports live output, exact App Server token usage, and turn duration', async () => {
+    const fake = fakeProcess();
+    const client = new CodexAppServer('fake-codex', undefined, () => fake.child);
+    const telemetry: unknown[] = [];
+
+    await client.proposeCandidate('Measure this run', undefined, undefined, {
+      onTelemetry: (event) => telemetry.push(event),
+    });
+
+    expect(telemetry).toEqual([
+      { type: 'output-started' },
+      {
+        type: 'token-usage',
+        usage: {
+          totalTokens: 150,
+          inputTokens: 100,
+          cachedInputTokens: 20,
+          outputTokens: 50,
+          reasoningOutputTokens: 10,
+          modelContextWindow: 200_000,
+        },
+      },
+      { type: 'turn-completed', durationMs: 321 },
+    ]);
     client.shutdown();
   });
 

@@ -67,6 +67,11 @@
   import { deriveGenerationTarget } from '$lib/agent/generation-target';
   import { captureSceneSnapshot } from '$lib/agent/visual-snapshot.client';
   import {
+    codesignTelemetryEventSchema,
+    isTerminalTelemetryPhase,
+    type CodesignTelemetryEvent,
+  } from '$lib/agent/telemetry';
+  import {
     componentCatalog,
     getDefaultComponentBlueprint,
     resolveComponent,
@@ -74,6 +79,7 @@
   } from '$lib/design-system/registry';
   import ComponentLibrary from '$lib/codesign/ComponentLibrary.svelte';
   import ComponentCanvasRenderer from '$lib/codesign/ComponentCanvasRenderer.svelte';
+  import CodesignActivity from '$lib/codesign/CodesignActivity.svelte';
   import InlineCodesignToolbar, {
     type CandidateView,
     type ObservationScopeView,
@@ -100,7 +106,7 @@
   let editorMode: EditorMode = 'edit';
   let preview = false;
   let bottomOpen = false;
-  let bottomTab: 'process' | 'operations' | 'code' = 'process';
+  let bottomTab: 'process' | 'activity' | 'operations' | 'code' = 'process';
   let zoom = 1;
   let pan = { x: 0, y: 0 };
   let canvasBackground = DEFAULT_CANVAS_BACKGROUND;
@@ -163,6 +169,9 @@
   let providerPlan = '';
   let loadingCandidate = false;
   let generationController: AbortController | null = null;
+  let codesignTelemetrySource: EventSource | null = null;
+  let codesignActivityEvents: CodesignTelemetryEvent[] = [];
+  let activeTelemetryRequestId = '';
   let idCounter = 0;
   let viewportLogTimer: ReturnType<typeof setTimeout> | undefined;
   let generationRequestId = 0;
@@ -280,6 +289,30 @@
     aiIntegration.configuration,
     selectedAiModel,
   );
+  $: latestCodesignActivity = codesignActivityEvents.at(-1);
+  $: latestCodesignUsage = [...codesignActivityEvents]
+    .reverse()
+    .find((event) => event.usage)?.usage;
+  $: codesignActivityLabel = latestCodesignActivity
+    ? {
+        preparing: 'Preparing',
+        'prompt-sent': 'Prompt running',
+        streaming: 'Receiving proposal',
+        validating: 'Validating',
+        completed: 'Complete',
+        failed: 'Failed',
+        cancelled: 'Cancelled',
+      }[latestCodesignActivity.phase]
+    : 'Idle';
+  $: codesignActivityTabLabel = `Codesign activity · ${codesignActivityLabel} · ${
+    latestCodesignUsage
+      ? `${new Intl.NumberFormat().format(latestCodesignUsage.totalTokens)} tokens`
+      : latestCodesignActivity && ['failed', 'cancelled'].includes(latestCodesignActivity.phase)
+        ? 'usage unavailable'
+        : latestCodesignActivity
+          ? 'usage pending'
+          : 'no usage yet'
+  }`;
 
   onMount(() => {
     documentStore.restore();
@@ -451,6 +484,7 @@
     window.addEventListener('pointerdown', dismissContextMenu);
     return () => {
       if (viewportLogTimer) clearTimeout(viewportLogTimer);
+      closeCodesignTelemetry();
       window.removeEventListener('keydown', keydown);
       window.removeEventListener('keyup', keyup);
       window.removeEventListener('pointerdown', dismissContextMenu);
@@ -460,6 +494,41 @@
   function uid(prefix: string) {
     idCounter += 1;
     return `${prefix}-${Date.now().toString(36)}-${idCounter}`;
+  }
+  function closeCodesignTelemetry() {
+    codesignTelemetrySource?.close();
+    codesignTelemetrySource = null;
+  }
+  function recordCodesignTelemetry(value: unknown) {
+    const parsed = codesignTelemetryEventSchema.safeParse(value);
+    if (!parsed.success || parsed.data.requestId !== activeTelemetryRequestId) return;
+    const event = parsed.data;
+    if (!codesignActivityEvents.some((current) => current.sequence === event.sequence))
+      codesignActivityEvents = [...codesignActivityEvents, event]
+        .sort((left, right) => left.sequence - right.sequence)
+        .slice(-64);
+    if (isTerminalTelemetryPhase(event.phase)) closeCodesignTelemetry();
+  }
+  function startCodesignTelemetry(requestId: string) {
+    closeCodesignTelemetry();
+    activeTelemetryRequestId = requestId;
+    codesignActivityEvents = [];
+    bottomTab = 'activity';
+    bottomOpen = true;
+    const source = new EventSource(
+      `/api/agent/telemetry?requestId=${encodeURIComponent(requestId)}`,
+    );
+    codesignTelemetrySource = source;
+    source.onmessage = (event) => {
+      try {
+        recordCodesignTelemetry(JSON.parse(event.data) as unknown);
+      } catch {
+        // Ignore malformed observational events; the generation response remains authoritative.
+      }
+    };
+    source.onerror = () => {
+      if (codesignTelemetrySource === source) closeCodesignTelemetry();
+    };
   }
   function controlArea(control: Element) {
     if (control.closest('.topbar')) return 'topbar';
@@ -688,6 +757,9 @@
     generationController?.abort();
     generationController = null;
     generationRequestId += 1;
+    closeCodesignTelemetry();
+    activeTelemetryRequestId = '';
+    codesignActivityEvents = [];
     activeCandidateId = '';
     selectedAtomicIds = [];
     highlightedChangeId = '';
@@ -2126,6 +2198,7 @@
     const controller = new AbortController();
     generationController = controller;
     const requestId = ++generationRequestId;
+    const telemetryRequestId = `codesign-${crypto.randomUUID()}`;
     const requestProjectId = activeProjectId;
     error = '';
     codesignStatus = 'Generating a candidate… Your design is unchanged.';
@@ -2145,6 +2218,7 @@
       const baseTarget = deriveGenerationTarget(document, selection);
       const target = { ...baseTarget, observationScope };
       const visualSnapshot = await captureSceneSnapshot(document, target);
+      startCodesignTelemetry(telemetryRequestId);
       const pinnedChanges = rerollCandidateId
         ? pinnedAtomicIds
             .filter((id) => document.candidates[rerollCandidateId]?.atomicChangeIds.includes(id))
@@ -2153,7 +2227,10 @@
         : [];
       const response = await fetch('/api/agent', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          'x-codesign-request-id': telemetryRequestId,
+        },
         signal: controller.signal,
         body: JSON.stringify({
           projectId: activeProjectId,
@@ -2194,7 +2271,9 @@
         run?: GenerationRun;
         candidates?: CandidateDraft[];
         message?: string;
+        telemetry?: CodesignTelemetryEvent;
       };
+      if (value.telemetry) recordCodesignTelemetry(value.telemetry);
       if (!response.ok || !value.run || !value.candidates)
         throw new Error(value.message ?? 'Codesign generation failed');
       if (requestId !== generationRequestId || requestProjectId !== activeProjectId) {
@@ -3694,7 +3773,7 @@
 
     <section class:open={bottomOpen} class="bottom-panel">
       <div class="bottom-tabs">
-        {#each ['process', 'operations', 'code'] as tab}<button
+        {#each ['process', 'activity', 'operations', 'code'] as tab}<button
             class:active={bottomTab === tab}
             onclick={() => {
               bottomTab = tab as typeof bottomTab;
@@ -3702,9 +3781,11 @@
             }}
             >{tab === 'process'
               ? 'Process history'
-              : tab === 'operations'
-                ? 'Applied operations'
-                : 'Svelte projection'}</button
+              : tab === 'activity'
+                ? codesignActivityTabLabel
+                : tab === 'operations'
+                  ? 'Applied operations'
+                  : 'Svelte projection'}</button
           >{/each}<button class="panel-toggle" onclick={() => (bottomOpen = !bottomOpen)}
           >{bottomOpen ? 'Hide panel' : 'Show panel'}
           <span aria-hidden="true">{bottomOpen ? '⌄' : '⌃'}</span></button
@@ -3723,6 +3804,8 @@
               }}
               onReplay={replayRecordedCandidate}
             />
+          {:else if bottomTab === 'activity'}
+            <CodesignActivity events={codesignActivityEvents} />
           {:else if bottomTab === 'operations'}<div class="history">
               {#each [...document.operations].reverse() as operation}<div>
                   <i class:agent={operation.actor === 'agent'}

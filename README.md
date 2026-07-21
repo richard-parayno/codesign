@@ -20,6 +20,26 @@ Prompt-to-UI tools tend to jump straight to a finished result. The output may lo
 
 Selection and slider movement alone do not run AI or mutate the canvas.
 
+## How Codex and GPT-5.6 power Codesign
+
+Codesign uses Codex and GPT-5.6 in two distinct ways: they power the product's visual-autocomplete loop at runtime, and they were active collaborators in building and refining the prototype itself.
+
+### Inside the product
+
+- **Codex is the agent runtime.** Codesign starts the user's separately installed `codex app-server` process and communicates with it over JSON-RPC. The project does not bundle Codex or handle its credentials.
+- **GPT-5.6 is the reasoning model.** It interprets the selected layers, their names and text, the chosen observation scope, the requested fidelity, and the available component catalog.
+- **Canvas-native tools keep the work grounded.** The agent can inspect scene structure, read relevant nodes, discover and describe compatible shadcn-svelte components, render source or candidate views, and propose atomic canvas operations.
+- **Candidates are isolated and validated.** Proposed operations run against a copy-on-write candidate rather than the live document. Codesign checks scope, hierarchy, component bindings, and operation dependencies before the candidate can be submitted for review.
+- **The designer remains the decision-maker.** GPT-5.6 cannot silently overwrite the canvas. The designer reviews native editable layers and chooses whether to accept all, accept a safe subset, reject, or reroll.
+
+This is intentionally different from asking a model to return a finished screenshot or a block of generated UI code. Codex works through the same structured scene model the editor uses, so its suggestions remain inspectable and editable.
+
+### During development
+
+Codex and GPT-5.6 were also used throughout the engineering process—not just embedded as a demo feature. They helped inspect and evolve the scene graph, candidate protocol, App Server integration, component-discovery flow, interaction design, tests, documentation, and local setup. The project was repeatedly dogfooded by using Codex to diagnose real editor sessions and logs, implement scoped changes, run verification, and review regressions.
+
+The checked-in [prompts](prompts/) and [design documentation](docs/) preserve the product decisions and agent contracts that came out of that collaboration. The result is both a Codex-powered design tool and an example of using Codex to build a tool around a new human-AI interaction model.
+
 ## Five-minute quickstart
 
 ### Prerequisites
@@ -101,7 +121,7 @@ CODESIGN_AGENT_TIMEOUT_MS=180000
 - **Canvas agent tools:** `src/lib/agent/harness/` exposes bounded tools for scene overview and node inspection, source/candidate rendering, shadcn-svelte component search and description, candidate state, atomic changes, validation, and submission.
 - **Review UI:** `src/lib/codesign/` and `src/routes/+page.svelte` present scope and fidelity controls, candidate review, partial acceptance, rerolls, source comparison, local components, and process history.
 
-At runtime GPT-5.6 operates only through the local Codex App Server and its scoped canvas tools. During project development, Codex and GPT-5.6 were also used to implement, test, review, and iterate on the editor; the checked-in `prompts/` and `docs/` directories record much of that design and engineering work.
+At runtime GPT-5.6 operates only through the local Codex App Server and its scoped canvas tools.
 
 ## Development and verification
 

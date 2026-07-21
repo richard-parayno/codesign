@@ -15,6 +15,8 @@
 </script>
 
 <script lang="ts">
+  import { normalizeCodesignFidelity, shouldNavigateSavedFidelity } from './fidelity-navigation';
+
   type SupportedFidelity = Extract<Fidelity, 'wireframe' | 'component'>;
 
   type Props = {
@@ -52,7 +54,9 @@
     ),
   );
   let committedFidelity = $derived(
-    normalizeFidelity(selectedFidelity ?? stops.find((stop) => stop.state === 'current')?.fidelity),
+    normalizeCodesignFidelity(
+      selectedFidelity ?? stops.find((stop) => stop.state === 'current')?.fidelity,
+    ),
   );
   let chosenFidelity = $state<SupportedFidelity>('wireframe');
   let pendingFidelity = $state<SupportedFidelity>();
@@ -64,12 +68,6 @@
     chosenFidelity = committedFidelity;
     pendingFidelity = undefined;
   });
-
-  function normalizeFidelity(fidelity?: Fidelity): SupportedFidelity {
-    return fidelity === 'component' || fidelity === 'visual' || fidelity === 'production'
-      ? 'component'
-      : 'wireframe';
-  }
 
   function stateLabel(stop: FidelityStopView) {
     if (stop.state === 'current') return 'Current';
@@ -90,7 +88,8 @@
 
     if (stop.disabledReason || stop.state === 'unavailable' || stop.state === 'current') return;
     if (stop.state === 'saved' || stop.state === 'versions') {
-      if (stop.representationId) onNavigate(stop.fidelity, stop.representationId);
+      if (shouldNavigateSavedFidelity(stop, committedFidelity) && stop.representationId)
+        onNavigate(stop.fidelity, stop.representationId);
       return;
     }
     if (stop.state === 'candidate') {

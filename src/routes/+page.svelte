@@ -1367,6 +1367,7 @@
       const representations = saved.filter((item) => item.fidelity === fidelity);
       const representation = representations.at(-1);
       if (candidateFidelities.has(fidelity)) return { fidelity, state: 'candidate' };
+      if (fidelity === current) return { fidelity, state: 'current', inheritedFrom };
       if (representations.length > 1)
         return {
           fidelity,
@@ -1374,7 +1375,6 @@
           versionCount: representations.length,
           representationId: representation?.id,
         };
-      if (fidelity === current) return { fidelity, state: 'current', inheritedFrom };
       if (representation) return { fidelity, state: 'saved', representationId: representation.id };
       if (fidelities.indexOf(fidelity) > currentIndex) return { fidelity, state: 'generate' };
       return {

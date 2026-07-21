@@ -178,6 +178,7 @@
   let observationKind: ObservationScope['kind'] = 'frame';
   let requestedFidelity: Fidelity = 'wireframe';
   let activeCandidateId = '';
+  let dismissedCandidateSelectionKey = '';
   let selectedAtomicIds: string[] = [];
   let pinnedAtomicIds: string[] = [];
   let highlightedChangeId = '';
@@ -223,9 +224,32 @@
       ? generationTarget.observationScope
       : makeObservationScope(observationKind, selection, selectedNodes, visibleNodes);
   $: observationScopes = makeObservationScopeOptions(selection, selectedNodes, visibleNodes);
+  $: currentSelectionKey = sortedIdKey(eligibleGenerationSelection);
+  $: if (dismissedCandidateSelectionKey && dismissedCandidateSelectionKey !== currentSelectionKey)
+    dismissedCandidateSelectionKey = '';
+  $: selectionRun =
+    eligibleGenerationSelection.length && dismissedCandidateSelectionKey !== currentSelectionKey
+      ? Object.values(document.generationRuns)
+          .filter((run) => sortedIdKey(run.target.focusNodeIds) === currentSelectionKey)
+          .sort((a, b) => b.createdAt - a.createdAt)[0]
+      : undefined;
+  $: if (activeCandidateId && eligibleGenerationSelection.length) {
+    const selectedRun =
+      document.generationRuns[document.candidates[activeCandidateId]?.generationRunId];
+    if (
+      !selectedRun ||
+      sortedIdKey(selectedRun.target.focusNodeIds) !== sortedIdKey(eligibleGenerationSelection)
+    ) {
+      activeCandidateId = '';
+      selectedAtomicIds = [];
+      highlightedChangeId = '';
+      compareSourceActive = false;
+      proposedSelectionId = '';
+    }
+  }
   $: latestRun = activeCandidateId
     ? document.generationRuns[document.candidates[activeCandidateId]?.generationRunId]
-    : Object.values(document.generationRuns).sort((a, b) => b.createdAt - a.createdAt)[0];
+    : selectionRun;
   $: runCandidates = latestRun
     ? Object.values(document.candidates)
         .filter((candidate) => {
@@ -445,6 +469,7 @@
         if (gesture || draft || marquee || Object.keys(transientBounds).length) {
           cancelCanvasGesture();
         } else if (contextMenu) contextMenu = null;
+        else if (activeCandidateId || runCandidates.length) exitCandidateReview('keyboard');
         else if (tool !== 'select') tool = 'select';
         else if (selection.length) selection = [];
         else setEditorMode('edit');
@@ -494,6 +519,20 @@
   function uid(prefix: string) {
     idCounter += 1;
     return `${prefix}-${Date.now().toString(36)}-${idCounter}`;
+  }
+  function sortedIdKey(ids: string[]) {
+    return [...ids].sort().join(':');
+  }
+  function exitCandidateReview(source: 'keyboard') {
+    const candidateId = activeCandidate?.id ?? activeCandidateId;
+    dismissedCandidateSelectionKey = currentSelectionKey;
+    activeCandidateId = '';
+    selectedAtomicIds = [];
+    highlightedChangeId = '';
+    compareSourceActive = false;
+    proposedSelectionId = '';
+    codesignStatus = 'Saved candidate review closed. Your selection is unchanged.';
+    logAction('codesign.review-closed', { source, candidateId, focusNodeIds: selection });
   }
   function closeCodesignTelemetry() {
     codesignTelemetrySource?.close();
@@ -2193,6 +2232,7 @@
       logAction('codesign.request-rejected', { action, message: error });
       return;
     }
+    dismissedCandidateSelectionKey = '';
     loadingCandidate = true;
     generationController?.abort();
     const controller = new AbortController();
@@ -2344,6 +2384,7 @@
   function selectCandidate(candidateId: string) {
     const candidate = document.candidates[candidateId];
     if (!candidate) return;
+    dismissedCandidateSelectionKey = '';
     activeCandidateId = candidateId;
     selectedAtomicIds = candidate.atomicChangeIds.filter(
       (id) => candidate.decisions[id] === 'pending',
@@ -3164,6 +3205,16 @@
               />
             {/if}
             {#if node.componentBinding}
+              {#if !preview}
+                <rect
+                  class="component-hit-target"
+                  x={bounds.x}
+                  y={bounds.y}
+                  width={bounds.width}
+                  height={bounds.height}
+                  rx={node.style.radius}
+                />
+              {/if}
               {#if !belongsToNativeComponentTree(node, document.nodes)}
                 <ComponentCanvasRenderer {node} {bounds} nodes={document.nodes} {preview} />
               {/if}
@@ -3719,6 +3770,10 @@
                 <div>
                   <dt>Complete with Codesign</dt>
                   <dd><kbd>{commandLabel}+Enter</kbd></dd>
+                </div>
+                <div>
+                  <dt>Exit candidate review / clear selection</dt>
+                  <dd><kbd>Esc</kbd></dd>
                 </div>
               </dl>
             </section>
@@ -4813,6 +4868,10 @@
   }
   .component-accent {
     fill: #397eb8;
+  }
+  .component-hit-target {
+    fill: transparent;
+    pointer-events: all;
   }
   .component-name {
     font-size: 11px;

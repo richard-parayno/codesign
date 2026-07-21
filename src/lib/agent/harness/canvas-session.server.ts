@@ -472,7 +472,7 @@ export class CanvasSessionService implements CanvasSessionServiceContract {
       candidate: clone(source),
       target: clone(input.target),
       pinnedNodeIds,
-      pinnedChangeIds: new Set(input.pinnedChangeIds ?? []),
+      pinnedChangeIds: new Set(),
       requestedFidelity: input.requestedFidelity,
       action: input.action,
       metadata: { model: input.model, backend: input.backend },
@@ -497,6 +497,32 @@ export class CanvasSessionService implements CanvasSessionServiceContract {
       },
       { state: 'active' },
     );
+    if (input.seedChanges?.length) {
+      try {
+        this.applyChanges(
+          session,
+          applySchema.parse({
+            candidateRevisionId: session.candidate.currentRevisionId,
+            changes: input.seedChanges,
+          }),
+        );
+      } catch (cause) {
+        this.sessions.delete(id);
+        throw cause;
+      }
+    }
+    session.pinnedChangeIds = new Set(input.pinnedChangeIds ?? []);
+    if (
+      [...session.pinnedChangeIds].some(
+        (changeId) => !session.changes.some((change) => change.operation.id === changeId),
+      )
+    ) {
+      this.sessions.delete(id);
+      throw new CanvasSessionError(
+        'invalid-target',
+        'Pinned changes must be supplied as candidate seed changes',
+      );
+    }
     return this.handle(session);
   }
 
@@ -642,6 +668,7 @@ export class CanvasSessionService implements CanvasSessionServiceContract {
       observationScope: session.target.observationScope,
       mutationScope: session.target.mutationScope,
       pinnedNodeIds: [...session.pinnedNodeIds],
+      pinnedChangeIds: [...session.pinnedChangeIds],
       styleSummary: {
         fills: [...new Set(nodes.map((node) => session.source.nodes[node.id].style.fill))].slice(
           0,
@@ -712,6 +739,7 @@ export class CanvasSessionService implements CanvasSessionServiceContract {
       throw new CanvasSessionError('node-not-found', 'Candidate slice contains an unknown node');
     return {
       ...this.handle(session),
+      pinnedChangeIds: [...session.pinnedChangeIds],
       operations: page(
         session.changes.map((change) => ({
           id: change.operation.id,

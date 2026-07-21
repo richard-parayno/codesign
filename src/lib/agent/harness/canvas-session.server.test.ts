@@ -86,6 +86,43 @@ function createChange(id: string, value: DesignNode, dependencyIds: string[] = [
 }
 
 describe('CanvasSessionService', () => {
+  it('starts reroll candidates with pinned seed operations already applied', async () => {
+    const document = sourceDocument();
+    const service = new CanvasSessionService();
+    const sessionInput = input(document);
+    sessionInput.pinnedChangeIds = ['preserved-style'];
+    sessionInput.seedChanges = [
+      {
+        operation: {
+          id: 'preserved-style',
+          type: 'style',
+          actor: 'agent',
+          targetIds: ['editable'],
+          patch: { radius: 18 },
+        },
+        dependencyIds: [],
+        evidenceNodeIds: ['editable'],
+        summary: 'Preserved the approved corner radius.',
+      },
+    ];
+
+    const session = await service.createSession(sessionInput);
+    const state = (await service.dispatch(session.id, 'candidate.get_state', {
+      nodeIds: ['editable'],
+    })) as {
+      pinnedChangeIds: string[];
+      operations: { items: Array<{ id: string }> };
+      nodes: { items: DesignNode[] };
+    };
+
+    expect(state.pinnedChangeIds).toEqual(['preserved-style']);
+    expect(state.operations.items).toContainEqual(
+      expect.objectContaining({ id: 'preserved-style' }),
+    );
+    expect(state.nodes.items[0].style.radius).toBe(18);
+    await service.dispose();
+  });
+
   it('keeps the accepted document immutable while mutating a candidate copy', async () => {
     const document = sourceDocument();
     const acceptedBefore = structuredClone(document);

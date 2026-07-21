@@ -6,8 +6,13 @@
   const phaseLabels = {
     preparing: 'Preparing',
     'prompt-sent': 'Prompt running',
+    inspecting: 'Inspecting scene',
+    rendering: 'Rendering canvas',
+    components: 'Finding components',
+    applying: 'Applying changes',
     streaming: 'Receiving proposal',
     validating: 'Validating',
+    submitting: 'Submitting',
     completed: 'Complete',
     failed: 'Failed',
     cancelled: 'Cancelled',

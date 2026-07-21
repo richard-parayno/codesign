@@ -216,7 +216,7 @@ export async function runCanvasCli(
   }
 }
 
-/** Runtime entry used by scripts/codesign-harness.mjs after Vite resolves project aliases. */
+/** Runtime entry used by scripts/codesign-harness.mjs after its TypeScript/alias hooks load. */
 export async function main(argv = process.argv.slice(2)) {
   const { CanvasSessionService } = await import('./canvas-session.server');
   const service = new CanvasSessionService();

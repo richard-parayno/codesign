@@ -7,6 +7,7 @@
     type Bounds,
     type CandidateRevision,
     type CodesignAction,
+    type DesignDocument,
     type DesignNode,
     type DesignOperation,
     type Fidelity,
@@ -15,6 +16,7 @@
     type ObservationScope,
     type ProcessEvent,
     type StylePatch,
+    operationSchema,
   } from '$lib/model/types';
   import {
     acceptCandidateChanges,
@@ -69,7 +71,7 @@
   import { groupedCanvasContextTarget, groupedCanvasSelectionTarget } from '$lib/editor/selection';
   import { logAction } from '$lib/debug/action-log';
   import { deriveGenerationTarget } from '$lib/agent/generation-target';
-  import { captureSceneSnapshot } from '$lib/agent/visual-snapshot.client';
+  import { applyOperation, canvasSnapshot } from '$lib/model/operations';
   import {
     codesignTelemetryEventSchema,
     isTerminalTelemetryPhase,
@@ -191,6 +193,8 @@
   let providerPlan = '';
   let loadingCandidate = false;
   let generationController: AbortController | null = null;
+  let liveCandidateDocument: DesignDocument | null = null;
+  let activeGenerationSourceRevisionId = '';
   let codesignTelemetrySource: EventSource | null = null;
   let codesignActivityEvents: CodesignTelemetryEvent[] = [];
   let activeTelemetryRequestId = '';
@@ -304,15 +308,18 @@
   $: sourceSnapshot = activeCandidate
     ? document.revisions[activeCandidate.sourceRevisionId]?.snapshot
     : undefined;
+  $: ghostSourceSnapshot = liveCandidateDocument ? canvasSnapshot(document) : sourceSnapshot;
   $: renderedNodes =
     compareSourceActive && sourceSnapshot
       ? orderedScreenNodes(sourceSnapshot, document.activeScreenId)
       : visibleNodes;
-  $: ghostSnapshot = activeCandidateSnapshot;
+  $: ghostSnapshot = liveCandidateDocument
+    ? canvasSnapshot(liveCandidateDocument)
+    : activeCandidateSnapshot;
   $: ghostNodes = ghostSnapshot
     ? Object.values(ghostSnapshot.nodes).filter((node) => {
         if (node.screenId !== document.activeScreenId) return false;
-        const source = sourceSnapshot?.nodes[node.id];
+        const source = ghostSourceSnapshot?.nodes[node.id];
         return !source || JSON.stringify(source) !== JSON.stringify(node);
       })
     : [];
@@ -349,8 +356,13 @@
     ? {
         preparing: 'Preparing',
         'prompt-sent': 'Prompt running',
+        inspecting: 'Inspecting scene',
+        rendering: 'Rendering canvas',
+        components: 'Finding components',
+        applying: 'Applying changes',
         streaming: 'Receiving proposal',
         validating: 'Validating',
+        submitting: 'Submitting',
         completed: 'Complete',
         failed: 'Failed',
         cancelled: 'Cancelled',
@@ -579,6 +591,31 @@
     const parsed = codesignTelemetryEventSchema.safeParse(value);
     if (!parsed.success || parsed.data.requestId !== activeTelemetryRequestId) return;
     const event = parsed.data;
+    const activity = event.toolActivity;
+    if (
+      activity?.phase === 'completed' &&
+      activity.tool === 'candidate.apply_changes' &&
+      liveCandidateDocument
+    ) {
+      if (document.currentRevisionId !== activeGenerationSourceRevisionId) {
+        const requestId = activeTelemetryRequestId;
+        if (requestId)
+          void fetch('/api/agent', {
+            method: 'DELETE',
+            headers: { 'x-codesign-request-id': requestId },
+          });
+        generationController?.abort();
+        liveCandidateDocument = null;
+        codesignStatus = 'The source design changed. Run Codesign again from the new revision.';
+      } else {
+        const argumentsValue = activity.arguments as { changes?: Array<{ operation?: unknown }> };
+        for (const change of argumentsValue?.changes ?? []) {
+          const operation = operationSchema.safeParse(change.operation);
+          if (operation.success)
+            liveCandidateDocument = applyOperation(liveCandidateDocument, operation.data);
+        }
+      }
+    }
     if (!codesignActivityEvents.some((current) => current.sequence === event.sequence))
       codesignActivityEvents = [...codesignActivityEvents, event]
         .sort((left, right) => left.sequence - right.sequence)
@@ -2608,6 +2645,8 @@
     }
     dismissedCandidateSelectionKey = '';
     loadingCandidate = true;
+    liveCandidateDocument = structuredClone(document);
+    activeGenerationSourceRevisionId = document.currentRevisionId;
     generationController?.abort();
     const controller = new AbortController();
     generationController = controller;
@@ -2631,7 +2670,6 @@
     try {
       const baseTarget = deriveGenerationTarget(document, selection);
       const target = { ...baseTarget, observationScope };
-      const visualSnapshot = await captureSceneSnapshot(document, target);
       startCodesignTelemetry(telemetryRequestId);
       const pinnedChanges = rerollCandidateId
         ? pinnedAtomicIds
@@ -2654,7 +2692,6 @@
           target,
           pinnedNodeIds: document.pinnedNodeIds,
           pinnedAtomicChanges: pinnedChanges,
-          visualSnapshot,
           document: {
             currentRevisionId: document.currentRevisionId,
             activeScreenId: document.activeScreenId,
@@ -2694,6 +2731,8 @@
         logAction('codesign.discarded', { action, projectId: requestProjectId });
         return;
       }
+      if (document.currentRevisionId !== activeGenerationSourceRevisionId)
+        throw new Error('The source design changed during generation. Run Codesign again.');
       let next = stageGenerationRun(document, value.run);
       next = stageCandidates(next, value.run.id, value.candidates);
       for (const candidate of value.candidates) {
@@ -2707,6 +2746,8 @@
         }
       }
       documentStore.replaceMetadata(next);
+      liveCandidateDocument = null;
+      activeGenerationSourceRevisionId = '';
       const generatedIds = value.candidates.map((candidate) => candidate.id);
       activeCandidateId = generatedIds[0] ?? '';
       selectedAtomicIds = value.candidates[0]?.atomicChanges.map((change) => change.id) ?? [];
@@ -2714,7 +2755,7 @@
       highlightedChangeId = '';
       bottomOpen = true;
       bottomTab = 'process';
-      codesignStatus = `${value.candidates.length} structured ${value.candidates.length === 1 ? 'candidate is' : 'candidates are'} ready for review.`;
+      codesignStatus = `${value.candidates.length} editable ${value.candidates.length === 1 ? 'candidate is' : 'candidates are'} ready for review.`;
       logAction('codesign.ready', {
         action,
         generationRunId: value.run.id,
@@ -2724,6 +2765,8 @@
     } catch (cause) {
       if (requestId !== generationRequestId) return;
       if (controller.signal.aborted) return;
+      liveCandidateDocument = null;
+      activeGenerationSourceRevisionId = '';
       showError(
         cause instanceof Error ? cause.message : 'Codesign generation failed',
         'Couldn’t generate proposal',
@@ -2745,10 +2788,18 @@
   }
   function cancelGeneration() {
     if (!loadingCandidate || !generationController) return;
+    const requestId = activeTelemetryRequestId;
     generationController.abort();
+    if (requestId)
+      void fetch('/api/agent', {
+        method: 'DELETE',
+        headers: { 'x-codesign-request-id': requestId },
+      });
     generationRequestId += 1;
     generationController = null;
     loadingCandidate = false;
+    liveCandidateDocument = null;
+    activeGenerationSourceRevisionId = '';
     codesignStatus = 'Generation cancelled. Your selection and design are unchanged.';
     documentStore.replaceMetadata(
       recordGenerationOutcome(document, 'generation-cancelled', {

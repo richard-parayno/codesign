@@ -184,7 +184,7 @@ describe('trusted visual snapshots', () => {
       { signal: controller.signal },
     );
     controller.abort();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await lease.dispose();
     await expectRemoved(lease.snapshot.path);
   });
 

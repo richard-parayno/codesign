@@ -22,7 +22,7 @@ const publicFailureMessages: Record<ProviderFailureCategory, string> = {
   'model-unavailable': 'The configured Codex model is unavailable for this account.',
   'rate-limited': 'Codex is temporarily rate limited. Try again later.',
   cancelled: 'Codesign generation was cancelled.',
-  'protocol-failure': 'Codex could not complete the structured generation request.',
+  'protocol-failure': 'Codex could not complete the canvas agent session.',
   unavailable: 'The local Codex runtime is unavailable.',
 };
 
@@ -82,7 +82,9 @@ export function asProviderFailure(
 }
 
 export type ProviderCapabilities = {
-  structuredCandidates: true;
+  agentSessions: true;
+  dynamicTools: true;
+  structuredCandidates: false;
   supportedActions: readonly ['complete'];
   visualInputs: readonly ('image' | 'localImage')[];
   authentication: 'app-server-chatgpt';

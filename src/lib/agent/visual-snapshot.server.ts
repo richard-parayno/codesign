@@ -627,7 +627,9 @@ export async function withTrustedVisualSnapshot<T>(
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
     const controller = new AbortController();
-    const callbackPromise = Promise.resolve().then(() => callback(lease.snapshot, controller.signal));
+    const callbackPromise = Promise.resolve().then(() =>
+      callback(lease.snapshot, controller.signal),
+    );
     const timeoutPromise = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         controller.abort();

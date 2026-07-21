@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   CodesignTelemetryEvent,
   CodesignTelemetryPhase,
+  CodesignToolActivity,
   CodesignTokenUsage,
 } from './telemetry';
 import type { CodesignFailureDiagnostic } from './failure';
@@ -19,6 +20,7 @@ type TelemetryDraft = {
   durationMs?: number;
   usage?: CodesignTokenUsage;
   renderedPrompt?: string;
+  toolActivity?: CodesignToolActivity;
   failure?: CodesignFailureDiagnostic & { category: ProviderFailureCategory };
 };
 
@@ -82,8 +84,17 @@ export function publishCodesignTelemetry(requestId: string, draft: TelemetryDraf
   channel.touchedAt = event.timestamp;
 
   // The rendered prompt is inspectable in the originating editor, but is not duplicated to logs.
-  const { renderedPrompt: _renderedPrompt, ...loggableEvent } = event;
+  const { renderedPrompt: _renderedPrompt, toolActivity, ...loggableEvent } = event;
+  const loggableToolActivity = toolActivity
+    ? {
+        ...toolActivity,
+        arguments: undefined,
+        result: undefined,
+      }
+    : undefined;
   console.info(`[codesign:ai] ${JSON.stringify(loggableEvent)}`);
+  if (loggableToolActivity)
+    console.info(`[codesign:ai:tool] ${JSON.stringify({ requestId, ...loggableToolActivity })}`);
   for (const listener of channel.listeners) {
     try {
       listener(event);

@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { CanvasSessionService } from './contracts';
 import { CANVAS_APP_SERVER_TOOLS, CanvasAppServerToolDispatcher } from './app-server-tools.server';
@@ -108,6 +111,46 @@ describe('Canvas App Server tools', () => {
       tool: 'candidate.submit',
       result: { candidateRevisionId: 'candidate-revision-2' },
     });
+  });
+
+  it('attaches scene renders as image content without exposing local artifact paths', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codesign-render-tool-'));
+    const path = join(directory, 'render.png');
+    await writeFile(
+      path,
+      Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        'base64',
+      ),
+    );
+    try {
+      const adapter = new CanvasAppServerToolDispatcher(
+        service(vi.fn(async () => ({ path, mimeType: 'image/png', width: 1, height: 1 }))),
+        'session-1',
+      );
+
+      const response = await adapter.dispatch({
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        callId: 'call-render',
+        namespace: null,
+        tool: 'scene_render',
+        arguments: { view: 'candidate' },
+      });
+
+      expect(response).toMatchObject({
+        success: true,
+        contentItems: [
+          { type: 'inputText' },
+          { type: 'inputImage', imageUrl: expect.stringMatching(/^data:image\/png;base64,/) },
+        ],
+      });
+      const textItem = response.contentItems[0];
+      expect(textItem.type === 'inputText' ? textItem.text : '').not.toContain(path);
+      expect(textItem.type === 'inputText' ? textItem.text : '').toContain('"imageAttached":true');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('exposes bounded candidate mutation arguments and results to activity subscribers', async () => {

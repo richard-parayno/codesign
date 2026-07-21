@@ -112,6 +112,8 @@ export type CodexCanvasSessionResult = {
 };
 
 export type CodexTransportTelemetryEvent =
+  | { type: 'thread-started'; durationMs: number }
+  | { type: 'turn-started'; durationMs: number }
   | { type: 'output-started' }
   | {
       type: 'token-usage';
@@ -808,7 +810,12 @@ export class CodexAppServer {
     const dispatcher = new CanvasAppServerToolDispatcher(service, sessionId, {
       onActivity: options.onToolActivity,
     });
+    const threadStartedAt = Date.now();
     const threadId = await this.createThread(model, dispatcher);
+    options.onTelemetry?.({
+      type: 'thread-started',
+      durationMs: Date.now() - threadStartedAt,
+    });
     if (options.onTelemetry) this.threadTelemetryListeners.set(threadId, options.onTelemetry);
     try {
       if (signal?.aborted) throw new Error('Codex generation cancelled');
@@ -821,9 +828,14 @@ export class CodexAppServer {
         effort,
         summary: 'none',
       };
+      const turnStartedAt = Date.now();
       const response = (await this.request('turn/start', params, 15_000)) as {
         turn?: { id?: string };
       };
+      options.onTelemetry?.({
+        type: 'turn-started',
+        durationMs: Date.now() - turnStartedAt,
+      });
       const turnId = response.turn?.id;
       if (!turnId) throw new Error('Codex App Server did not return a turn ID');
       if (signal?.aborted) {

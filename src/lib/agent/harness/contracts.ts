@@ -27,6 +27,7 @@ export type CanvasSessionCreateInput = {
   target: GenerationTarget;
   pinnedNodeIds?: string[];
   pinnedChangeIds?: string[];
+  seedChanges?: CandidateChangeInput[];
   requestedFidelity: Fidelity;
   action: CodesignAction;
   model?: string;

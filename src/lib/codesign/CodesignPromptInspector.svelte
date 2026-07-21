@@ -19,8 +19,9 @@
     <div>
       <h2>Codesign prompt</h2>
       <p>
-        Inspect the exact versioned instructions and output contract used by this build. The
-        rendered request contains the most recent scene payload.
+        Inspect the exact versioned instructions and submission contract used by this build. The
+        rendered request contains compact session orientation; scene and component details are
+        retrieved with tools.
       </p>
     </div>
     <span>{CODESIGN_PROMPT_TEMPLATE_INSPECTION.id}</span>

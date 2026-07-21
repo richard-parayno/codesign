@@ -4,12 +4,46 @@ import { codesignFailureStages } from './failure';
 export const codesignTelemetryPhaseSchema = z.enum([
   'preparing',
   'prompt-sent',
+  'inspecting',
+  'rendering',
+  'components',
+  'applying',
   'streaming',
   'validating',
+  'submitting',
   'completed',
   'failed',
   'cancelled',
 ]);
+
+export const codesignToolActivitySchema = z.object({
+  phase: z.enum(['started', 'completed', 'failed']),
+  sessionId: z.string().min(1).max(160),
+  callId: z.string().min(1).max(160),
+  tool: z.enum([
+    'scene.overview',
+    'scene.get_nodes',
+    'scene.render',
+    'components.search',
+    'components.describe',
+    'candidate.get_state',
+    'candidate.apply_changes',
+    'candidate.validate',
+    'candidate.submit',
+  ]),
+  durationMs: z.number().int().nonnegative().optional(),
+  arguments: z.unknown().optional(),
+  result: z.unknown().optional(),
+  argumentSummary: z.record(z.string(), z.unknown()).optional(),
+  resultSummary: z.record(z.string(), z.unknown()).optional(),
+  candidateMutation: z
+    .object({
+      candidateRevisionId: z.string().optional(),
+      appliedOperationIds: z.array(z.string()).max(24),
+    })
+    .optional(),
+  error: z.string().max(4_000).optional(),
+});
 
 export const codesignTokenUsageSchema = z.object({
   totalTokens: z.number().int().nonnegative(),
@@ -50,6 +84,7 @@ export const codesignTelemetryEventSchema = z.object({
   durationMs: z.number().int().nonnegative().optional(),
   usage: codesignTokenUsageSchema.optional(),
   renderedPrompt: z.string().max(2_000_000).optional(),
+  toolActivity: codesignToolActivitySchema.optional(),
   failure: codesignFailureDiagnosticSchema.optional(),
 });
 
@@ -57,6 +92,7 @@ export type CodesignTelemetryPhase = z.infer<typeof codesignTelemetryPhaseSchema
 export type CodesignTelemetryEffort = NonNullable<CodesignTelemetryEvent['effort']>;
 export type CodesignTokenUsage = z.infer<typeof codesignTokenUsageSchema>;
 export type CodesignTelemetryEvent = z.infer<typeof codesignTelemetryEventSchema>;
+export type CodesignToolActivity = z.infer<typeof codesignToolActivitySchema>;
 
 export function isTerminalTelemetryPhase(phase: CodesignTelemetryPhase) {
   return phase === 'completed' || phase === 'failed' || phase === 'cancelled';

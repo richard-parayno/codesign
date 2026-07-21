@@ -61,9 +61,7 @@
             }
           },
           "transitions": [],
-          "branches": [
-            { "id": "branch-cli", "name": "Accepted", "screenIds": ["screen-cli"] }
-          ],
+          "branches": [{ "id": "branch-cli", "name": "Accepted", "screenIds": ["screen-cli"] }],
           "activeBranchId": "branch-cli",
           "activeScreenId": "screen-cli",
           "entities": {},

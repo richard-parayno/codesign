@@ -4,7 +4,7 @@ import {
   validateComponentBinding,
   validateComponentChild,
 } from '$lib/design-system/registry';
-import { applyOperation } from '$lib/model/operations';
+import { applyOperation, canvasSnapshot } from '$lib/model/operations';
 import {
   blankDocument,
   atomicChangeSchema,
@@ -12,6 +12,7 @@ import {
   fidelitySchema,
   nodeSchema,
   observationScopeSchema,
+  operationSchema,
   styleSchema,
   type AtomicChange,
   type CodesignAction,
@@ -25,7 +26,7 @@ import { z } from 'zod';
 import type { CodesignTelemetryEvent } from './telemetry';
 
 export const CANDIDATE_SCHEMA_VERSION = 'codesign-candidate-batch-v2';
-export const PROMPT_VERSION = 'codesign-complete-v2';
+export const PROMPT_VERSION = 'codesign-agent-harness-v1';
 export const SUPPORTED_ACTIONS = ['complete'] as const satisfies readonly CodesignAction[];
 
 const MAX_KNOWN_NODE_IDS = 5_000;
@@ -444,8 +445,9 @@ function normalizeOperation(
   return { id: operation.id, type: 'create', actor: 'agent', node };
 }
 
-function simulationDocument(request: GenerationRequest) {
+export function documentFromGenerationRequest(request: GenerationRequest) {
   const document = blankDocument();
+  document.currentRevisionId = request.document.currentRevisionId;
   document.activeScreenId = request.document.activeScreenId;
   document.screens[0] = {
     ...document.screens[0],
@@ -456,6 +458,17 @@ function simulationDocument(request: GenerationRequest) {
   document.branches[0].screenIds = [request.document.activeScreenId];
   document.nodes = structuredClone(request.document.nodes);
   document.pinnedNodeIds = [...request.pinnedNodeIds];
+  document.revisions = {
+    [document.currentRevisionId]: {
+      id: document.currentRevisionId,
+      status: 'working',
+      origin: 'human',
+      createdAt: Date.now(),
+      operationIds: [],
+      atomicChangeIds: [],
+      snapshot: canvasSnapshot(document),
+    },
+  };
   return document;
 }
 
@@ -474,10 +487,52 @@ function stateForOperation(document: DesignDocument, operation: DesignOperation)
       nodes[operation.node.parentId] = structuredClone(document.nodes[operation.node.parentId]);
     return { nodes };
   }
+  if (operation.type === 'delete') {
+    const ids = new Set(operation.targetIds);
+    const visit = (id: string) => {
+      for (const childId of document.nodes[id]?.childIds ?? []) {
+        ids.add(childId);
+        visit(childId);
+      }
+    };
+    operation.targetIds.forEach(visit);
+    operation.targetIds.forEach((id) => {
+      const parentId = document.nodes[id]?.parentId;
+      if (parentId) ids.add(parentId);
+    });
+    return {
+      nodes: Object.fromEntries(
+        [...ids].map((id) => [id, structuredClone(document.nodes[id])] as const),
+      ),
+    };
+  }
+  if (operation.type === 'reparent') {
+    const ids = new Set(operation.targetIds);
+    operation.targetIds.forEach((id) => {
+      const parentId = document.nodes[id]?.parentId;
+      if (parentId) ids.add(parentId);
+    });
+    if (operation.parentId) ids.add(operation.parentId);
+    return {
+      nodes: Object.fromEntries(
+        [...ids].map((id) => [id, structuredClone(document.nodes[id])] as const),
+      ),
+    };
+  }
+  if (operation.type === 'promote')
+    return {
+      nodes: Object.fromEntries(
+        operation.targetIds.map((id) => [id, structuredClone(document.nodes[id])] as const),
+      ),
+    };
   throw new CandidateValidationError('Unsupported candidate operation');
 }
 
-function afterStateForOperation(document: DesignDocument, operation: DesignOperation) {
+function afterStateForOperation(
+  document: DesignDocument,
+  operation: DesignOperation,
+  before?: AtomicChange['before'],
+) {
   if (['style', 'update-node', 'move'].includes(operation.type) && 'targetIds' in operation)
     return {
       nodes: Object.fromEntries(
@@ -494,6 +549,26 @@ function afterStateForOperation(document: DesignDocument, operation: DesignOpera
       nodes[operation.node.parentId] = structuredClone(document.nodes[operation.node.parentId]);
     return { nodes };
   }
+  if (operation.type === 'delete') {
+    const ids = Object.keys(before?.nodes ?? {}).length
+      ? Object.keys(before!.nodes)
+      : operation.targetIds;
+    return {
+      nodes: Object.fromEntries(
+        ids.map((id) => [id, document.nodes[id] ? structuredClone(document.nodes[id]) : null]),
+      ),
+    };
+  }
+  if (operation.type === 'reparent') {
+    const ids = new Set([...Object.keys(before?.nodes ?? {}), ...operation.targetIds]);
+    if (operation.parentId) ids.add(operation.parentId);
+    return {
+      nodes: Object.fromEntries(
+        [...ids].map((id) => [id, structuredClone(document.nodes[id])] as const),
+      ),
+    };
+  }
+  if (operation.type === 'promote') return stateForOperation(document, operation);
   throw new CandidateValidationError('Unsupported candidate operation');
 }
 
@@ -704,7 +779,7 @@ export function normalizeCandidateBatch(
   unique(createdIds, 'Created node IDs');
   validateWireDependencies(wireChanges);
 
-  let simulation = simulationDocument(request);
+  let simulation = documentFromGenerationRequest(request);
   const changes: AtomicChange[] = [];
   const preserved = new Map<string, DesignOperation>();
   const createdBy = new Map<string, string>();
@@ -788,7 +863,7 @@ export function normalizeCandidateBatch(
         cause instanceof Error ? cause.message : 'Candidate operation could not be simulated',
       );
     }
-    const after = afterStateForOperation(simulation, operation);
+    const after = afterStateForOperation(simulation, operation, before);
     if (operation.type === 'create') createdBy.set(operation.node.id, wireChange.id);
     changes.push({
       id: wireChange.id,
@@ -823,6 +898,114 @@ export function normalizeCandidateBatch(
     fidelity: payload.candidate.fidelity,
     atomicChanges: changes,
     createdAt: run.createdAt,
+  };
+}
+
+export type CanvasSessionSubmission = {
+  sessionId: string;
+  state: 'submitted';
+  sourceRevisionId: string;
+  candidateRevisionId: string;
+  requestedFidelity: Fidelity;
+  submittedAt: number;
+  operations: Array<{
+    operation: DesignOperation;
+    dependencyIds?: string[];
+    evidenceNodeIds: string[];
+    summary: string;
+  }>;
+};
+
+export const canvasSessionSubmissionSchema: z.ZodType<CanvasSessionSubmission> = z.object({
+  sessionId: z.string().min(1),
+  state: z.literal('submitted'),
+  sourceRevisionId: z.string().min(1),
+  candidateRevisionId: z.string().min(1),
+  requestedFidelity: fidelitySchema,
+  submittedAt: z.number().finite().nonnegative(),
+  operations: z.array(
+    z.object({
+      operation: operationSchema,
+      dependencyIds: z.array(z.string().min(1)).optional(),
+      evidenceNodeIds: z.array(z.string().min(1)).min(1).max(50),
+      summary: z.string().min(1).max(500),
+    }),
+  ),
+});
+
+/** Adapts a validated canvas-session commit to the editor's existing atomic review model. */
+export function candidateFromCanvasSession(
+  request: GenerationRequest,
+  run: GenerationRun,
+  submission: CanvasSessionSubmission,
+) {
+  validateGenerationRequest(request);
+  if (
+    submission.state !== 'submitted' ||
+    submission.sourceRevisionId !== request.document.currentRevisionId ||
+    run.sourceRevisionId !== request.document.currentRevisionId
+  )
+    throw new CandidateValidationError('Canvas session source revision is stale');
+  if (!submission.operations.length)
+    throw new CandidateValidationError('Canvas session submitted an empty candidate');
+
+  const candidateId = `${run.id}-candidate`;
+  const atomicIdByOperation = new Map(
+    submission.operations.map(({ operation }) => [operation.id, `${operation.id}-change`]),
+  );
+  let simulation = documentFromGenerationRequest(request);
+  const atomicChanges: AtomicChange[] = [];
+  for (const item of submission.operations) {
+    const dependencyIds = (item.dependencyIds ?? []).map((id) => {
+      const atomicId = atomicIdByOperation.get(id);
+      if (!atomicId) throw new CandidateValidationError(`Unknown operation dependency ${id}`);
+      return atomicId;
+    });
+    const operation = operationSchema.parse(item.operation);
+    const before = stateForOperation(simulation, operation);
+    try {
+      simulation = applyOperation(simulation, operation, submission.submittedAt);
+    } catch (cause) {
+      throw new CandidateValidationError(
+        cause instanceof Error ? cause.message : 'Submitted operation could not be replayed',
+      );
+    }
+    const after = afterStateForOperation(simulation, operation);
+    const affectedNodeIds =
+      operation.type === 'create'
+        ? [operation.node.id]
+        : 'targetIds' in operation
+          ? operation.targetIds
+          : 'targetId' in operation
+            ? [operation.targetId]
+            : [];
+    const preserved = request.pinnedAtomicChanges.find(
+      (change) => change.operation.id === operation.id,
+    );
+    atomicChanges.push({
+      id: atomicIdByOperation.get(operation.id)!,
+      candidateId,
+      ...(preserved ? { preservedFromAtomicChangeId: preserved.id } : {}),
+      operation,
+      dependencyIds,
+      trace: {
+        observation: `Inspected evidence nodes: ${item.evidenceNodeIds.join(', ')}.`,
+        context: item.summary,
+        inference: 'Proposed through the scoped Codesign canvas-session tools.',
+        proposedChange: item.summary,
+        evidenceNodeIds: item.evidenceNodeIds,
+        affectedNodeIds,
+      },
+      before,
+      after,
+    });
+  }
+  validateDependencies(atomicChanges);
+  return {
+    id: candidateId,
+    fidelity: submission.requestedFidelity,
+    atomicChanges,
+    createdAt: submission.submittedAt,
   };
 }
 

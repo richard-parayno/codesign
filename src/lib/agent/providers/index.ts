@@ -28,7 +28,9 @@ export const CODEX_PROVIDER_DESCRIPTOR = {
   id: 'codex',
   label: 'Codex App Server',
   capabilities: {
-    structuredCandidates: true,
+    agentSessions: true,
+    dynamicTools: true,
+    structuredCandidates: false,
     supportedActions: ['complete'],
     visualInputs: ['image', 'localImage'],
     authentication: 'app-server-chatgpt',

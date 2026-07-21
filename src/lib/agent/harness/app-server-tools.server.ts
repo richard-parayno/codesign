@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import type { DynamicToolCallParams } from '../../../../.generated/codex-app-server/v2/DynamicToolCallParams';
 import type { DynamicToolCallResponse } from '../../../../.generated/codex-app-server/v2/DynamicToolCallResponse';
 import type { DynamicToolSpec } from '../../../../.generated/codex-app-server/v2/DynamicToolSpec';
@@ -249,7 +250,12 @@ function mutationSummary(tool: CanvasToolName, result: unknown) {
 }
 
 function agentVisibleResult(tool: CanvasToolName, result: unknown) {
-  if (tool !== 'candidate.submit' || !result || typeof result !== 'object') return result;
+  if (!result || typeof result !== 'object') return result;
+  if (tool === 'scene.render') {
+    const { path: _path, ...metadata } = result as Record<string, unknown>;
+    return { ...metadata, imageAttached: true };
+  }
+  if (tool !== 'candidate.submit') return result;
   const submission = result as Record<string, unknown>;
   return {
     submitted: true,
@@ -258,6 +264,30 @@ function agentVisibleResult(tool: CanvasToolName, result: unknown) {
     candidateRevisionId: submission.candidateRevisionId,
     operationCount: Array.isArray(submission.operations) ? submission.operations.length : undefined,
   };
+}
+
+async function contentItems(tool: CanvasToolName, result: unknown) {
+  const visibleResult = agentVisibleResult(tool, result);
+  const items: DynamicToolCallResponse['contentItems'] = [
+    { type: 'inputText', text: resultText(visibleResult) },
+  ];
+  if (tool === 'scene.render' && result && typeof result === 'object') {
+    const render = result as { path?: unknown; mimeType?: unknown };
+    if (typeof render.path !== 'string' || render.mimeType !== 'image/png')
+      throw Object.assign(new Error('Canvas render did not produce a consumable PNG'), {
+        code: 'render-unavailable',
+      });
+    const bytes = await readFile(render.path);
+    if (bytes.length > 5 * 1024 * 1024)
+      throw Object.assign(new Error('Canvas render exceeded the image transport limit'), {
+        code: 'render-too-large',
+      });
+    items.push({
+      type: 'inputImage',
+      imageUrl: `data:image/png;base64,${bytes.toString('base64')}`,
+    });
+  }
+  return { visibleResult, items };
 }
 
 export class CanvasAppServerToolDispatcher {
@@ -348,8 +378,7 @@ export class CanvasAppServerToolDispatcher {
     });
     try {
       const result = await this.service.dispatch(this.sessionId, canonicalName, parsed.data);
-      const visibleResult = agentVisibleResult(canonicalName, result);
-      const text = resultText(visibleResult);
+      const { visibleResult, items } = await contentItems(canonicalName, result);
       if (canonicalName === 'candidate.submit') this.submission = { tool: canonicalName, result };
       this.options.onActivity?.({
         phase: 'completed',
@@ -363,7 +392,7 @@ export class CanvasAppServerToolDispatcher {
       });
       return {
         success: true,
-        contentItems: [{ type: 'inputText', text }],
+        contentItems: items,
       };
     } catch (error) {
       const payload = errorPayload(error);

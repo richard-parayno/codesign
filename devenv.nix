@@ -13,13 +13,4 @@
       pnpm.install.enable = true;
     };
   };
-
-  packages = [
-    pkgs.git
-    pkgs.codex
-  ];
-
-  enterShell = ''
-    export PATH="$PWD/node_modules/.bin:$PATH"
-  '';
 }

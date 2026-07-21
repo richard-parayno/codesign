@@ -9,7 +9,6 @@ import {
   DEFAULT_CODEX_EFFORT,
   DEFAULT_CODEX_MODEL,
   getCodexClient,
-  pinnedCodexCommand,
   resolveCodexCommand,
 } from './codex-client.server';
 import { asProviderFailure } from './providers/contracts';
@@ -164,6 +163,55 @@ function fakeProcess(
 }
 
 describe('Codex App Server JSONL transport', () => {
+  it('spawns the default bare Codex command through PATH without a shell', async () => {
+    const fake = fakeProcess();
+    const spawnProcess = vi.fn(() => fake.child);
+    const client = new CodexAppServer(undefined, undefined, spawnProcess);
+
+    await client.readAccount();
+
+    expect(spawnProcess).toHaveBeenCalledWith('codex', ['app-server', '--stdio'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: false,
+      env: process.env,
+    });
+    client.shutdown();
+  });
+
+  it('preserves an executable override containing spaces as one spawn argument', async () => {
+    const fake = fakeProcess();
+    const spawnProcess = vi.fn(() => fake.child);
+    const command = '/opt/Codex CLI/bin/codex';
+    const client = new CodexAppServer(command, undefined, spawnProcess);
+
+    await client.readAccount();
+
+    expect(spawnProcess).toHaveBeenCalledWith(command, ['app-server', '--stdio'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: false,
+      env: process.env,
+    });
+    client.shutdown();
+  });
+
+  it('surfaces a missing executable instead of falling back to node_modules', async () => {
+    const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: () => true,
+    });
+    const missing = Object.assign(new Error('spawn codex ENOENT'), { code: 'ENOENT' });
+    const client = new CodexAppServer('codex', undefined, () => {
+      queueMicrotask(() => child.emit('error', missing));
+      return child;
+    });
+
+    await expect(client.readAccount()).rejects.toMatchObject({ code: 'ENOENT' });
+    client.shutdown();
+  });
+
   it('uses the pinned model, high effort, no reasoning summary, schema, and localImage shape', async () => {
     const fake = fakeProcess();
     const client = new CodexAppServer('fake-codex', DEFAULT_CODEX_MODEL, () => fake.child);
@@ -661,10 +709,12 @@ describe('Codex App Server JSONL transport', () => {
     client.shutdown();
   });
 
-  it('defaults the legacy command sentinel to the project-pinned runtime', () => {
-    expect(resolveCodexCommand()).toBe(pinnedCodexCommand());
-    expect(resolveCodexCommand('codex')).toBe(pinnedCodexCommand());
+  it('defaults to the user-installed Codex command without a project-local fallback', () => {
+    expect(resolveCodexCommand()).toBe('codex');
+    expect(resolveCodexCommand('codex')).toBe('codex');
     expect(resolveCodexCommand('/opt/advanced/codex')).toBe('/opt/advanced/codex');
+    expect(resolveCodexCommand('/opt/Codex CLI/bin/codex')).toBe('/opt/Codex CLI/bin/codex');
+    expect(resolveCodexCommand()).not.toContain('node_modules');
     expect(DEFAULT_CODEX_EFFORT).toBe('high');
   });
 });

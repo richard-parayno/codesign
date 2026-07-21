@@ -26,7 +26,7 @@
     };
     runtime?: {
       detected: boolean;
-      source: 'project-pinned' | 'advanced-override';
+      source: 'path' | 'command-override';
       label: string;
     };
     configuration?: {
@@ -288,7 +288,7 @@
           <div class="section-heading">
             <div>
               <h3 id="integration-status-title">Integration status</h3>
-              <p>Live checks against the project-owned Codex App Server runtime.</p>
+              <p>Live checks against your separately installed Codex App Server runtime.</p>
             </div>
             <button type="button" disabled={loading} onclick={onRefresh}>
               {loading ? 'Checking status…' : 'Refresh diagnostics'}

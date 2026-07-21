@@ -2,33 +2,29 @@
 
 ## Primary path
 
-**0:00–0:15 — Establish direct control.** Open the app and click **Reset to blank** if needed. Draw a frame with `F`, or use **Load demo checkpoint** for the reliable path. Point out the familiar **Edit** and **Preview** modes.
+**0:00–0:20 — Establish direct control.** Open the app, sketch a few rough layers inside a frame, and add a useful frame/group name or text label. Point out that the canvas remains fully editable before, during, and after AI assistance.
 
-**0:15–0:35 — Choose an explicit boundary.** Select one frame or region. Nothing generates yet. Open **Scope** in the contextual toolbar, show the solid mutation boundary, then change the observational scope from Selection to Containing frame or Screen.
+**0:20–0:40 — Choose an explicit boundary.** Select a group, frame, or a layer contained by one. Open **Scope** and compare **Selection** with **Same parent frame**. The target boundary shows what may change; purple dashed outlines show the additional layers Codex may inspect as context.
 
-**0:35–0:55 — Request visual autocomplete.** Choose **Complete with Codesign**. Codex returns structured candidates. The source is unchanged; the continuation appears as native scene-graph ghosts on the canvas and in Layers.
+**0:40–1:05 — Opt in to visual autocomplete.** Open **Codesign with AI**. Show that **Base** cannot generate, move to **AI Draft**, and confirm the generation. The selected target glows while the request is active, and the live source remains unchanged while Codex builds a copy-on-write candidate.
 
-**0:55–1:25 — Review evidence and atomic changes.** Switch between candidate tabs. Highlight one change and open **Review derivation trace**. Read the objective Observed, Context, Codesign proposed, Change, and Decision fields. Use **Compare with source**, then return to the candidate.
+**1:05–1:35 — Review native changes.** Inspect the candidate as editable layers, open **Review**, and toggle individual dependency-safe changes. Use **Compare source** when useful, then accept all changes or the selected subset.
 
-**1:25–1:50 — Make a partial decision.** Open **Review**, leave two changes checked, and uncheck one. Dependencies are included automatically. Accept the visible subset; the unselected change is retained as rejected in **Process history**.
+**1:35–2:00 — Increase fidelity.** Reopen **Codesign with AI**, move to **AI Hi-Fi**, and confirm. Explain that compatible shadcn-svelte components are used when available and that accepted high-fidelity output creates or updates a reusable local component definition.
 
-**1:50–2:10 — Reject and revisit.** Generate again, reject a candidate, open **Process history**, and use **View candidate** or **Compare with source**. Rejection does not delete the candidate.
+**2:00–2:25 — Reroll without losing history.** Reroll the current fidelity, review the alternative, and open **Element History** to show the saved variations. Accept or reject the result; ordinary canvas edits remain available afterward.
 
-**2:10–2:30 — Pin and reroll.** Generate another candidate, pin one proposed atomic change, then choose **Reroll unpinned changes**. The earlier candidate remains switchable, and the rerolled candidate carries the pinned change while varying the rest.
-
-**2:30–2:45 — Show fidelity in context.** Point out the named Structure, Wireframe, Component, Visual, and Production stops beside the selection and in Properties. Existing representations navigate without destruction; an unrealized forward stop starts a candidate request.
-
-**2:45–3:00 — Preserve normal design work.** Adjust accepted component props, text, and geometry, duplicate a screen, and enter **Preview**. Close with: “Codesign suggests visible continuations; you decide which structured changes become part of the design.”
+**2:25–3:00 — Show the safety boundary.** Open Settings to show the local Codex status. Close with: “Codesign suggests scoped, native continuations; the designer decides which structured changes become part of the design.”
 
 ## Codex availability
 
-Click **Load demo checkpoint**, select the main frame, choose **Containing frame** under **Scope**, then **Complete with Codesign**. Confirm Settings reports that the project Codex runtime is detected and the account is connected before presenting. If Codex is unavailable or signed out, the app reports that state and does not create a candidate.
+Codesign uses a separately installed and authenticated Codex CLI. Before presenting live AI generation, run `pnpm run doctor` and confirm it ends with **Codesign is ready.** If Codex is missing or signed out, the editor still starts and remains explorable; the status explains how to restore AI completion without fabricating a candidate.
 
 ## Preflight
 
 1. Use a 1440×900 browser window at 100% zoom.
-2. Run `devenv shell -- pnpm dev --host 0.0.0.0`.
-3. Confirm Codex is connected in Settings.
-4. Load the checkpoint once and exercise Complete, partial acceptance, reject, pin/reroll, source compare, and reload.
+2. Run `pnpm install --frozen-lockfile`, then `pnpm run doctor`.
+3. Run `pnpm dev --open`; keep the development server on its default loopback host.
+4. Exercise AI Draft, AI Hi-Fi, partial acceptance, rejection, same-fidelity reroll, source comparison, Element History, and reload persistence.
 5. Confirm project switching still works and the SvelteKit terminal shows `[codesign:action]` records.
-6. Reset to blank before presenting if you want to demonstrate the empty starting state.
+6. Reset to a simple rough canvas before presenting.

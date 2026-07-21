@@ -1,11 +1,10 @@
 import { constants, accessSync } from 'node:fs';
-import { delimiter, isAbsolute } from 'node:path';
+import { delimiter, isAbsolute, join } from 'node:path';
 import type { ReasoningEffort } from '../../../../.generated/codex-app-server/ReasoningEffort';
 import {
   DEFAULT_CODEX_EFFORT,
   DEFAULT_CODEX_MODEL,
   getCodexClient,
-  pinnedCodexCommand,
   resolveCodexCommand,
   type CodexAppServer,
   type CodexLoginStart,
@@ -67,33 +66,55 @@ export function applyProviderOptions(
   return { ...settings, model, effort };
 }
 
-function executableExists(command: string, environment: NodeJS.ProcessEnv) {
+function resolvedExecutable(
+  command: string,
+  environment: NodeJS.ProcessEnv,
+  platform = process.platform,
+) {
+  const extensions =
+    platform === 'win32'
+      ? (environment.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+          .split(';')
+          .filter(Boolean)
+          .map((extension) => extension.toLowerCase())
+      : [''];
+  const hasKnownExtension = extensions.some(
+    (extension) => extension && command.toLowerCase().endsWith(extension),
+  );
   const candidates =
-    isAbsolute(command) || command.includes('/')
+    isAbsolute(command) || command.includes('/') || command.includes('\\')
       ? [command]
       : (environment.PATH ?? '')
           .split(delimiter)
           .filter(Boolean)
-          .map((directory) => `${directory}/${command}`);
-  return candidates.some((candidate) => {
-    try {
-      accessSync(candidate, constants.X_OK);
-      return true;
-    } catch {
-      return false;
-    }
-  });
+          .flatMap((directory) =>
+            hasKnownExtension
+              ? [join(directory, command)]
+              : extensions.map((extension) => join(directory, `${command}${extension}`)),
+          );
+  return (
+    candidates.find((candidate) => {
+      try {
+        accessSync(candidate, platform === 'win32' ? constants.F_OK : constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }) ?? null
+  );
 }
 
 export function providerRuntimeStatus(
   settings: ProviderSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  platform = process.platform,
 ) {
-  const projectPinned = settings.command === pinnedCodexCommand();
+  const executable = resolvedExecutable(settings.command, environment, platform);
+  const pathCommand = settings.command === 'codex';
   return {
-    detected: executableExists(settings.command, environment),
-    source: projectPinned ? ('project-pinned' as const) : ('advanced-override' as const),
-    label: projectPinned ? '@openai/codex project runtime' : 'Advanced command override',
+    detected: executable !== null,
+    source: pathCommand ? ('path' as const) : ('command-override' as const),
+    label: executable ?? (pathCommand ? 'codex on PATH' : settings.command),
   };
 }
 
@@ -141,7 +162,7 @@ export class CodexCodesignProvider implements CodesignProvider {
         ...(!account.connected ? { failureCategory: 'missing-login' as const } : {}),
         message: account.connected
           ? 'Codex App Server is connected.'
-          : 'Sign in to Codex with ChatGPT to enable AI generation.',
+          : 'Sign in to Codex with ChatGPT, then run pnpm run doctor to verify AI setup.',
       };
     } catch (cause) {
       const failure = asProviderFailure(cause);
@@ -153,7 +174,10 @@ export class CodexCodesignProvider implements CodesignProvider {
         planType: null,
         accountLabel: null,
         failureCategory: failure.category,
-        message: failure.message,
+        message:
+          failure.category === 'unavailable'
+            ? 'Codex CLI is unavailable. Install it separately, then run pnpm run doctor.'
+            : failure.message,
       };
     }
   }

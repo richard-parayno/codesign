@@ -15,15 +15,15 @@
 </script>
 
 <script lang="ts">
-  import { normalizeCodesignFidelity, shouldNavigateSavedFidelity } from './fidelity-navigation';
+  import { fidelityStageAction, type CodesignStage } from './fidelity-navigation';
 
   type SupportedFidelity = Extract<Fidelity, 'wireframe' | 'component'>;
+  type SliderStop = Omit<FidelityStopView, 'fidelity'> & { fidelity: CodesignStage };
 
   type Props = {
     label?: string;
     stops: FidelityStopView[];
-    selectedFidelity?: Fidelity;
-    onNavigate: (fidelity: Fidelity, representationId: string) => void;
+    resetKey?: string;
     onStageGeneration: (fidelity: Fidelity) => void;
     onInspectCandidate: (fidelity: Fidelity) => void;
   };
@@ -31,51 +31,56 @@
   let {
     label = 'Fidelity',
     stops,
-    selectedFidelity,
-    onNavigate,
+    resetKey,
     onStageGeneration,
     onInspectCandidate,
   }: Props = $props();
 
-  const supportedFidelities: SupportedFidelity[] = ['wireframe', 'component'];
-  const fidelityLabel: Record<SupportedFidelity, string> = {
-    wireframe: 'Wireframe',
-    component: 'Component',
+  const supportedStages: CodesignStage[] = ['base', 'wireframe', 'component'];
+  const fidelityLabel: Record<CodesignStage, string> = {
+    base: 'Base',
+    wireframe: 'AI Draft',
+    component: 'AI Hi-Fi',
   };
 
-  let supportedStops = $derived(
-    supportedFidelities.map(
-      (fidelity) =>
-        stops.find((stop) => stop.fidelity === fidelity) ?? {
-          fidelity,
-          state: 'unavailable' as const,
-          disabledReason: `${fidelityLabel[fidelity]} is unavailable for this selection.`,
-        },
-    ),
+  let generatedStops: SliderStop[] = $derived(
+    (['wireframe', 'component'] as SupportedFidelity[]).map((fidelity) => {
+      const stop = stops.find((item) => item.fidelity === fidelity);
+      return stop
+        ? { ...stop, fidelity }
+        : {
+            fidelity,
+            state: 'unavailable' as const,
+            disabledReason: `${fidelityLabel[fidelity]} is unavailable for this selection.`,
+          };
+    }),
   );
-  let committedFidelity = $derived(
-    normalizeCodesignFidelity(
-      selectedFidelity ?? stops.find((stop) => stop.state === 'current')?.fidelity,
-    ),
-  );
-  let chosenFidelity = $state<SupportedFidelity>('wireframe');
+  let supportedStops: SliderStop[] = $derived([
+    {
+      fidelity: 'base' as const,
+      state: 'current' as const,
+    },
+    ...generatedStops,
+  ]);
+  let chosenStage = $state<CodesignStage>('base');
   let pendingFidelity = $state<SupportedFidelity>();
   let selectedStop = $derived(
-    supportedStops.find((stop) => stop.fidelity === chosenFidelity) ?? supportedStops[0],
+    supportedStops.find((stop) => stop.fidelity === chosenStage) ?? supportedStops[0],
   );
 
   $effect(() => {
-    chosenFidelity = committedFidelity;
+    void resetKey;
+    chosenStage = 'base';
     pendingFidelity = undefined;
   });
 
-  function stateLabel(stop: FidelityStopView) {
-    if (stop.state === 'current') return 'Current';
-    if (stop.state === 'saved') return 'Saved';
+  function stateLabel(stop: SliderStop) {
+    if (stop.fidelity === 'base') return 'Live canvas';
+    if (stop.state === 'current') return 'Applied';
+    if (stop.state === 'saved') return 'Previously generated';
     if (stop.state === 'generate') return 'Not generated';
     if (stop.state === 'candidate') return 'Candidate';
-    if (stop.state === 'versions')
-      return `${stop.versionCount ?? 2} version${(stop.versionCount ?? 2) === 1 ? '' : 's'}`;
+    if (stop.state === 'versions') return 'Previously generated';
     return 'Unavailable';
   }
 
@@ -83,20 +88,16 @@
     const stop = supportedStops[index];
     if (!stop) return;
 
-    chosenFidelity = stop.fidelity as SupportedFidelity;
+    chosenStage = stop.fidelity;
     pendingFidelity = undefined;
 
-    if (stop.disabledReason || stop.state === 'unavailable' || stop.state === 'current') return;
-    if (stop.state === 'saved' || stop.state === 'versions') {
-      if (shouldNavigateSavedFidelity(stop, committedFidelity) && stop.representationId)
-        onNavigate(stop.fidelity, stop.representationId);
-      return;
-    }
-    if (stop.state === 'candidate') {
+    const action = fidelityStageAction(stop.fidelity, stop.state);
+    if (action === 'stay-live' || stop.disabledReason) return;
+    if (action === 'inspect-candidate' && stop.fidelity !== 'base') {
       onInspectCandidate(stop.fidelity);
       return;
     }
-    if (stop.state === 'generate') pendingFidelity = stop.fidelity as SupportedFidelity;
+    if (stop.fidelity !== 'base') pendingFidelity = stop.fidelity;
   }
 
   function confirmGeneration() {
@@ -113,17 +114,17 @@
     <input
       type="range"
       min="0"
-      max="1"
       step="1"
-      value={supportedFidelities.indexOf(chosenFidelity)}
-      aria-label={`${label}: ${fidelityLabel[chosenFidelity]}`}
-      aria-valuetext={`${fidelityLabel[chosenFidelity]} · ${stateLabel(selectedStop)}`}
+      max="2"
+      value={supportedStages.indexOf(chosenStage)}
+      aria-label={`${label}: ${fidelityLabel[chosenStage]}`}
+      aria-valuetext={`${fidelityLabel[chosenStage]} · ${stateLabel(selectedStop)}`}
       oninput={(event) => selectStop(Number(event.currentTarget.value))}
     />
     <div class="slider-labels" aria-hidden="true">
       {#each supportedStops as stop (stop.fidelity)}
-        <span class:active={stop.fidelity === chosenFidelity}>
-          <strong>{fidelityLabel[stop.fidelity as SupportedFidelity]}</strong>
+        <span class:active={stop.fidelity === chosenStage}>
+          <strong>{fidelityLabel[stop.fidelity]}</strong>
           <small>{stateLabel(stop)}</small>
         </span>
       {/each}
@@ -132,7 +133,7 @@
 
   <div class="selection-summary" aria-live="polite">
     <span>
-      <strong>{fidelityLabel[chosenFidelity]}</strong>
+      <strong>{fidelityLabel[chosenStage]}</strong>
       <small>{stateLabel(selectedStop)}</small>
     </span>
     {#if pendingFidelity}
@@ -144,9 +145,11 @@
 
   {#if pendingFidelity}
     <p class="confirmation-note">
-      Confirm to create a {fidelityLabel[pendingFidelity].toLowerCase()} candidate. Moving the slider
-      alone never starts generation.
+      Confirm to create a fresh {fidelityLabel[pendingFidelity]} candidate from the live canvas. Moving
+      the slider alone never starts generation or restores history.
     </p>
+  {:else if chosenStage === 'base'}
+    <p>Base is your current editable canvas. Returning here never restores an older revision.</p>
   {:else if selectedStop?.inheritedFrom}
     <p>Inherited from {selectedStop.inheritedFrom}</p>
   {:else if selectedStop?.disabledReason}
@@ -188,7 +191,7 @@
 
   .slider-labels {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 1fr 1fr;
     gap: 16px;
   }
 
@@ -201,6 +204,10 @@
 
   .slider-labels > span:last-child {
     text-align: right;
+  }
+
+  .slider-labels > span:nth-child(2) {
+    text-align: center;
   }
 
   .slider-labels > span.active {

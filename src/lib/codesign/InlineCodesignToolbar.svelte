@@ -44,7 +44,7 @@
     observationScope: ObservationScope;
     observationScopes: ObservationScopeView[];
     fidelityStops: FidelityStopView[];
-    requestedFidelity: Fidelity;
+    fidelityResetKey: string;
     candidates: CandidateView[];
     activeCandidateId?: string;
     highlightedChangeId?: string;
@@ -54,7 +54,6 @@
     onObservationScopeChange: (scope: ObservationScope) => void;
     onGenerate: (action: CodesignAction) => void;
     onCancel: () => void;
-    onNavigateFidelity: (fidelity: Fidelity, representationId: string) => void;
     onStageFidelity: (fidelity: Fidelity) => void;
     onInspectFidelityCandidate: (fidelity: Fidelity) => void;
     onSelectCandidate: (candidateId: string) => void;
@@ -77,7 +76,7 @@
     observationScope,
     observationScopes,
     fidelityStops,
-    requestedFidelity,
+    fidelityResetKey,
     candidates,
     activeCandidateId,
     highlightedChangeId,
@@ -87,7 +86,6 @@
     onObservationScopeChange,
     onGenerate,
     onCancel,
-    onNavigateFidelity,
     onStageFidelity,
     onInspectFidelityCandidate,
     onSelectCandidate,
@@ -116,19 +114,6 @@
   function traceFor(item: AtomicChangeView): DerivationTrace {
     return item.change.trace;
   }
-
-  function fidelityModeLabel(fidelity: Fidelity) {
-    if (fidelity === 'wireframe') return 'primitives';
-    return 'shadcn-first';
-  }
-
-  function supportedFidelity(fidelity: Fidelity): Extract<Fidelity, 'wireframe' | 'component'> {
-    return fidelity === 'component' || fidelity === 'visual' || fidelity === 'production'
-      ? 'component'
-      : 'wireframe';
-  }
-
-  let displayedFidelity = $derived(supportedFidelity(requestedFidelity));
 </script>
 
 <section class="inline-codesign" aria-label="Codesign controls">
@@ -289,20 +274,18 @@
     {/if}
 
     <details class="fidelity-menu">
-      <summary>Fidelity · {displayedFidelity} · {fidelityModeLabel(displayedFidelity)}</summary>
+      <summary>Codesign detail</summary>
       <div class="fidelity-popover">
         <FidelityStops
           label="Selection fidelity"
           stops={fidelityStops}
-          selectedFidelity={requestedFidelity}
-          onNavigate={onNavigateFidelity}
+          resetKey={fidelityResetKey}
           onStageGeneration={onStageFidelity}
           onInspectCandidate={onInspectFidelityCandidate}
         />
         <p>
-          {displayedFidelity === 'wireframe'
-            ? 'Wireframe uses editor primitives. Move to Component and confirm to generate with installed shadcn-svelte components.'
-            : 'Component fidelity uses compatible installed shadcn-svelte components and creates a reusable local component.'}
+          AI Draft fills in the design with editable primitives. AI Hi-Fi uses compatible installed
+          shadcn-svelte components and creates a reusable local component.
         </p>
       </div>
     </details>

@@ -76,7 +76,9 @@
     {:else}
       <div class="empty">
         <strong>No project components yet</strong>
-        <p>Select a frame, then choose Create component in Properties or the context menu.</p>
+        <p>
+          Select a frame or group, then choose Create component in Properties or the context menu.
+        </p>
       </div>
     {/if}
   </aside>

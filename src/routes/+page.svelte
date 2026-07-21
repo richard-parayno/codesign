@@ -1613,14 +1613,14 @@
       placement: dropCenter ? 'drag-drop' : 'insert-button',
     });
   }
-  function createProjectComponent() {
-    const source = selectedNodes.length === 1 ? selectedNodes[0] : undefined;
-    if (!source || source.kind !== 'frame') {
-      error = 'Select one frame to create a reusable project component.';
-      return;
-    }
-    if (source.projectComponent) {
-      error = 'This frame is already linked to a project component.';
+  function canCreateProjectComponent(node: DesignNode | undefined) {
+    return Boolean(
+      node && (node.kind === 'frame' || node.kind === 'group') && !node.projectComponent,
+    );
+  }
+  function createProjectComponentFrom(source: DesignNode | undefined) {
+    if (!canCreateProjectComponent(source) || !source) {
+      error = 'Select one frame or group to create a reusable project component.';
       return;
     }
     const name = window.prompt('Component name', source.name)?.trim();
@@ -1644,6 +1644,9 @@
       nodeCount: Object.keys(definition.nodes).length,
       projectId: activeProjectId,
     });
+  }
+  function createProjectComponent() {
+    createProjectComponentFrom(selectedNodes.length === 1 ? selectedNodes[0] : undefined);
   }
   function insertProjectComponent(componentId: string, dropCenter?: { x: number; y: number }) {
     const stored = document.projectComponents?.[componentId];
@@ -3984,11 +3987,12 @@
               onclick={() => toggleFrameClip(contextNode)}
               >{contextNode.clipContent ? 'Disable Clip content' : 'Enable Clip content'}</button
             >{/if}
-          {#if selection.length === 1 && contextNode.kind === 'frame' && !contextNode.projectComponent}<button
+          {#if selection.length === 1 && canCreateProjectComponent(contextNode)}<button
               role="menuitem"
               onclick={() => {
+                const source = contextNode;
                 contextMenu = null;
-                createProjectComponent();
+                createProjectComponentFrom(source);
               }}><span>Create component</span><kbd>{commandLabel}+Alt+K</kbd></button
             >{/if}
           <div class="menu-separator"></div>
@@ -4319,14 +4323,16 @@
           >
           <p class="muted">
             {node.projectComponent.role === 'main'
-              ? 'Main component. New instances use the current contents of this frame.'
+              ? 'Main component. New instances use the current contents of this source layer.'
               : 'Reusable instance from this project.'}
           </p>
         </section>
-      {:else if selectedNodes.length === 1 && node.kind === 'frame'}
+      {:else if selectedNodes.length === 1 && canCreateProjectComponent(node)}
         <section class="project-component-section">
           <h3>Reusable component</h3>
-          <p class="muted">Turn this frame and its layers into a component for this project.</p>
+          <p class="muted">
+            Turn this {node.kind} and its layers into a component for this project.
+          </p>
           <button class="wide component-action" onclick={createProjectComponent}
             >Create component <kbd>{commandLabel}+Alt+K</kbd></button
           >

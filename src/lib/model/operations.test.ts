@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { captureProjectComponent } from '$lib/editor/project-components';
 import { isDesignDocumentV2 } from './migration';
 import { applyOperation, applyOperationBatch, OperationError } from './operations';
 import { blankDocument, defaultStyle, type DesignNode } from './types';
@@ -29,6 +30,36 @@ describe('design operations', () => {
   it('starts new primitives without an implicit stroke', () => {
     expect(defaultStyle.stroke).toBeUndefined();
     expect(defaultStyle.strokeWidth).toBeUndefined();
+  });
+
+  it('keeps the main layer name in sync with a newly created project component', () => {
+    let document = applyOperation(blankDocument(), {
+      id: 'create-sidebar-group',
+      type: 'create',
+      actor: 'user',
+      node: { ...container('sidebar-group', 20, 20, 'group'), name: 'Group' },
+    });
+    const definition = captureProjectComponent(document, 'sidebar-group', {
+      id: 'component-sidebar',
+      name: 'sidebar',
+      now: 10,
+    });
+
+    document = applyOperation(document, {
+      id: 'create-sidebar-component',
+      type: 'create-project-component',
+      actor: 'user',
+      targetId: 'sidebar-group',
+      definition,
+    });
+
+    expect(document.nodes['sidebar-group']).toMatchObject({
+      name: 'sidebar',
+      projectComponent: { componentId: 'component-sidebar', role: 'main' },
+    });
+    expect(document.projectComponents?.['component-sidebar'].nodes['sidebar-group'].name).toBe(
+      'sidebar',
+    );
   });
 
   it('applies the critical create and repeat slice consistently', () => {

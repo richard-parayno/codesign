@@ -40,6 +40,22 @@ describe('project components', () => {
     expect(Object.keys(definition.nodes)).toEqual(['root', 'label']);
   });
 
+  it('captures a group subtree as a project-local component', () => {
+    const document = blankDocument();
+    document.nodes = { root: node('root', 'group'), label: node('label', 'text', 'root') };
+    const definition = captureProjectComponent(document, 'root', {
+      id: 'component-profile',
+      name: 'Profile card',
+      now: 10,
+    });
+
+    expect(definition.nodes.root).toMatchObject({
+      kind: 'group',
+      projectComponent: { componentId: 'component-profile', role: 'main' },
+    });
+    expect(Object.keys(definition.nodes)).toEqual(['root', 'label']);
+  });
+
   it('materializes an independent instance at a new origin', () => {
     const document = blankDocument();
     document.nodes = { root: node('root', 'frame'), label: node('label', 'text', 'root') };

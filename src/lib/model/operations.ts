@@ -419,8 +419,8 @@ export function validateOperation(document: DesignDocument, candidate: unknown):
     throw new OperationError('Branch ID already exists');
   if (operation.type === 'create-project-component') {
     const target = document.nodes[operation.targetId];
-    if (target.kind !== 'frame')
-      throw new OperationError('Create a component from one selected frame');
+    if (target.kind !== 'frame' && target.kind !== 'group')
+      throw new OperationError('Create a component from one selected frame or group');
     if (target.projectComponent)
       throw new OperationError('This frame is already linked to a project component');
     if (document.projectComponents?.[operation.definition.id])
@@ -430,7 +430,7 @@ export function validateOperation(document: DesignDocument, candidate: unknown):
       operation.definition.sourceNodeId !== operation.targetId ||
       !operation.definition.nodes[operation.targetId]
     )
-      throw new OperationError('Project component definition does not match its source frame');
+      throw new OperationError('Project component definition does not match its source layer');
   }
   return operation;
 }
@@ -724,13 +724,18 @@ function mutateOperation(document: DesignDocument, operation: DesignOperation) {
       break;
     }
     case 'create-project-component': {
+      const target = document.nodes[operation.targetId];
+      const definition = clone(operation.definition);
+      target.name = definition.name;
+      if (definition.nodes[operation.targetId])
+        definition.nodes[operation.targetId].name = definition.name;
       document.projectComponents ??= {};
-      document.projectComponents[operation.definition.id] = clone(operation.definition);
-      document.nodes[operation.targetId].projectComponent = {
-        componentId: operation.definition.id,
+      document.projectComponents[definition.id] = definition;
+      target.projectComponent = {
+        componentId: definition.id,
         role: 'main',
       };
-      touch(document.nodes[operation.targetId]);
+      touch(target);
       break;
     }
   }

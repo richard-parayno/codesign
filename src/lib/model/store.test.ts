@@ -166,6 +166,64 @@ describe('project document store', () => {
     ).toBe(1);
   });
 
+  it('repairs legacy main component layer names when restoring a project', () => {
+    const storage = new MemoryStorage();
+    let document = applyOperation(blankDocument(), {
+      id: 'create-sidebar-group',
+      type: 'create',
+      actor: 'user',
+      node: {
+        id: 'sidebar-group',
+        name: 'Group',
+        kind: 'group',
+        screenId: 'screen-1',
+        childIds: [],
+        bounds: { x: 10, y: 10, width: 100, height: 50 },
+        style: { ...defaultStyle },
+        provenance: { actor: 'user', operationId: 'create-sidebar-group' },
+      },
+    });
+    const definition = {
+      id: 'component-sidebar',
+      name: 'sidebar',
+      rootId: 'sidebar-group',
+      sourceNodeId: 'sidebar-group',
+      nodes: {
+        'sidebar-group': {
+          ...structuredClone(document.nodes['sidebar-group']),
+          projectComponent: { componentId: 'component-sidebar', role: 'main' as const },
+        },
+      },
+      createdAt: 10,
+      updatedAt: 10,
+    };
+    document = applyOperation(document, {
+      id: 'create-sidebar-component',
+      type: 'create-project-component',
+      actor: 'user',
+      targetId: 'sidebar-group',
+      definition,
+    });
+    document.nodes['sidebar-group'].name = 'Group';
+    document.revisions[document.currentRevisionId].snapshot.nodes['sidebar-group'].name = 'Group';
+    storage.setItem(
+      PROJECT_STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        activeProjectId: 'legacy-component',
+        projects: [{ id: 'legacy-component', name: 'Legacy component', document }],
+      }),
+    );
+
+    const store = createDocumentStore(storage);
+    store.restore();
+
+    expect(get(store).present.nodes['sidebar-group'].name).toBe('sidebar');
+    expect(
+      get(store).present.revisions[document.currentRevisionId].snapshot.nodes['sidebar-group'].name,
+    ).toBe('sidebar');
+  });
+
   it('keeps undo history per project during a session', () => {
     const storage = new MemoryStorage();
     const store = createDocumentStore(storage);

@@ -23,8 +23,8 @@ export function captureProjectComponent(
 ): ProjectComponentDefinition {
   const root = document.nodes[rootId];
   if (!root) throw new ProjectComponentError('The component source no longer exists.');
-  if (root.kind !== 'frame')
-    throw new ProjectComponentError('Create a component from one selected frame.');
+  if (root.kind !== 'frame' && root.kind !== 'group')
+    throw new ProjectComponentError('Create a component from one selected frame or group.');
   const name = options.name.trim().slice(0, 120);
   if (!name) throw new ProjectComponentError('Component name cannot be empty.');
   const ids = subtreeIds(document.nodes, rootId);
@@ -72,7 +72,7 @@ export function instantiateProjectComponent(
   },
 ) {
   const sourceRoot = definition.nodes[definition.rootId];
-  if (!sourceRoot) throw new ProjectComponentError('The component template has no root frame.');
+  if (!sourceRoot) throw new ProjectComponentError('The component template has no root layer.');
   const orderedSourceIds = subtreeIds(definition.nodes, definition.rootId);
   const ids = new Map(orderedSourceIds.map((id) => [id, options.makeNodeId()]));
   const dx = options.origin.x - sourceRoot.bounds.x;

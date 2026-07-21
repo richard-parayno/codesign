@@ -93,16 +93,32 @@ function normalizeNodeStyle(node: DesignNode) {
   node.style = { ...defaultStyle, ...node.style };
 }
 
+function normalizeProjectComponentNames(
+  nodes: DesignDocument['nodes'],
+  projectComponents: DesignDocument['projectComponents'],
+) {
+  for (const node of Object.values(nodes)) {
+    if (node.projectComponent?.role !== 'main') continue;
+    const definition = projectComponents?.[node.projectComponent.componentId];
+    if (!definition) continue;
+    node.name = definition.name;
+    if (definition.nodes[definition.sourceNodeId])
+      definition.nodes[definition.sourceNodeId].name = definition.name;
+  }
+}
+
 /**
  * v2 style schemas gained editor-facing fields without changing the storage version.
  * Validation accepts older v2 payloads through schema defaults, so restoration must
  * materialize those defaults on every canvas snapshot that can become active later.
  */
-function normalizeDocumentStyles(source: DesignDocument) {
+function normalizeRestoredDocument(source: DesignDocument) {
   const document = structuredClone(source);
   Object.values(document.nodes).forEach(normalizeNodeStyle);
+  normalizeProjectComponentNames(document.nodes, document.projectComponents);
   Object.values(document.revisions).forEach((revision) => {
     Object.values(revision.snapshot.nodes).forEach(normalizeNodeStyle);
+    normalizeProjectComponentNames(revision.snapshot.nodes, revision.snapshot.projectComponents);
   });
   return document;
 }
@@ -168,7 +184,7 @@ export function createDocumentStore(injectedStorage?: ProjectStorage) {
       ...envelope,
       projects: envelope.projects.map((project) => ({
         ...project,
-        document: normalizeDocumentStyles(project.document),
+        document: normalizeRestoredDocument(project.document),
       })),
     };
     documents = new Map(

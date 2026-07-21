@@ -294,6 +294,60 @@ describe('buildSceneContext', () => {
     });
   });
 
+  it('preserves container names and descendant text as semantic evidence', () => {
+    const scene = snapshot(
+      [
+        {
+          ...node(
+            'search-group',
+            undefined,
+            ['search-background', 'search-label'],
+            20,
+            30,
+            420,
+            56,
+          ),
+          name: 'Global search bar',
+          kind: 'group',
+        },
+        {
+          ...node('search-background', 'search-group', [], 20, 30, 420, 56),
+          name: 'Gray search field',
+          style: { ...defaultStyle, fill: '#747b88' },
+        },
+        {
+          ...node('search-label', 'search-group', [], 44, 46, 120, 24),
+          name: 'Search label',
+          kind: 'text',
+          text: 'Search',
+        },
+      ],
+      ['search-group'],
+    );
+    const context = buildSceneContext(
+      input(scene, {
+        focusNodeIds: ['search-group'],
+        observationNodeIds: ['search-group', 'search-background', 'search-label'],
+        observationRootId: 'search-group',
+        mutationTargetIds: ['search-group'],
+        detailLimit: 1,
+      }),
+    );
+
+    expect(context.nodes.find((item) => item.id === 'search-group')).toMatchObject({
+      name: 'Global search bar',
+      childIds: ['search-background', 'search-label'],
+    });
+    expect(context.nodes.find((item) => item.id === 'search-background')).toMatchObject({
+      name: 'Gray search field',
+      summary: { fill: '#747b88' },
+    });
+    expect(context.nodes.find((item) => item.id === 'search-label')).toMatchObject({
+      name: 'Search label',
+      summary: { textLength: 6, textPreview: 'Search' },
+    });
+  });
+
   it('bounds large-scene detail while preserving every node, root region, and hierarchy link', () => {
     const nodes: DesignNode[] = [];
     const roots: string[] = [];

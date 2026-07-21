@@ -77,6 +77,8 @@ export type SceneNodeFidelity = {
 export type SceneNodeSummary = {
   childCount: number;
   textLength: number;
+  /** Bounded semantic evidence retained even when visual details are summarized. */
+  textPreview?: string;
   fill: string;
   componentId?: string;
 };
@@ -193,6 +195,12 @@ function stableUnknown(value: unknown): unknown {
 
 function stableRecord<T>(record: Record<string, T>): Record<string, T> {
   return Object.fromEntries(Object.entries(record).sort(([a], [b]) => a.localeCompare(b)));
+}
+
+function textPreview(text: string | undefined) {
+  const normalized = text?.replace(/\s+/g, ' ').trim();
+  if (!normalized) return undefined;
+  return normalized.length <= 240 ? normalized : `${normalized.slice(0, 239)}…`;
 }
 
 export function defaultDesignSystemSnapshot(): SceneDesignSystemSnapshot {
@@ -523,6 +531,7 @@ export function buildSceneContext(input: SceneContextInput): SceneContext {
         summary: {
           childCount: node.childIds.length,
           textLength: node.text?.length ?? 0,
+          ...(textPreview(node.text) ? { textPreview: textPreview(node.text) } : {}),
           fill: node.style.fill,
           ...(node.componentBinding ? { componentId: node.componentBinding.componentId } : {}),
         },

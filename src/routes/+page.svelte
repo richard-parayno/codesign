@@ -71,6 +71,8 @@
     groupedCanvasContextTarget,
     groupedCanvasSelectionTarget,
     isAdditiveSelectionModifier,
+    isCanvasAdditiveSelectionModifier,
+    selectedContainerCanvasTarget,
     selectionWithTarget,
   } from '$lib/editor/selection';
   import {
@@ -2415,11 +2417,18 @@
       return;
     }
     const p = point(event);
-    const preserveDirectSelection = selection.length === 1 && selection[0] === node.id;
     const commandSelection = event.metaKey || event.ctrlKey;
-    const additiveSelection = isAdditiveSelectionModifier(event);
+    const selectedContainerTarget = commandSelection
+      ? undefined
+      : selectedContainerCanvasTarget(document, node.id, selection);
+    const preserveDirectSelection =
+      !selectedContainerTarget && selection.length === 1 && selection[0] === node.id;
+    const additiveSelection = isCanvasAdditiveSelectionModifier(event);
     const deepSelection = commandSelection || preserveDirectSelection;
-    const selectionTarget = groupedCanvasSelectionTarget(document, node.id, deepSelection) ?? node;
+    const selectionTarget =
+      selectedContainerTarget ??
+      groupedCanvasSelectionTarget(document, node.id, deepSelection) ??
+      node;
     if (
       selectionTarget.id === node.id &&
       node.kind === 'frame' &&

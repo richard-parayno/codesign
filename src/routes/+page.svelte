@@ -75,7 +75,12 @@
     selectionWithTarget,
   } from '$lib/editor/selection';
   import { logAction } from '$lib/debug/action-log';
-  import { deriveGenerationTarget } from '$lib/agent/generation-target';
+  import {
+    deriveCodesignGenerationTarget,
+    deriveCodesignScopeOptions,
+    inspectCodesignEligibility,
+    type CodesignScopeKind,
+  } from '$lib/agent/generation-target';
   import { applyOperation, canvasSnapshot } from '$lib/model/operations';
   import {
     codesignTelemetryEventSchema,
@@ -106,7 +111,6 @@
   import CodesignPromptInspector from '$lib/codesign/CodesignPromptInspector.svelte';
   import InlineCodesignToolbar, {
     type CandidateView,
-    type ObservationScopeView,
   } from '$lib/codesign/InlineCodesignToolbar.svelte';
   import FidelityStops from '$lib/codesign/FidelityStops.svelte';
   import type { FidelityStopView } from '$lib/codesign/FidelityStops.svelte';
@@ -206,8 +210,9 @@
   let idCounter = 0;
   let viewportLogTimer: ReturnType<typeof setTimeout> | undefined;
   let generationRequestId = 0;
-  let observationKind: ObservationScope['kind'] = 'frame';
+  let observationKind: CodesignScopeKind = 'selection';
   let requestedFidelity: Fidelity = 'wireframe';
+  let scopePreviewActive = false;
   let activeCandidateId = '';
   let dismissedCandidateSelectionKey = '';
   let selectedAtomicIds: string[] = [];
@@ -234,8 +239,33 @@
   $: eligibleGenerationSelection = selection.filter(
     (id) => document.nodes[id]?.screenId === document.activeScreenId,
   );
-  $: generationTarget = eligibleGenerationSelection.length
-    ? deriveGenerationTarget(document, eligibleGenerationSelection)
+  $: codesignEligibility = inspectCodesignEligibility(document, selection);
+  $: codesignSelectionEligible = codesignEligibility.eligible;
+  $: strictObservationScopes = deriveCodesignScopeOptions(document, selection);
+  $: selectedObservationOption =
+    strictObservationScopes.find((option) => option.kind === observationKind && option.scope) ??
+    strictObservationScopes.find((option) => option.kind === 'selection' && option.scope);
+  $: observationScope =
+    selectedObservationOption?.scope ??
+    ({
+      kind: 'selection',
+      nodeIds: [],
+    } satisfies ObservationScope);
+  $: observationScopes = strictObservationScopes.map((option) => ({
+    scope: option.scope ?? {
+      kind: option.kind === 'selection' ? 'selection' : 'frame',
+      nodeIds: [],
+    },
+    label: option.label,
+    description: option.description,
+    disabledReason: option.disabledReason,
+  }));
+  $: generationTarget = codesignSelectionEligible
+    ? deriveCodesignGenerationTarget(
+        document,
+        eligibleGenerationSelection,
+        selectedObservationOption?.kind ?? 'selection',
+      )
     : undefined;
   $: generationCanGenerate = Boolean(
     generationTarget &&
@@ -253,11 +283,13 @@
   );
   $: contextNode = contextMenu?.nodeId ? document.nodes[contextMenu.nodeId] : undefined;
   $: code = generateSvelte(document);
-  $: observationScope =
-    observationKind === 'frame' && generationTarget
-      ? generationTarget.observationScope
-      : makeObservationScope(observationKind, selection, selectedNodes, visibleNodes);
-  $: observationScopes = makeObservationScopeOptions(selection, selectedNodes, visibleNodes);
+  $: scopePreviewNodeIds = scopePreviewActive
+    ? makeScopePreviewNodeIds(observationScope, selection)
+    : [];
+  $: codesignToolbarStatus =
+    selection.length && !codesignSelectionEligible
+      ? (codesignEligibility.reason ?? 'Place the selection inside a group or frame.')
+      : codesignStatus;
   $: currentSelectionKey = sortedIdKey(eligibleGenerationSelection);
   $: if (dismissedCandidateSelectionKey && dismissedCandidateSelectionKey !== currentSelectionKey)
     dismissedCandidateSelectionKey = '';
@@ -366,7 +398,8 @@
   );
   $: if (selectedNodes[0]?.id !== fidelityTargetNodeId) {
     fidelityTargetNodeId = selectedNodes[0]?.id ?? '';
-    if (selectedNodes[0]) requestedFidelity = effectiveFidelity(document, selectedNodes[0].id);
+    if (selectedNodes[0])
+      requestedFidelity = codesignFidelity(effectiveFidelity(document, selectedNodes[0].id));
   }
   $: processEventViews = makeProcessEventViews(document.processEvents, document);
   $: aiModelOptions = completeModelOptions(
@@ -1239,121 +1272,17 @@
     }
     return false;
   }
-  function contains(outer: DesignNode, inner: DesignNode) {
-    return (
-      outer.id !== inner.id &&
-      outer.bounds.x <= inner.bounds.x &&
-      outer.bounds.y <= inner.bounds.y &&
-      outer.bounds.x + outer.bounds.width >= inner.bounds.x + inner.bounds.width &&
-      outer.bounds.y + outer.bounds.height >= inner.bounds.y + inner.bounds.height
-    );
-  }
-  function containingFrame(node: DesignNode, screenNodes: DesignNode[]) {
-    return screenNodes
-      .filter((candidate) => candidate.kind === 'frame' && contains(candidate, node))
-      .sort(
-        (a, b) =>
-          a.bounds.width * a.bounds.height - b.bounds.width * b.bounds.height ||
-          a.id.localeCompare(b.id),
-      )[0];
-  }
-  function uniqueIds(ids: Array<string | undefined>) {
-    return [...new Set(ids.filter((id): id is string => Boolean(id)))];
-  }
-  function belongsToRegion(node: DesignNode, region: DesignNode, screenNodes: DesignNode[]) {
-    if (node.id === region.id || contains(region, node)) return true;
-    const byId = new Map(screenNodes.map((item) => [item.id, item]));
-    let current = node.parentId ? byId.get(node.parentId) : undefined;
-    const visited = new Set<string>();
-    while (current && !visited.has(current.id)) {
-      if (current.id === region.id) return true;
-      visited.add(current.id);
-      current = current.parentId ? byId.get(current.parentId) : undefined;
-    }
-    return false;
-  }
-  function makeObservationScope(
-    kind: ObservationScope['kind'],
-    mutationIds: string[],
-    nodes: DesignNode[],
-    screenNodes: DesignNode[],
-  ): ObservationScope {
-    if (kind === 'selection') {
-      const insertionIds = mutationIds.length
-        ? deriveGenerationTarget(document, mutationIds).mutationScope.insertionParentIds
-        : [];
-      return {
-        kind,
-        rootId:
-          insertionIds.length === 1
-            ? insertionIds[0]
-            : mutationIds.length === 1
-              ? mutationIds[0]
-              : undefined,
-        nodeIds: uniqueIds([...insertionIds, ...mutationIds]),
-      };
-    }
-    if (kind === 'screen')
-      return { kind, nodeIds: uniqueIds([...mutationIds, ...screenNodes.map((node) => node.id)]) };
-    const regionIds = uniqueIds(
-      kind === 'parent'
-        ? nodes.map((node) => node.parentId ?? containingFrame(node, screenNodes)?.id)
-        : nodes.map((node) =>
-            node.kind === 'frame' ? node.id : containingFrame(node, screenNodes)?.id,
-          ),
-    );
-    const regions = regionIds
-      .map((id) => screenNodes.find((node) => node.id === id))
-      .filter((region): region is DesignNode => Boolean(region));
-    const contextIds = screenNodes
-      .filter((node) => regions.some((region) => belongsToRegion(node, region, screenNodes)))
-      .map((node) => node.id);
-    return {
-      kind,
-      rootId: regions.length === 1 ? regions[0].id : undefined,
-      nodeIds: uniqueIds([...mutationIds, ...contextIds]),
-    };
-  }
-  function makeObservationScopeOptions(
-    mutationIds: string[],
-    nodes: DesignNode[],
-    screenNodes: DesignNode[],
-  ): ObservationScopeView[] {
-    const selectionScope = makeObservationScope('selection', mutationIds, nodes, screenNodes);
-    const parentScope = makeObservationScope('parent', mutationIds, nodes, screenNodes);
-    const frameScope = makeObservationScope('frame', mutationIds, nodes, screenNodes);
-    const pageScope = makeObservationScope('screen', mutationIds, nodes, screenNodes);
-    return [
-      {
-        scope: selectionScope,
-        label: 'Selection',
-        description: 'Reference the selection and its insertion container, not its other children.',
-      },
-      {
-        scope: parentScope,
-        label: 'Parent',
-        description: 'Reference the nearest parent region and the selection.',
-        disabledReason:
-          parentScope.nodeIds.length === selectionScope.nodeIds.length
-            ? 'No parent region is available.'
-            : undefined,
-      },
-      {
-        scope: frameScope,
-        label: 'Containing frame',
-        description: 'Reference the smallest containing frame and the selection.',
-        disabledReason:
-          frameScope.nodeIds.length === selectionScope.nodeIds.length &&
-          !nodes.some((node) => node.kind === 'frame')
-            ? 'No containing frame is available.'
-            : undefined,
-      },
-      {
-        scope: pageScope,
-        label: 'Screen',
-        description: 'Reference every visible layer on this screen.',
-      },
-    ];
+  function makeScopePreviewNodeIds(scope: ObservationScope, mutationIds: string[]) {
+    if (scope.kind === 'selection') return mutationIds.filter((id) => scope.nodeIds.includes(id));
+    const mutableIds = new Set(descendantNodeIds(document, mutationIds));
+    return scope.nodeIds.filter((id) => {
+      const node = document.nodes[id];
+      return Boolean(
+        node &&
+        !mutableIds.has(id) &&
+        (scope.rootId ? node.parentId === scope.rootId : !node.parentId),
+      );
+    });
   }
   function changeLabel(type: DesignOperation['type']) {
     const labels: Record<DesignOperation['type'], string> = {
@@ -1413,7 +1342,9 @@
     candidates: CandidateRevision[],
   ): FidelityStopView[] {
     const selected = nodes[0];
-    const current = selected ? effectiveFidelity(sourceDocument, selected.id) : 'wireframe';
+    const current = selected
+      ? codesignFidelity(effectiveFidelity(sourceDocument, selected.id))
+      : 'wireframe';
     const entity = selected?.entityId ? sourceDocument.entities[selected.entityId] : undefined;
     const saved = (entity?.representationIds ?? [])
       .map((id) => sourceDocument.representations[id])
@@ -1429,7 +1360,7 @@
         )
         .map((candidate) => candidate.fidelity),
     );
-    const fidelities: Fidelity[] = ['structure', 'wireframe', 'component', 'visual', 'production'];
+    const fidelities: Fidelity[] = ['wireframe', 'component'];
     const currentIndex = fidelities.indexOf(current);
     const inheritedFrom = selected ? fidelityInheritanceLabel(sourceDocument, selected) : undefined;
     return fidelities.map((fidelity) => {
@@ -1452,6 +1383,9 @@
         disabledReason: 'No saved lower-fidelity representation exists for this selection.',
       };
     });
+  }
+  function codesignFidelity(fidelity: Fidelity): Fidelity {
+    return ['component', 'visual', 'production'].includes(fidelity) ? 'component' : 'wireframe';
   }
   function fidelityInheritanceLabel(sourceDocument: typeof document, node: DesignNode) {
     if (node.kind === 'frame' || sourceDocument.nodeFidelityOverrides[node.id]) return undefined;
@@ -2666,6 +2600,14 @@
       logAction('codesign.request-rejected', { action, message: error });
       return;
     }
+    if (!codesignSelectionEligible) {
+      showError(
+        'Place every selected element inside a group or frame before using Codesign',
+        'Couldn’t generate proposal',
+      );
+      logAction('codesign.request-rejected', { action, message: error });
+      return;
+    }
     if (!generationCanGenerate) {
       showError(
         'The selection is pinned or has no editable insertion region',
@@ -2699,8 +2641,11 @@
       rerollCandidateId: rerollCandidateId ?? '',
     });
     try {
-      const baseTarget = deriveGenerationTarget(document, selection);
-      const target = { ...baseTarget, observationScope };
+      const target = deriveCodesignGenerationTarget(
+        document,
+        selection,
+        selectedObservationOption?.kind ?? 'selection',
+      );
       startCodesignTelemetry(telemetryRequestId);
       const pinnedChanges = rerollCandidateId
         ? pinnedAtomicIds
@@ -2984,7 +2929,7 @@
     }
   }
   function selectObservationScope(scope: ObservationScope) {
-    observationKind = scope.kind;
+    observationKind = scope.kind === 'frame' ? 'same-parent-frame' : 'selection';
     codesignStatus = `Codesign can reference ${scope.nodeIds.length} ${scope.nodeIds.length === 1 ? 'layer' : 'layers'}; only the selection can change.`;
   }
   function stageFidelity(fidelity: Fidelity) {
@@ -3646,6 +3591,26 @@
             ondblclick={(event) => nodeDoubleClick(event, node)}
             oncontextmenu={(event) => openContextMenu(event, node)}
           >
+            {#if scopePreviewNodeIds.includes(node.id)}
+              <rect
+                class="scope-preview-boundary"
+                x={bounds.x - 7 / zoom}
+                y={bounds.y - 7 / zoom}
+                width={bounds.width + 14 / zoom}
+                height={bounds.height + 14 / zoom}
+                rx={Math.max(node.style.radius, 3)}
+              />
+            {/if}
+            {#if loadingCandidate && eligibleGenerationSelection.includes(node.id)}
+              <rect
+                class="generation-active-boundary"
+                x={bounds.x - 8 / zoom}
+                y={bounds.y - 8 / zoom}
+                width={bounds.width + 16 / zoom}
+                height={bounds.height + 16 / zoom}
+                rx={Math.max(node.style.radius, 3)}
+              />
+            {/if}
             {#if codesignReviewActive && reviewObservationScope.nodeIds.includes(node.id) && (reviewObservationScope.rootId === node.id || (!reviewObservationScope.rootId && (!node.parentId || !reviewObservationScope.nodeIds.includes(node.parentId))))}
               <rect
                 class="observation-boundary"
@@ -4045,7 +4010,7 @@
             : 'Saved candidate'}
         canGenerate={generationCanGenerate}
         {commandLabel}
-        statusMessage={codesignStatus}
+        statusMessage={codesignToolbarStatus}
         busy={loadingCandidate}
         observationScope={reviewObservationScope}
         {observationScopes}
@@ -4060,6 +4025,7 @@
           ? 'Applied candidates cannot be rerolled.'
           : undefined}
         onObservationScopeChange={selectObservationScope}
+        onScopePreviewChange={(open) => (scopePreviewActive = open)}
         onGenerate={generateCandidates}
         onCancel={cancelGeneration}
         onNavigateFidelity={navigateRepresentation}
@@ -4863,11 +4829,8 @@
               }}
             >
               <option value="">Inherit from containing frame</option>
-              <option value="structure">Structure</option>
               <option value="wireframe">Wireframe</option>
               <option value="component">Component</option>
-              <option value="visual">Visual</option>
-              <option value="production">Production</option>
             </select>
           </label>
           {#if document.nodeFidelityOverrides[node.id]}
@@ -5677,10 +5640,24 @@
   .focus-boundary,
   .observation-boundary,
   .editable-region-boundary,
-  .insertion-parent-boundary {
+  .insertion-parent-boundary,
+  .scope-preview-boundary,
+  .generation-active-boundary {
     fill: none;
     vector-effect: non-scaling-stroke;
     pointer-events: none;
+  }
+  .scope-preview-boundary {
+    fill: #7a3db80b;
+    stroke: #8a4ec2;
+    stroke-width: 2;
+    stroke-dasharray: 7 5;
+  }
+  .generation-active-boundary {
+    stroke: #4b9bd8;
+    stroke-width: 3;
+    filter: drop-shadow(0 0 5px #54a9e8aa);
+    animation: codesign-generation-glow 1.45s ease-in-out infinite;
   }
   .mutation-boundary {
     stroke: #125f99;
@@ -5731,6 +5708,17 @@
   .candidate-preview .highlighted-candidate .candidate-change-boundary {
     stroke: #b7472a;
     stroke-width: 4;
+  }
+  @keyframes codesign-generation-glow {
+    0%,
+    100% {
+      opacity: 0.28;
+      stroke-width: 2;
+    }
+    50% {
+      opacity: 0.88;
+      stroke-width: 4;
+    }
   }
   .handle {
     fill: #fff;
@@ -6392,6 +6380,10 @@
   @media (prefers-reduced-motion: reduce) {
     * {
       transition: none !important;
+    }
+    .generation-active-boundary {
+      opacity: 0.72;
+      animation: none;
     }
   }
 </style>

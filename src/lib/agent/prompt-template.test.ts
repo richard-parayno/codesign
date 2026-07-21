@@ -64,6 +64,10 @@ describe('Codesign agent prompt template', () => {
     );
     expect(CODESIGN_PROMPT_TEMPLATE_INSPECTION.outputSchema).toContain('candidate.submit');
     expect(CODESIGN_COMPLETE_PROMPT_TEMPLATE).toContain('shadcn-svelte');
+    expect(CODESIGN_COMPLETE_PROMPT_TEMPLATE).toContain('At component fidelity');
+    expect(CODESIGN_COMPLETE_PROMPT_TEMPLATE).not.toContain(
+      'component, visual, or production fidelity',
+    );
     expect(CODESIGN_SYSTEM_INSTRUCTIONS).not.toContain('Never use tools');
   });
 
@@ -84,5 +88,22 @@ describe('Codesign agent prompt template', () => {
     expect(rendered).not.toContain('"nodes"');
     expect(rendered).not.toContain('componentCatalog');
     expect(rendered.length).toBeLessThan(3_000);
+  });
+
+  it('requires installed components only for the Component stage', () => {
+    const { request, document } = fixture();
+    const rendered = renderCodesignPrompt(
+      { ...request, requestedFidelity: 'component' },
+      {
+        id: 'canvas-component',
+        state: 'active',
+        sourceRevisionId: document.currentRevisionId,
+        candidateRevisionId: document.currentRevisionId,
+        expiresAt: 100,
+      },
+    );
+
+    expect(rendered).toContain('"requestedFidelity":"component"');
+    expect(rendered).toContain('"componentPolicy":"shadcn-required:');
   });
 });

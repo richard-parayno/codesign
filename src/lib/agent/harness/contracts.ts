@@ -49,6 +49,12 @@ export type CandidateChangeInput = {
   summary: string;
 };
 
+export type CandidateApplyInput = {
+  /** Revision observed by the caller before constructing this mutation batch. */
+  candidateRevisionId: string;
+  changes: CandidateChangeInput[];
+};
+
 export type SessionDiagnostic = {
   code: string;
   message: string;

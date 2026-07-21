@@ -69,7 +69,10 @@ const changeSchema = z.object({
   evidenceNodeIds: z.array(z.string().min(1)).min(1).max(50),
   summary: z.string().trim().min(1).max(500),
 });
-const applySchema = z.object({ changes: z.array(changeSchema).min(1).max(MAX_BATCH) });
+const applySchema = z.object({
+  candidateRevisionId: z.string().min(1),
+  changes: z.array(changeSchema).min(1).max(MAX_BATCH),
+});
 const emptySchema = z.object({});
 
 type StoredChange = CandidateChangeInput & { appliedAt: number };
@@ -126,6 +129,10 @@ function argumentSummary(tool: CanvasToolName, value: unknown) {
   ) {
     const changes = (value as { changes: CandidateChangeInput[] }).changes;
     return {
+      candidateRevisionId:
+        typeof (value as { candidateRevisionId?: unknown }).candidateRevisionId === 'string'
+          ? (value as { candidateRevisionId: string }).candidateRevisionId
+          : '',
       operationIds: changes
         .map((change) => change.operation?.id)
         .filter(Boolean)
@@ -512,7 +519,7 @@ export class CanvasSessionService implements CanvasSessionServiceContract {
       else if (toolName === 'candidate.get_state')
         result = this.candidateState(session, candidateStateSchema.parse(args));
       else if (toolName === 'candidate.apply_changes')
-        result = this.applyChanges(session, applySchema.parse(args).changes);
+        result = this.applyChanges(session, applySchema.parse(args));
       else if (toolName === 'candidate.validate') {
         emptySchema.parse(args);
         result = this.validate(session);
@@ -728,7 +735,22 @@ export class CanvasSessionService implements CanvasSessionServiceContract {
     };
   }
 
-  private applyChanges(session: StoredSession, changes: z.infer<typeof applySchema>['changes']) {
+  private applyChanges(session: StoredSession, input: z.infer<typeof applySchema>) {
+    if (input.candidateRevisionId !== session.candidate.currentRevisionId)
+      throw new CanvasSessionError(
+        'stale-revision',
+        `Candidate revision ${input.candidateRevisionId} is stale; current revision is ${session.candidate.currentRevisionId}`,
+        [
+          {
+            code: 'stale-revision',
+            message: 'The candidate changed after this mutation batch was prepared.',
+            path: 'candidateRevisionId',
+            repair:
+              'Call candidate.get_state, rebuild the change against its candidateRevisionId, and retry.',
+          },
+        ],
+      );
+    const { changes } = input;
     const operationIds = new Set(session.changes.map((change) => change.operation.id));
     const evidence = new Set(session.target.observationScope.nodeIds);
     let candidate = clone(session.candidate);

@@ -92,6 +92,7 @@ describe('CanvasSessionService', () => {
     const service = new CanvasSessionService();
     const session = await service.createSession(input(document));
     await service.dispatch(session.id, 'candidate.apply_changes', {
+      candidateRevisionId: session.candidateRevisionId,
       changes: [
         {
           operation: {
@@ -114,11 +115,71 @@ describe('CanvasSessionService', () => {
     await service.dispose();
   });
 
+  it('rejects a stale candidate revision before applying any mutation', async () => {
+    const service = new CanvasSessionService();
+    const session = await service.createSession(input(sourceDocument()));
+    const first = (await service.dispatch(session.id, 'candidate.apply_changes', {
+      candidateRevisionId: session.candidateRevisionId,
+      changes: [
+        {
+          operation: {
+            id: 'first-style',
+            type: 'style',
+            actor: 'agent',
+            targetIds: ['editable'],
+            patch: { radius: 8 },
+          },
+          evidenceNodeIds: ['editable'],
+          summary: 'Applied the first candidate refinement.',
+        },
+      ],
+    })) as { candidateRevisionId: string };
+    await expect(
+      service.dispatch(session.id, 'candidate.apply_changes', {
+        candidateRevisionId: session.candidateRevisionId,
+        changes: [
+          {
+            operation: {
+              id: 'stale-style',
+              type: 'style',
+              actor: 'agent',
+              targetIds: ['editable'],
+              patch: { padding: 24 },
+            },
+            evidenceNodeIds: ['editable'],
+            summary: 'This batch was prepared against stale state.',
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({
+      code: 'stale-revision',
+      diagnostics: [
+        expect.objectContaining({
+          code: 'stale-revision',
+          path: 'candidateRevisionId',
+          repair: expect.stringContaining('candidate.get_state'),
+        }),
+      ],
+    });
+    const state = (await service.dispatch(session.id, 'candidate.get_state', {
+      nodeIds: ['editable'],
+    })) as {
+      candidateRevisionId: string;
+      nodes: { items: Array<{ style: { radius: number; padding: number } }> };
+      operations: { total: number };
+    };
+    expect(state.candidateRevisionId).toBe(first.candidateRevisionId);
+    expect(state.operations.total).toBe(1);
+    expect(state.nodes.items[0].style).toMatchObject({ radius: 8, padding: 12 });
+    await service.dispose();
+  });
+
   it('rejects adversarial scope, pinned-descendant, and region mutations', async () => {
     const service = new CanvasSessionService();
     const session = await service.createSession(input(sourceDocument()));
     const apply = (operation: unknown) =>
       service.dispatch(session.id, 'candidate.apply_changes', {
+        candidateRevisionId: session.candidateRevisionId,
         changes: [{ operation, evidenceNodeIds: ['group'], summary: 'Attempted unsafe change.' }],
       });
     await expect(
@@ -165,15 +226,17 @@ describe('CanvasSessionService', () => {
     child.provenance = { actor: 'agent', operationId: 'create-button' };
     await expect(
       service.dispatch(session.id, 'candidate.apply_changes', {
+        candidateRevisionId: session.candidateRevisionId,
         changes: [createChange('orphan-child', child)],
       }),
     ).rejects.toMatchObject({ code: 'insertion-parent-violation' });
-    await service.dispatch(session.id, 'candidate.apply_changes', {
+    const applied = (await service.dispatch(session.id, 'candidate.apply_changes', {
+      candidateRevisionId: session.candidateRevisionId,
       changes: [
         createChange('create-stack', parent),
         createChange('create-button', child, ['create-stack']),
       ],
-    });
+    })) as { candidateRevisionId: string };
     const state = (await service.dispatch(session.id, 'candidate.get_state', {
       nodeIds: ['candidate-stack', 'candidate-button'],
     })) as { nodes: { items: Array<{ id: string; childIds: string[] }> } };
@@ -182,6 +245,7 @@ describe('CanvasSessionService', () => {
     ]);
     await expect(
       service.dispatch(session.id, 'candidate.apply_changes', {
+        candidateRevisionId: applied.candidateRevisionId,
         changes: [
           {
             operation: {
@@ -198,6 +262,7 @@ describe('CanvasSessionService', () => {
       }),
     ).rejects.toMatchObject({ code: 'missing-dependency' });
     await service.dispatch(session.id, 'candidate.apply_changes', {
+      candidateRevisionId: applied.candidateRevisionId,
       changes: [
         {
           operation: {
@@ -244,6 +309,7 @@ describe('CanvasSessionService', () => {
       code: 'candidate-invalid',
     });
     await service.dispatch(session.id, 'candidate.apply_changes', {
+      candidateRevisionId: session.candidateRevisionId,
       changes: [
         {
           operation: {

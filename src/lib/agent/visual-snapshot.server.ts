@@ -37,6 +37,11 @@ export type TrustedVisualSnapshot = Readonly<{
   sha256: string;
 }>;
 
+export type TrustedVisualSnapshotLease = Readonly<{
+  snapshot: TrustedVisualSnapshot;
+  dispose: () => Promise<void>;
+}>;
+
 export type VisualSnapshotOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -509,15 +514,10 @@ function cancellationError() {
 }
 
 function timeoutError() {
-  return new VisualSnapshotError('Visual snapshot callback timed out', 'timeout');
+  return new VisualSnapshotError('Visual snapshot preparation timed out', 'timeout');
 }
 
-export async function withTrustedVisualSnapshot<T>(
-  input: unknown,
-  callback: (snapshot: TrustedVisualSnapshot, signal: AbortSignal) => T | Promise<T>,
-  options: VisualSnapshotOptions = {},
-): Promise<T> {
-  if (options.signal?.aborted) throw cancellationError();
+function validatedTimeout(options: VisualSnapshotOptions) {
   const timeoutMs = options.timeoutMs ?? VISUAL_SNAPSHOT_LIMITS.defaultTimeoutMs;
   if (
     !Number.isInteger(timeoutMs) ||
@@ -525,16 +525,46 @@ export async function withTrustedVisualSnapshot<T>(
     timeoutMs > VISUAL_SNAPSHOT_LIMITS.maxTimeoutMs
   )
     fail('Visual snapshot timeout is outside the safe range', 'invalid-input');
-  const parsed = validateVisualSnapshot(input);
-  const directory = await mkdtemp(join(tmpdir(), `codesign-visual-${process.pid}-`));
-  try {
+  return timeoutMs;
+}
+
+/**
+ * Materializes an uploaded image as a caller-owned resource. The timeout only
+ * covers validation and file preparation; once returned, the lease remains
+ * valid until it is explicitly disposed or its owning signal is aborted.
+ */
+export async function createTrustedVisualSnapshot(
+  input: unknown,
+  options: VisualSnapshotOptions = {},
+): Promise<TrustedVisualSnapshotLease> {
+  if (options.signal?.aborted) throw cancellationError();
+  const timeoutMs = validatedTimeout(options);
+  let directory: string | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  let disposePromise: Promise<void> | undefined;
+
+  const dispose = () => {
+    if (!disposePromise)
+      disposePromise = directory
+        ? rm(directory, { recursive: true, force: true })
+        : Promise.resolve();
+    return disposePromise;
+  };
+
+  const preparation = (async () => {
+    const parsed = validateVisualSnapshot(input);
+    if (options.signal?.aborted) throw cancellationError();
+    directory = await mkdtemp(join(tmpdir(), `codesign-visual-${process.pid}-`));
     await chmod(directory, 0o700);
+    if (options.signal?.aborted) throw cancellationError();
     const extension = MIME_EXTENSIONS[parsed.mimeType];
     const path = join(directory, `snapshot${extension}`);
     await writeFile(path, parsed.bytes, { flag: 'wx', mode: 0o600 });
+    if (options.signal?.aborted) throw cancellationError();
     if (!isAbsolute(path) || extname(path) !== extension)
       fail('Trusted visual snapshot path construction failed', 'invalid-input');
-    const snapshot: TrustedVisualSnapshot = Object.freeze({
+    return Object.freeze({
       path,
       mimeType: parsed.mimeType,
       extension,
@@ -542,11 +572,62 @@ export async function withTrustedVisualSnapshot<T>(
       width: parsed.width,
       height: parsed.height,
       sha256: createHash('sha256').update(parsed.bytes).digest('hex'),
+    }) satisfies TrustedVisualSnapshot;
+  })();
+
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(timeoutError()), timeoutMs);
+  });
+  const cancellation = new Promise<never>((_, reject) => {
+    if (!options.signal) return;
+    onAbort = () => reject(cancellationError());
+    options.signal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  try {
+    const snapshot = await Promise.race([preparation, timeout, cancellation]);
+    if (timer) clearTimeout(timer);
+    if (onAbort) options.signal?.removeEventListener('abort', onAbort);
+    // The owning request/session may still dispose the prepared resource after
+    // creation. This listener is intentionally separate from the prep timeout.
+    if (options.signal) {
+      onAbort = () => void dispose();
+      options.signal.addEventListener('abort', onAbort, { once: true });
+    }
+    return Object.freeze({
+      snapshot,
+      dispose: async () => {
+        if (onAbort) options.signal?.removeEventListener('abort', onAbort);
+        await dispose();
+      },
     });
+  } catch (error) {
+    if (timer) clearTimeout(timer);
+    if (onAbort) options.signal?.removeEventListener('abort', onAbort);
+    // File-system work cannot be synchronously cancelled. Let an in-flight
+    // preparation settle before deleting its directory so a timeout cannot
+    // leave a late-created artifact behind.
+    await preparation.catch(() => undefined);
+    await dispose();
+    throw error;
+  }
+}
+
+export async function withTrustedVisualSnapshot<T>(
+  input: unknown,
+  callback: (snapshot: TrustedVisualSnapshot, signal: AbortSignal) => T | Promise<T>,
+  options: VisualSnapshotOptions = {},
+): Promise<T> {
+  const timeoutMs = validatedTimeout(options);
+  const lease = await createTrustedVisualSnapshot(input, {
+    signal: options.signal,
+    timeoutMs: VISUAL_SNAPSHOT_LIMITS.defaultTimeoutMs,
+  });
+  try {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
     const controller = new AbortController();
-    const callbackPromise = Promise.resolve().then(() => callback(snapshot, controller.signal));
+    const callbackPromise = Promise.resolve().then(() => callback(lease.snapshot, controller.signal));
     const timeoutPromise = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         controller.abort();
@@ -572,6 +653,6 @@ export async function withTrustedVisualSnapshot<T>(
       if (onAbort) options.signal?.removeEventListener('abort', onAbort);
     }
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await lease.dispose();
   }
 }

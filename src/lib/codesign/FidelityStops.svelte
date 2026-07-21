@@ -15,9 +15,12 @@
 </script>
 
 <script lang="ts">
+  type SupportedFidelity = Extract<Fidelity, 'wireframe' | 'component'>;
+
   type Props = {
     label?: string;
     stops: FidelityStopView[];
+    selectedFidelity?: Fidelity;
     onNavigate: (fidelity: Fidelity, representationId: string) => void;
     onStageGeneration: (fidelity: Fidelity) => void;
     onInspectCandidate: (fidelity: Fidelity) => void;
@@ -26,92 +29,138 @@
   let {
     label = 'Fidelity',
     stops,
+    selectedFidelity,
     onNavigate,
     onStageGeneration,
     onInspectCandidate,
   }: Props = $props();
 
-  const fidelityLabel: Record<Fidelity, string> = {
-    structure: 'Structure',
+  const supportedFidelities: SupportedFidelity[] = ['wireframe', 'component'];
+  const fidelityLabel: Record<SupportedFidelity, string> = {
     wireframe: 'Wireframe',
     component: 'Component',
-    visual: 'Visual',
-    production: 'Production',
   };
+
+  let supportedStops = $derived(
+    supportedFidelities.map(
+      (fidelity) =>
+        stops.find((stop) => stop.fidelity === fidelity) ?? {
+          fidelity,
+          state: 'unavailable' as const,
+          disabledReason: `${fidelityLabel[fidelity]} is unavailable for this selection.`,
+        },
+    ),
+  );
+  let committedFidelity = $derived(
+    normalizeFidelity(selectedFidelity ?? stops.find((stop) => stop.state === 'current')?.fidelity),
+  );
+  let chosenFidelity = $state<SupportedFidelity>('wireframe');
+  let pendingFidelity = $state<SupportedFidelity>();
+  let selectedStop = $derived(
+    supportedStops.find((stop) => stop.fidelity === chosenFidelity) ?? supportedStops[0],
+  );
+
+  $effect(() => {
+    chosenFidelity = committedFidelity;
+    pendingFidelity = undefined;
+  });
+
+  function normalizeFidelity(fidelity?: Fidelity): SupportedFidelity {
+    return fidelity === 'component' || fidelity === 'visual' || fidelity === 'production'
+      ? 'component'
+      : 'wireframe';
+  }
 
   function stateLabel(stop: FidelityStopView) {
     if (stop.state === 'current') return 'Current';
     if (stop.state === 'saved') return 'Saved';
-    if (stop.state === 'generate') return 'Generate';
+    if (stop.state === 'generate') return 'Not generated';
     if (stop.state === 'candidate') return 'Candidate';
     if (stop.state === 'versions')
       return `${stop.versionCount ?? 2} version${(stop.versionCount ?? 2) === 1 ? '' : 's'}`;
     return 'Unavailable';
   }
 
-  function activate(stop: FidelityStopView) {
+  function selectStop(index: number) {
+    const stop = supportedStops[index];
+    if (!stop) return;
+
+    chosenFidelity = stop.fidelity as SupportedFidelity;
+    pendingFidelity = undefined;
+
     if (stop.disabledReason || stop.state === 'unavailable' || stop.state === 'current') return;
     if (stop.state === 'saved' || stop.state === 'versions') {
       if (stop.representationId) onNavigate(stop.fidelity, stop.representationId);
       return;
     }
-    if (stop.state === 'generate') {
-      onStageGeneration(stop.fidelity);
+    if (stop.state === 'candidate') {
+      onInspectCandidate(stop.fidelity);
       return;
     }
-    onInspectCandidate(stop.fidelity);
+    if (stop.state === 'generate') pendingFidelity = stop.fidelity as SupportedFidelity;
   }
 
-  function canActivate(stop: FidelityStopView) {
-    if (stop.disabledReason || stop.state === 'unavailable' || stop.state === 'current')
-      return false;
-    return !['saved', 'versions'].includes(stop.state) || Boolean(stop.representationId);
+  function confirmGeneration() {
+    if (!pendingFidelity) return;
+    const fidelity = pendingFidelity;
+    pendingFidelity = undefined;
+    onStageGeneration(fidelity);
   }
 </script>
 
 <nav class="fidelity" aria-label={label}>
   <strong class="fidelity-label">{label}</strong>
-  <ol>
-    {#each stops as stop (stop.fidelity)}
-      <li class:active={stop.state === 'current'} class={`state-${stop.state}`}>
-        {#if canActivate(stop)}
-          <button
-            type="button"
-            aria-label={`${fidelityLabel[stop.fidelity]} · ${stateLabel(stop)}`}
-            onclick={() => activate(stop)}
-          >
-            <span class="marker" aria-hidden="true"></span>
-            <span class="stop-name">{fidelityLabel[stop.fidelity]}</span>
-            <span class="stop-state">{stateLabel(stop)}</span>
-          </button>
-        {:else}
-          <div
-            class="stop-static"
-            aria-current={stop.state === 'current' ? 'step' : undefined}
-            aria-disabled={stop.state === 'unavailable' || stop.disabledReason ? 'true' : undefined}
-          >
-            <span class="marker" aria-hidden="true"></span>
-            <span class="stop-name">{fidelityLabel[stop.fidelity]}</span>
-            <span class="stop-state">{stateLabel(stop)}</span>
-          </div>
-        {/if}
-        {#if stop.inheritedFrom}
-          <small>Inherited from {stop.inheritedFrom}</small>
-        {/if}
-        {#if stop.disabledReason}
-          <small class="disabled-reason">{stop.disabledReason}</small>
-        {:else if stop.state === 'saved' && !stop.representationId}
-          <small class="disabled-reason">Saved representation is unavailable.</small>
-        {/if}
-      </li>
-    {/each}
-  </ol>
+  <div class="slider-control">
+    <input
+      type="range"
+      min="0"
+      max="1"
+      step="1"
+      value={supportedFidelities.indexOf(chosenFidelity)}
+      aria-label={`${label}: ${fidelityLabel[chosenFidelity]}`}
+      aria-valuetext={`${fidelityLabel[chosenFidelity]} · ${stateLabel(selectedStop)}`}
+      oninput={(event) => selectStop(Number(event.currentTarget.value))}
+    />
+    <div class="slider-labels" aria-hidden="true">
+      {#each supportedStops as stop (stop.fidelity)}
+        <span class:active={stop.fidelity === chosenFidelity}>
+          <strong>{fidelityLabel[stop.fidelity as SupportedFidelity]}</strong>
+          <small>{stateLabel(stop)}</small>
+        </span>
+      {/each}
+    </div>
+  </div>
+
+  <div class="selection-summary" aria-live="polite">
+    <span>
+      <strong>{fidelityLabel[chosenFidelity]}</strong>
+      <small>{stateLabel(selectedStop)}</small>
+    </span>
+    {#if pendingFidelity}
+      <button type="button" onclick={confirmGeneration}>
+        Generate {fidelityLabel[pendingFidelity]}
+      </button>
+    {/if}
+  </div>
+
+  {#if pendingFidelity}
+    <p class="confirmation-note">
+      Confirm to create a {fidelityLabel[pendingFidelity].toLowerCase()} candidate. Moving the slider
+      alone never starts generation.
+    </p>
+  {:else if selectedStop?.inheritedFrom}
+    <p>Inherited from {selectedStop.inheritedFrom}</p>
+  {:else if selectedStop?.disabledReason}
+    <p class="disabled-reason">{selectedStop.disabledReason}</p>
+  {:else if selectedStop?.state === 'saved' && !selectedStop.representationId}
+    <p class="disabled-reason">Saved representation is unavailable.</p>
+  {/if}
 </nav>
 
 <style>
   .fidelity {
     display: grid;
-    gap: 8px;
+    gap: 10px;
   }
 
   .fidelity-label {
@@ -119,153 +168,105 @@
     font-size: 12px;
   }
 
-  ol {
+  .slider-control {
     display: grid;
-    grid-template-columns: repeat(5, minmax(52px, 1fr));
-    gap: 0;
-    margin: 0;
-    padding: 0;
-    list-style: none;
+    gap: 5px;
+    padding: 0 4px;
   }
 
-  li {
-    position: relative;
-    min-width: 0;
-  }
-
-  li:not(:last-child)::after {
-    position: absolute;
-    z-index: 0;
-    top: 16px;
-    left: calc(50% + 8px);
-    width: calc(100% - 16px);
-    border-top: 1px solid #b9c1ca;
-    content: '';
-  }
-
-  button,
-  .stop-static {
-    position: relative;
-    z-index: 1;
+  input[type='range'] {
     width: 100%;
-    min-height: 58px;
-    display: grid;
-    justify-items: center;
-    align-content: start;
-    gap: 2px;
-    border: 0;
-    background: transparent;
-    padding: 4px 3px;
-    color: #303944;
-    text-align: center;
-  }
-
-  button {
-    border-radius: 5px;
+    margin: 0;
+    accent-color: #246da5;
     cursor: pointer;
   }
 
-  button:hover,
-  button:focus-visible {
-    background: #e9eef3;
-  }
-
-  button:focus-visible {
+  input[type='range']:focus-visible {
     outline: 2px solid #246da5;
-    outline-offset: 1px;
+    outline-offset: 3px;
+    border-radius: 999px;
   }
 
-  .marker {
-    width: 17px;
-    height: 17px;
-    display: block;
-    border: 2px solid #707a86;
-    border-radius: 50%;
-    background: #f9fafb;
+  .slider-labels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
   }
 
-  .state-current .marker,
-  .state-saved .marker {
-    background: #3b6f97;
-    border-color: #3b6f97;
-    box-shadow: inset 0 0 0 3px #f9fafb;
-  }
-
-  .state-current .marker {
-    background: #174f7b;
-  }
-
-  .state-generate .marker {
-    border-style: dashed;
-  }
-
-  .state-candidate .marker {
-    border-color: #8a5a12;
-    background: #fff7df;
-    box-shadow: inset 0 0 0 3px #d89124;
-  }
-
-  .state-versions .marker {
-    border-style: double;
-    border-width: 4px;
-    border-color: #6c4f91;
-  }
-
-  .state-unavailable {
-    opacity: 0.58;
-  }
-
-  .stop-name {
-    overflow: hidden;
-    max-width: 100%;
-    font-size: 10px;
-    font-weight: 650;
-    text-overflow: ellipsis;
-  }
-
-  .stop-state {
+  .slider-labels > span {
+    min-width: 0;
+    display: grid;
+    gap: 1px;
     color: #68727e;
-    font-size: 9px;
-    white-space: nowrap;
   }
 
-  small {
-    display: block;
-    padding: 0 4px 5px;
+  .slider-labels > span:last-child {
+    text-align: right;
+  }
+
+  .slider-labels > span.active {
+    color: #174f7b;
+  }
+
+  .slider-labels strong {
+    font-size: 10px;
+  }
+
+  small,
+  p {
     color: #68727e;
     font-size: 9px;
     line-height: 1.3;
-    text-align: center;
+  }
+
+  .selection-summary {
+    min-height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 7px 8px;
+    border: 1px solid #d5dbe2;
+    border-radius: 5px;
+    background: #f4f7f9;
+  }
+
+  .selection-summary > span {
+    min-width: 0;
+    display: grid;
+  }
+
+  .selection-summary button {
+    min-height: 28px;
+    border: 1px solid #175a8e;
+    border-radius: 4px;
+    background: #246da5;
+    padding: 0 10px;
+    color: white;
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .selection-summary button:hover {
+    background: #175a8e;
+  }
+
+  .selection-summary button:focus-visible {
+    outline: 2px solid #246da5;
+    outline-offset: 2px;
+  }
+
+  p {
+    margin: 0;
+  }
+
+  .confirmation-note {
+    color: #6b4c16;
   }
 
   .disabled-reason {
-    color: #875a23;
-  }
-
-  @media (max-width: 760px) {
-    ol {
-      grid-template-columns: 1fr;
-      gap: 4px;
-    }
-
-    li:not(:last-child)::after {
-      display: none;
-    }
-
-    button,
-    .stop-static {
-      min-height: 40px;
-      grid-template-columns: 20px 1fr auto;
-      justify-items: start;
-      align-items: center;
-      align-content: center;
-      text-align: left;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    * {
-      scroll-behavior: auto !important;
-    }
+    color: #8a4650;
   }
 </style>

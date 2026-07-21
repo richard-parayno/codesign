@@ -50,6 +50,7 @@
     highlightedChangeId?: string;
     compareSource?: boolean;
     rerollDisabledReason?: string;
+    onScopePreviewChange?: (open: boolean) => void;
     onObservationScopeChange: (scope: ObservationScope) => void;
     onGenerate: (action: CodesignAction) => void;
     onCancel: () => void;
@@ -82,6 +83,7 @@
     highlightedChangeId,
     compareSource = false,
     rerollDisabledReason,
+    onScopePreviewChange,
     onObservationScopeChange,
     onGenerate,
     onCancel,
@@ -116,10 +118,17 @@
   }
 
   function fidelityModeLabel(fidelity: Fidelity) {
-    if (fidelity === 'structure') return 'layout only';
     if (fidelity === 'wireframe') return 'primitives';
     return 'shadcn-first';
   }
+
+  function supportedFidelity(fidelity: Fidelity): Extract<Fidelity, 'wireframe' | 'component'> {
+    return fidelity === 'component' || fidelity === 'visual' || fidelity === 'production'
+      ? 'component'
+      : 'wireframe';
+  }
+
+  let displayedFidelity = $derived(supportedFidelity(requestedFidelity));
 </script>
 
 <section class="inline-codesign" aria-label="Codesign controls">
@@ -280,26 +289,28 @@
     {/if}
 
     <details class="fidelity-menu">
-      <summary>Fidelity · {requestedFidelity} · {fidelityModeLabel(requestedFidelity)}</summary>
+      <summary>Fidelity · {displayedFidelity} · {fidelityModeLabel(displayedFidelity)}</summary>
       <div class="fidelity-popover">
         <FidelityStops
           label="Selection fidelity"
           stops={fidelityStops}
+          selectedFidelity={requestedFidelity}
           onNavigate={onNavigateFidelity}
           onStageGeneration={onStageFidelity}
           onInspectCandidate={onInspectFidelityCandidate}
         />
         <p>
-          {requestedFidelity === 'wireframe'
-            ? 'Wireframe uses editor primitives. Choose Component or higher for shadcn-first generation.'
-            : requestedFidelity === 'structure'
-              ? 'Structure focuses on hierarchy and layout. Choose Component or higher for shadcn-first generation.'
-              : 'Component and higher fidelities prefer compatible installed shadcn-svelte components.'}
+          {displayedFidelity === 'wireframe'
+            ? 'Wireframe uses editor primitives. Move to Component and confirm to generate with installed shadcn-svelte components.'
+            : 'Component fidelity uses compatible installed shadcn-svelte components and creates a reusable local component.'}
         </p>
       </div>
     </details>
 
-    <details class="scope-menu">
+    <details
+      class="scope-menu"
+      ontoggle={(event) => onScopePreviewChange?.(event.currentTarget.open)}
+    >
       <summary>Scope</summary>
       <fieldset class="scope-popover">
         <legend>Codesign can reference</legend>

@@ -262,6 +262,11 @@ function assertCreate(
     throw new CanvasSessionError('node-id-collision', `Node ID ${node.id} already exists`);
   if (node.screenId !== session.source.activeScreenId)
     throw new CanvasSessionError('scope-violation', 'Created nodes must stay on the active screen');
+  if (node.provenance.actor !== 'agent' || node.provenance.operationId !== operation.id)
+    throw new CanvasSessionError(
+      'invalid-provenance',
+      'Created-node provenance must identify its agent creation operation',
+    );
   if (node.childIds.length)
     throw new CanvasSessionError(
       'unstaged-children',
@@ -348,6 +353,24 @@ function validateScopedOperation(
         },
       ],
     );
+  for (const id of targets) {
+    if (!session.createdNodeIds.has(id)) continue;
+    const creation = session.changes.find(
+      (change) => change.operation.type === 'create' && change.operation.node.id === id,
+    );
+    if (!creation || !dependencyIds.includes(creation.operation.id))
+      throw new CanvasSessionError(
+        'missing-dependency',
+        `Mutation of generated node ${id} must depend on its creation operation`,
+        [
+          {
+            code: 'missing-dependency',
+            message: `Add ${creation?.operation.id ?? 'the creation operation'} to dependencyIds`,
+            nodeIds: [id],
+          },
+        ],
+      );
+  }
   const affected = ['move', 'delete'].includes(operation.type)
     ? childrenOf(session.candidate, targets)
     : new Set(targets);

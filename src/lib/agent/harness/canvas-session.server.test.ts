@@ -73,7 +73,12 @@ function input(document: DesignDocument, ttlMs?: number): CanvasSessionCreateInp
 
 function createChange(id: string, value: DesignNode, dependencyIds: string[] = []) {
   return {
-    operation: { id, type: 'create' as const, actor: 'agent' as const, node: value },
+    operation: {
+      id,
+      type: 'create' as const,
+      actor: 'agent' as const,
+      node: { ...value, provenance: { actor: 'agent' as const, operationId: id } },
+    },
     dependencyIds,
     evidenceNodeIds: ['group'],
     summary: `Created ${value.name}`,
@@ -175,6 +180,39 @@ describe('CanvasSessionService', () => {
     expect(state.nodes.items.find((item) => item.id === 'candidate-stack')?.childIds).toEqual([
       'candidate-button',
     ]);
+    await expect(
+      service.dispatch(session.id, 'candidate.apply_changes', {
+        changes: [
+          {
+            operation: {
+              id: 'style-button-without-dependency',
+              type: 'style',
+              actor: 'agent',
+              targetIds: ['candidate-button'],
+              patch: { radius: 8 },
+            },
+            evidenceNodeIds: ['group'],
+            summary: 'Rounded the generated button.',
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'missing-dependency' });
+    await service.dispatch(session.id, 'candidate.apply_changes', {
+      changes: [
+        {
+          operation: {
+            id: 'style-button',
+            type: 'style',
+            actor: 'agent',
+            targetIds: ['candidate-button'],
+            patch: { radius: 8 },
+          },
+          dependencyIds: ['create-button'],
+          evidenceNodeIds: ['group'],
+          summary: 'Rounded the generated button.',
+        },
+      ],
+    });
     await service.dispose();
   });
 

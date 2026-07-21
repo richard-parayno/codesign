@@ -76,7 +76,7 @@
 
   function stateLabel(stop: SliderStop) {
     if (stop.fidelity === 'base') return 'Live canvas';
-    if (stop.state === 'current') return 'Applied';
+    if (stop.state === 'current') return 'Generate';
     if (stop.state === 'saved') return 'Previously generated';
     if (stop.state === 'generate') return 'Not generated';
     if (stop.state === 'candidate') return 'Candidate';

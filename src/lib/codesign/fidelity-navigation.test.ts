@@ -15,6 +15,10 @@ describe('fidelity slider navigation', () => {
     expect(fidelityStageAction('component', 'generate')).toBe('confirm-generation');
   });
 
+  it('does not mistake raw primitives for an already-executed AI Draft', () => {
+    expect(fidelityStageAction('wireframe', 'current')).toBe('confirm-generation');
+  });
+
   it('regenerates a historical AI stage from the live canvas instead of restoring its revision', () => {
     expect(fidelityStageAction('wireframe', 'saved')).toBe('confirm-generation');
     expect(fidelityStageAction('component', 'versions')).toBe('confirm-generation');

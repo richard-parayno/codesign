@@ -17,7 +17,7 @@ export type FidelityStageAction = 'stay-live' | 'inspect-candidate' | 'confirm-g
  * activated from this control because they contain whole-canvas revision snapshots.
  */
 export function fidelityStageAction(stage: CodesignStage, state?: string): FidelityStageAction {
-  if (stage === 'base' || state === 'current' || state === 'unavailable') return 'stay-live';
+  if (stage === 'base' || state === 'unavailable') return 'stay-live';
   if (state === 'candidate') return 'inspect-candidate';
   return 'confirm-generation';
 }

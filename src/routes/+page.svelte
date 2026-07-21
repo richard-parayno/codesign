@@ -79,6 +79,7 @@
     SIDEBAR_LAYOUT,
     type SidebarSide,
   } from '$lib/editor/sidebar-layout';
+  import { latestDocumentEditTimestamp, relativeEditLabel } from '$lib/editor/edit-status';
   import { logAction } from '$lib/debug/action-log';
   import {
     deriveCodesignGenerationTarget,
@@ -172,6 +173,8 @@
   let frameOrientation: FrameOrientation = 'landscape';
   let frameSize = { width: 1440, height: 1024 };
   let commandLabel = 'Ctrl';
+  let statusClock = Date.now();
+  let persistenceReady = false;
   let leftSidebarWidth: number = SIDEBAR_LAYOUT.left.defaultWidth;
   let rightSidebarWidth: number = SIDEBAR_LAYOUT.right.defaultWidth;
   let sidebarResize: {
@@ -244,6 +247,18 @@
   $: activeProjectId = $documentStore.activeProjectId;
   $: storageWarning = $documentStore.warning;
   $: activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0];
+  $: lastEditedAt = latestDocumentEditTimestamp(document);
+  $: lastEditedLabel = lastEditedAt ? `Edited ${relativeEditLabel(lastEditedAt, statusClock)}` : '';
+  $: saveStatusLabel = storageWarning ? 'Save issue' : 'Saved locally';
+  $: documentStatusTitle = lastEditedAt
+    ? `Last edited ${new Date(lastEditedAt).toLocaleString()}. ${
+        storageWarning
+          ? 'The latest changes could not be saved locally.'
+          : 'All changes are saved in this browser.'
+      }`
+    : storageWarning
+      ? 'This project could not be saved locally.'
+      : 'This project is saved in this browser.';
   $: currentScreen =
     document.screens.find((screen) => screen.id === document.activeScreenId) ?? document.screens[0];
   $: visibleNodes = currentScreen ? orderedScreenNodes(document, currentScreen.id) : [];
@@ -456,6 +471,7 @@
 
   onMount(() => {
     documentStore.restore();
+    persistenceReady = true;
     commandLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? 'Cmd' : 'Ctrl';
     try {
       const savedBackground = localStorage.getItem(CANVAS_BACKGROUND_KEY);
@@ -647,12 +663,16 @@
       leftSidebarWidth = widths.left;
       rightSidebarWidth = widths.right;
     };
+    const statusClockTimer = window.setInterval(() => {
+      statusClock = Date.now();
+    }, 30_000);
     window.addEventListener('keydown', keydown);
     window.addEventListener('keyup', keyup);
     window.addEventListener('pointerdown', dismissContextMenu);
     window.addEventListener('resize', fitSidebarsToViewport);
     return () => {
       if (viewportLogTimer) clearTimeout(viewportLogTimer);
+      window.clearInterval(statusClockTimer);
       closeCodesignTelemetry();
       window.removeEventListener('keydown', keydown);
       window.removeEventListener('keyup', keyup);
@@ -3302,9 +3322,22 @@
 >
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark">C</span><strong>Codesign</strong><span class="document-name"
+      <span class="brand-mark">C</span><strong>Codesign</strong><span
+        class="document-name"
+        title={activeProject?.name ?? 'Untitled design'}
         >{activeProject?.name ?? 'Untitled design'}</span
       >
+      {#if persistenceReady}
+        <span
+          class="document-status"
+          class:save-issue={Boolean(storageWarning)}
+          title={documentStatusTitle}
+        >
+          {#if lastEditedLabel}<span>{lastEditedLabel}</span><i aria-hidden="true">·</i>{/if}<span
+            >{saveStatusLabel}</span
+          >
+        </span>
+      {/if}
     </div>
     <div class="mode-switch" aria-label="Editor mode">
       <button class:active={editorMode === 'edit'} onclick={() => setEditorMode('edit')}
@@ -5079,8 +5112,9 @@
     align-items: center;
   }
   .brand {
-    width: 310px;
+    width: min(410px, 36vw);
     gap: 9px;
+    min-width: 0;
   }
   .brand-mark {
     display: grid;
@@ -5093,9 +5127,30 @@
     font-weight: 800;
   }
   .document-name {
+    min-width: 0;
+    max-width: 160px;
     padding-left: 10px;
     border-left: 1px solid #d7dbe0;
     color: #737984;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .document-status {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 5px;
+    color: #8a919b;
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  .document-status i {
+    color: #b2b7bf;
+    font-style: normal;
+  }
+  .document-status.save-issue {
+    color: #a04b3a;
   }
   .topbar button {
     border: 1px solid transparent;

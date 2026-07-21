@@ -1,10 +1,12 @@
 import { get } from 'svelte/store';
-import { describe, expect, it } from 'vitest';
+import { decompressFromUTF16 } from 'lz-string';
+import { describe, expect, it, vi } from 'vitest';
 import { setNodePinned } from './codesign';
 import { applyOperation } from './operations';
 import type { LegacyDesignDocumentV1 } from './types';
 import {
   createDocumentStore,
+  COMPRESSED_PROJECT_PREFIX,
   LEGACY_DOCUMENT_KEY,
   LEGACY_PROJECT_STORAGE_KEY,
   PROJECT_STORAGE_KEY,
@@ -26,6 +28,14 @@ class MemoryStorage implements ProjectStorage {
   removeItem(key: string) {
     this.values.delete(key);
   }
+}
+
+function storedEnvelope(storage: MemoryStorage) {
+  const raw = storage.getItem(PROJECT_STORAGE_KEY)!;
+  const json = raw.startsWith(COMPRESSED_PROJECT_PREFIX)
+    ? decompressFromUTF16(raw.slice(COMPRESSED_PROJECT_PREFIX.length))
+    : raw;
+  return JSON.parse(json);
 }
 
 function createRectangle(id: string): Extract<DesignOperation, { type: 'create' }> {
@@ -74,11 +84,31 @@ describe('project document store', () => {
     expect(get(store).present.revision).toBe(7);
     expect(get(store).present.legacyArchive?.sourceKey).toBe(LEGACY_DOCUMENT_KEY);
     expect(storage.getItem(LEGACY_DOCUMENT_KEY)).not.toBeNull();
-    expect(JSON.parse(storage.getItem(PROJECT_STORAGE_KEY)!)).toMatchObject({
+    expect(storedEnvelope(storage)).toMatchObject({
       version: 2,
       activeProjectId: 'project-default',
       projects: [{ id: 'project-default', name: 'Untitled design', document: { version: 2 } }],
     });
+  });
+
+  it('compresses the multi-project envelope while preserving reload behavior', () => {
+    const storage = new MemoryStorage();
+    const store = createDocumentStore(storage);
+    store.restore();
+    for (let index = 0; index < 20; index += 1)
+      store.apply(createRectangle(`repetitive-rectangle-${index}`));
+
+    const persisted = storage.getItem(PROJECT_STORAGE_KEY)!;
+    const envelope = storedEnvelope(storage);
+    const uncompressed = JSON.stringify(envelope);
+
+    expect(persisted.startsWith(COMPRESSED_PROJECT_PREFIX)).toBe(true);
+    expect(persisted.length).toBeLessThan(uncompressed.length / 2);
+
+    const reloaded = createDocumentStore(storage);
+    reloaded.restore();
+    expect(Object.keys(get(reloaded).present.nodes)).toHaveLength(20);
+    expect(get(reloaded).present.revision).toBe(20);
   });
 
   it('migrates every v1 project and preserves active project metadata', () => {
@@ -362,6 +392,7 @@ describe('project document store', () => {
   });
 
   it('continues in memory and warns when browser storage is unavailable', () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const unavailable: ProjectStorage = {
       getItem() {
         throw new Error('blocked');
@@ -380,5 +411,6 @@ describe('project document store', () => {
     expect(() => store.apply(createRectangle('in-memory'))).not.toThrow();
     expect(get(store).present.nodes['in-memory']).toBeDefined();
     expect(get(store).warning).toContain('could not save');
+    consoleError.mockRestore();
   });
 });

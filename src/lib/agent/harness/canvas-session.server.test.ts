@@ -548,6 +548,40 @@ describe('CanvasSessionService', () => {
     await service.dispose();
   });
 
+  it('renders descendants of an explicitly requested container after candidate mutations', async () => {
+    const service = new CanvasSessionService();
+    const session = await service.createSession(input(sourceDocument()));
+    const source = (await service.dispatch(session.id, 'scene.render', {
+      view: 'source',
+      nodeIds: ['group'],
+    })) as { sha256: string };
+
+    await service.dispatch(session.id, 'candidate.apply_changes', {
+      candidateRevisionId: session.candidateRevisionId,
+      changes: [
+        {
+          operation: {
+            type: 'create',
+            name: 'Visible candidate child',
+            kind: 'rectangle',
+            parentId: 'group',
+            bounds: { x: 70, y: 210, width: 120, height: 50 },
+            style: { fill: '#ff0000' },
+          },
+          evidenceNodeIds: ['group'],
+          summary: 'Added a visible child inside the selected group.',
+        },
+      ],
+    });
+    const candidate = (await service.dispatch(session.id, 'scene.render', {
+      view: 'candidate',
+      nodeIds: ['group'],
+    })) as { sha256: string };
+
+    expect(candidate.sha256).not.toBe(source.sha256);
+    await service.dispose();
+  });
+
   it('cleans expired sessions and their artifacts', async () => {
     let now = 1_000;
     const service = new CanvasSessionService(undefined, () => now);

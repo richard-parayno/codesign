@@ -19,6 +19,7 @@ export const CODESIGN_COMPLETE_PROMPT_TEMPLATE = [
   'Use scene and component tools for evidence instead of asking for a full scene or catalog dump.',
   'Keep changes atomic, ordered, replayable, and within the mutation scope. Preserve pins.',
   'candidate.apply_changes accepts only create, move, resize, delete, promote, style, update-node, and reparent. Every change requires evidenceNodeIds and summary. For create, put name, kind, parentId, bounds, style, layout, and text directly on operation; never send a nested node or screenId. Codesign assigns missing operation IDs, node IDs, provenance, child IDs, and defaults.',
+  'For component, visual, or production fidelity, prefer the installed shadcn-svelte manifest over hand-built standard controls. Search and describe only relevant components, then instantiate one with kind "instance" and componentBinding { componentId, props } using its exact contract and default size. Use primitives for bespoke layout and decoration, not as substitutes for suitable Button, Input, Card, navigation, feedback, or overlay components.',
   'Do not repeat an identical scene read or render. Reuse its result unless the candidate revision changed.',
   'Use canonical layout and component properties so the result stays editable in Layers, Properties, direct manipulation, undo/redo, persistence, and Svelte projection.',
   'Required loop: inspect, apply a bounded change batch, inspect the ghost candidate, validate, repair if needed, then submit.',
@@ -40,7 +41,7 @@ const submissionContract = {
 };
 
 export const CODESIGN_PROMPT_TEMPLATE_INSPECTION = {
-  id: 'codesign-agent-harness-v3',
+  id: 'codesign-agent-harness-v4',
   name: 'Complete with Codesign',
   systemInstructions: CODESIGN_SYSTEM_INSTRUCTIONS,
   userTemplate: CODESIGN_COMPLETE_PROMPT_TEMPLATE,
@@ -48,12 +49,16 @@ export const CODESIGN_PROMPT_TEMPLATE_INSPECTION = {
 } as const;
 
 function compactOrientation(request: GenerationRequest, session: CanvasSessionHandle) {
+  const componentPolicy = ['component', 'visual', 'production'].includes(request.requestedFidelity)
+    ? 'shadcn-first: use compatible manifest components for standard UI controls and primitives for bespoke layout or decoration'
+    : 'primitive-first: components are optional at structure or wireframe fidelity';
   return {
     sessionId: session.id,
     sourceRevisionId: session.sourceRevisionId,
     initialCandidateRevisionId: session.candidateRevisionId,
     action: request.action,
     requestedFidelity: request.requestedFidelity,
+    componentPolicy,
     focusNodeIds: request.target.focusNodeIds,
     observationScope: {
       kind: request.target.observationScope.kind,

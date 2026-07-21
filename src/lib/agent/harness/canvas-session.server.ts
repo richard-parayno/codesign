@@ -887,16 +887,17 @@ export class CanvasSessionService implements CanvasSessionServiceContract {
   private async render(session: StoredSession, input: z.infer<typeof renderSchema>) {
     const document = input.view === 'source' ? session.source : session.candidate;
     const observed = new Set(session.target.observationScope.nodeIds);
-    const nodeIds = input.nodeIds?.length
+    const requestedNodeIds = input.nodeIds?.length
       ? input.nodeIds
       : input.view === 'source'
         ? session.target.observationScope.nodeIds
         : [...session.target.observationScope.nodeIds, ...session.createdNodeIds];
-    if (nodeIds.some((id) => !observed.has(id) && !session.createdNodeIds.has(id)))
+    if (requestedNodeIds.some((id) => !observed.has(id) && !session.createdNodeIds.has(id)))
       throw new CanvasSessionError(
         'observation-scope',
         'Render includes a node outside the session scene',
       );
+    const nodeIds = [...childrenOf(document, requestedNodeIds)];
     const render = await this.renders.render({
       sessionId: session.id,
       document,

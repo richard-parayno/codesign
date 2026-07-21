@@ -52,6 +52,7 @@ export function searchComponents(input: ComponentSearchInput) {
   });
   const items = matches.slice(cursor, cursor + limit).map((component) => ({
     id: component.id,
+    source: 'shadcn-svelte' as const,
     displayName: component.displayName,
     category: component.category,
     description: component.description,
@@ -82,6 +83,7 @@ export function describeComponents(ids: string[]) {
     const { root, part } = resolved;
     return {
       id,
+      source: 'shadcn-svelte' as const,
       rootId: root.id,
       displayName: part?.displayName ?? root.displayName,
       description: root.description,

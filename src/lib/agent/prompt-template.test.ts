@@ -63,6 +63,7 @@ describe('Codesign agent prompt template', () => {
       CODESIGN_COMPLETE_PROMPT_TEMPLATE,
     );
     expect(CODESIGN_PROMPT_TEMPLATE_INSPECTION.outputSchema).toContain('candidate.submit');
+    expect(CODESIGN_COMPLETE_PROMPT_TEMPLATE).toContain('shadcn-svelte');
     expect(CODESIGN_SYSTEM_INSTRUCTIONS).not.toContain('Never use tools');
   });
 
@@ -79,6 +80,7 @@ describe('Codesign agent prompt template', () => {
     expect(rendered).not.toContain(CODESIGN_PROMPT_PAYLOAD_TOKEN);
     expect(rendered).toContain('"sessionId":"canvas-test"');
     expect(rendered).toContain('"nodeCount":1');
+    expect(rendered).toContain('"componentPolicy":"primitive-first:');
     expect(rendered).not.toContain('"nodes"');
     expect(rendered).not.toContain('componentCatalog');
     expect(rendered.length).toBeLessThan(3_000);

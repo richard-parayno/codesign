@@ -68,7 +68,12 @@
     type SmartGuide,
     type SpacingGuide,
   } from '$lib/editor/geometry';
-  import { groupedCanvasContextTarget, groupedCanvasSelectionTarget } from '$lib/editor/selection';
+  import {
+    groupedCanvasContextTarget,
+    groupedCanvasSelectionTarget,
+    isAdditiveSelectionModifier,
+    selectionWithTarget,
+  } from '$lib/editor/selection';
   import { logAction } from '$lib/debug/action-log';
   import { deriveGenerationTarget } from '$lib/agent/generation-target';
   import { applyOperation, canvasSnapshot } from '$lib/model/operations';
@@ -2285,31 +2290,31 @@
     }
     const p = point(event);
     const preserveDirectSelection = selection.length === 1 && selection[0] === node.id;
-    const deepSelection = event.metaKey || event.ctrlKey || preserveDirectSelection;
+    const commandSelection = event.metaKey || event.ctrlKey;
+    const additiveSelection = isAdditiveSelectionModifier(event);
+    const deepSelection = commandSelection || preserveDirectSelection;
     const selectionTarget = groupedCanvasSelectionTarget(document, node.id, deepSelection) ?? node;
     if (
       selectionTarget.id === node.id &&
       node.kind === 'frame' &&
-      pointIsInFrameInterior(node, p)
+      pointIsInFrameInterior(node, p) &&
+      !commandSelection
     ) {
       beginFrameMarquee(event, node);
       return;
     }
-    selection = event.shiftKey
-      ? selection.includes(selectionTarget.id)
-        ? selection.filter((id) => id !== selectionTarget.id)
-        : [...selection, selectionTarget.id]
-      : [selectionTarget.id];
-    if (!selection.length) return;
+    const targetWasSelected = selection.includes(selectionTarget.id);
+    selection = selectionWithTarget(selection, selectionTarget.id, additiveSelection);
     logAction('selection.changed', {
       source: 'canvas',
       nodeIds: selection,
-      additive: event.shiftKey,
+      additive: additiveSelection,
       hitNodeId: node.id,
       resolvedNodeId: selectionTarget.id,
-      deepSelection: event.metaKey || event.ctrlKey,
+      deepSelection: commandSelection,
       preservedDirectSelection: preserveDirectSelection,
     });
+    if (!selection.length || (additiveSelection && targetWasSelected)) return;
     const previewIds = descendantNodeIds(document, selectionRootIds());
     const originalBounds = Object.fromEntries(
       previewIds.map((id) => [id, structuredClone(document.nodes[id].bounds)]),
@@ -3461,13 +3466,12 @@
                 class="layer-select"
                 aria-pressed={selection.includes(row.node.id)}
                 onclick={(event) => {
-                  selection = event.shiftKey
-                    ? [...new Set([...selection, row.node.id])]
-                    : [row.node.id];
+                  const additive = isAdditiveSelectionModifier(event);
+                  selection = selectionWithTarget(selection, row.node.id, additive);
                   logAction('selection.changed', {
                     source: 'layers',
                     nodeIds: selection,
-                    additive: event.shiftKey,
+                    additive,
                   });
                 }}
                 ondblclick={(event) => startLayerRename(event, row.node)}
@@ -3831,7 +3835,13 @@
                 style={`font-size:${11 / zoom}px;stroke-width:${3 / zoom}px`}
                 onpointerdown={(event) => {
                   event.stopPropagation();
-                  selection = [node.id];
+                  const additive = isAdditiveSelectionModifier(event);
+                  selection = selectionWithTarget(selection, node.id, additive);
+                  logAction('selection.changed', {
+                    source: 'canvas-name',
+                    nodeIds: selection,
+                    additive,
+                  });
                 }}
                 ondblclick={(event) => startLayerRename(event, node, 'canvas')}
                 onkeydown={(event) => {
@@ -4228,8 +4238,8 @@
                   <dd><kbd>{commandLabel}+D</kbd></dd>
                 </div>
                 <div>
-                  <dt>Select child inside group</dt>
-                  <dd><kbd>{commandLabel}+Click</kbd></dd>
+                  <dt>Add or remove from selection</dt>
+                  <dd><kbd>{commandLabel}+Click</kbd> or <kbd>Shift+Click</kbd></dd>
                 </div>
                 <div>
                   <dt>Enter group and select child</dt>

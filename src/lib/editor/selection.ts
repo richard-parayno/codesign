@@ -1,6 +1,19 @@
 import type { DesignDocument, DesignNode } from '$lib/model/types';
 
 type SelectionDocument = Pick<DesignDocument, 'nodes'>;
+type SelectionModifier = Pick<MouseEvent, 'ctrlKey' | 'metaKey' | 'shiftKey'>;
+
+/** Ctrl/Cmd-click follows desktop-editor conventions; Shift-click remains supported too. */
+export function isAdditiveSelectionModifier(event: SelectionModifier) {
+  return event.ctrlKey || event.metaKey || event.shiftKey;
+}
+
+export function selectionWithTarget(selectedIds: string[], targetId: string, additive: boolean) {
+  if (!additive) return [targetId];
+  return selectedIds.includes(targetId)
+    ? selectedIds.filter((id) => id !== targetId)
+    : [...selectedIds, targetId];
+}
 
 /**
  * Canvas selection treats groups as cohesive objects. A modifier-assisted deep selection keeps

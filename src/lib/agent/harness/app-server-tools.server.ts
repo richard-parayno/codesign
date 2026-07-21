@@ -250,8 +250,10 @@ const descriptions: Record<CanvasToolName, string> = {
   'scene.overview': 'Read a compact overview of the observable canvas hierarchy and edit scope.',
   'scene.get_nodes': 'Read exact scene nodes and optionally their descendants or siblings.',
   'scene.render': 'Render the immutable source or copy-on-write candidate scene for inspection.',
-  'components.search': 'Search the canonical Codesign component manifest.',
-  'components.describe': 'Read exact contracts for selected component manifest entries.',
+  'components.search':
+    'Search the installed shadcn-svelte component manifest. At component, visual, or production fidelity, prefer compatible results over hand-built standard controls.',
+  'components.describe':
+    'Read exact shadcn-svelte component contracts. Instantiate a result with create kind instance and componentBinding using the exact component ID and props.',
   'candidate.get_state': 'Read a compact view of candidate state and accumulated changes.',
   'candidate.apply_changes':
     'Apply 1-24 atomic create, move, resize, delete, promote, style, update-node, or reparent operations. Each change requires evidenceNodeIds and summary. For create, put name, kind, parentId, bounds, style, layout, and text directly on the operation. Internal operation ID, node ID, screen ID, provenance, child IDs, and omitted defaults are assigned by Codesign.',

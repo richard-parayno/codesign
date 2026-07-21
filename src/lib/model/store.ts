@@ -1,4 +1,6 @@
 import { get, writable } from 'svelte/store';
+import { compressToUTF16, decompressFromUTF16 } from 'lz-string';
+import { logAction } from '$lib/debug/action-log';
 import {
   isDesignDocumentV2,
   isLegacyDesignDocumentV1,
@@ -22,8 +24,11 @@ import {
 export const LEGACY_DOCUMENT_KEY = 'malleable.document.v1';
 export const LEGACY_PROJECT_STORAGE_KEY = 'malleable.projects.v1';
 export const PROJECT_STORAGE_KEY = 'codesign.projects.v2';
+export const COMPRESSED_PROJECT_PREFIX = 'codesign-lz-v1:';
 const DEFAULT_PROJECT_ID = 'project-default';
 const DEFAULT_PROJECT_NAME = 'Untitled design';
+const PERSISTENCE_WARNING =
+  'Codesign could not save projects. Changes remain available in this session.';
 
 export type { ProjectSummary } from './migration';
 export type ProjectStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
@@ -57,18 +62,25 @@ function readJson(storage: ProjectStorage, key: string) {
   const raw = storage.getItem(key);
   if (!raw) return { present: false as const, value: null, validJson: true as const };
   try {
-    return { present: true as const, value: JSON.parse(raw) as unknown, validJson: true as const };
+    const serialized = raw.startsWith(COMPRESSED_PROJECT_PREFIX)
+      ? decompressFromUTF16(raw.slice(COMPRESSED_PROJECT_PREFIX.length))
+      : raw;
+    if (!serialized) throw new Error('Stored project payload could not be decompressed');
+    return {
+      present: true as const,
+      value: JSON.parse(serialized) as unknown,
+      validJson: true as const,
+    };
   } catch {
     return { present: true as const, value: null, validJson: false as const };
   }
 }
 
-function saveEnvelope(
-  storage: ProjectStorage,
+function projectEnvelope(
   state: Pick<History, 'projects' | 'activeProjectId'>,
   documents: Map<string, DesignDocument>,
-) {
-  const envelope: ProjectEnvelopeV2 = {
+): ProjectEnvelopeV2 {
+  return {
     version: 2,
     projects: state.projects.map((project) => ({
       ...project,
@@ -76,7 +88,26 @@ function saveEnvelope(
     })),
     activeProjectId: state.activeProjectId,
   };
-  storage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(envelope));
+}
+
+function serializeEnvelope(envelope: ProjectEnvelopeV2) {
+  const json = JSON.stringify(envelope);
+  const stored = `${COMPRESSED_PROJECT_PREFIX}${compressToUTF16(json)}`;
+  return {
+    stored,
+    jsonCharacters: json.length,
+    storedCharacters: stored.length,
+  };
+}
+
+function saveEnvelope(
+  storage: ProjectStorage,
+  state: Pick<History, 'projects' | 'activeProjectId'>,
+  documents: Map<string, DesignDocument>,
+) {
+  const serialized = serializeEnvelope(projectEnvelope(state, documents));
+  storage.setItem(PROJECT_STORAGE_KEY, serialized.stored);
+  return serialized;
 }
 
 function makeProjectId() {
@@ -162,12 +193,30 @@ export function createDocumentStore(injectedStorage?: ProjectStorage) {
   function persistState(state: History) {
     const target = storage();
     if (!target) return null;
+    let jsonCharacters = 0;
+    let storedCharacters = 0;
     try {
       documents.set(state.activeProjectId, state.present);
-      saveEnvelope(target, state, documents);
+      const serialized = serializeEnvelope(projectEnvelope(state, documents));
+      jsonCharacters = serialized.jsonCharacters;
+      storedCharacters = serialized.storedCharacters;
+      target.setItem(PROJECT_STORAGE_KEY, serialized.stored);
       return null;
-    } catch {
-      return 'Codesign could not save projects. Changes remain available in this session.';
+    } catch (cause) {
+      const error = cause instanceof Error ? cause : new Error(String(cause));
+      const details = {
+        errorName: error.name,
+        errorMessage: error.message,
+        projectCount: state.projects.length,
+        revisionCount: Object.keys(state.present.revisions).length,
+        jsonCharacters,
+        storedCharacters,
+      };
+      console.error('[codesign:storage] Project persistence failed', details, cause);
+      logAction('project.persistence-failed', details);
+      return error.name === 'QuotaExceededError'
+        ? 'Browser project storage is full. Changes remain available in this session.'
+        : PERSISTENCE_WARNING;
     }
   }
 
@@ -175,7 +224,11 @@ export function createDocumentStore(injectedStorage?: ProjectStorage) {
     store.update((state) => {
       const next = change(state);
       const warning = persistState(next);
-      return warning ? { ...next, warning } : next;
+      if (warning) return { ...next, warning };
+      return next.warning === PERSISTENCE_WARNING ||
+        next.warning?.startsWith('Browser project storage is full')
+        ? { ...next, warning: null }
+        : next;
     });
   }
 

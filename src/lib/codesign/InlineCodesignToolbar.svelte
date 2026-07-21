@@ -114,6 +114,12 @@
   function traceFor(item: AtomicChangeView): DerivationTrace {
     return item.change.trace;
   }
+
+  function fidelityModeLabel(fidelity: Fidelity) {
+    if (fidelity === 'structure') return 'layout only';
+    if (fidelity === 'wireframe') return 'primitives';
+    return 'shadcn-first';
+  }
 </script>
 
 <section class="inline-codesign" aria-label="Codesign controls">
@@ -274,7 +280,7 @@
     {/if}
 
     <details class="fidelity-menu">
-      <summary>Fidelity · {requestedFidelity}</summary>
+      <summary>Fidelity · {requestedFidelity} · {fidelityModeLabel(requestedFidelity)}</summary>
       <div class="fidelity-popover">
         <FidelityStops
           label="Selection fidelity"
@@ -283,7 +289,13 @@
           onStageGeneration={onStageFidelity}
           onInspectCandidate={onInspectFidelityCandidate}
         />
-        <p>Saved stops navigate immediately. New forward stops stage a candidate.</p>
+        <p>
+          {requestedFidelity === 'wireframe'
+            ? 'Wireframe uses editor primitives. Choose Component or higher for shadcn-first generation.'
+            : requestedFidelity === 'structure'
+              ? 'Structure focuses on hierarchy and layout. Choose Component or higher for shadcn-first generation.'
+              : 'Component and higher fidelities prefer compatible installed shadcn-svelte components.'}
+        </p>
       </div>
     </details>
 

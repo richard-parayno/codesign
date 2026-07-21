@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { blankDocument, defaultStyle, type DesignNode, type NodeKind } from '$lib/model/types';
-import { groupedCanvasContextTarget, groupedCanvasSelectionTarget } from './selection';
+import {
+  groupedCanvasContextTarget,
+  groupedCanvasSelectionTarget,
+  isAdditiveSelectionModifier,
+  selectionWithTarget,
+} from './selection';
 
 function node(id: string, kind: NodeKind, parentId?: string): DesignNode {
   return {
@@ -48,6 +53,22 @@ describe('grouped canvas selection', () => {
     document.nodes.child = node('child', 'rectangle', 'frame');
 
     expect(groupedCanvasSelectionTarget(document, 'child')?.id).toBe('child');
+  });
+});
+
+describe('multi-selection modifiers', () => {
+  it.each([
+    { ctrlKey: true, metaKey: false, shiftKey: false },
+    { ctrlKey: false, metaKey: true, shiftKey: false },
+    { ctrlKey: false, metaKey: false, shiftKey: true },
+  ])('treats Ctrl, Cmd, and Shift as additive selection', (modifier) => {
+    expect(isAdditiveSelectionModifier(modifier)).toBe(true);
+  });
+
+  it('adds and removes clicked targets without disturbing other selected layers', () => {
+    expect(selectionWithTarget(['one'], 'two', true)).toEqual(['one', 'two']);
+    expect(selectionWithTarget(['one', 'two'], 'two', true)).toEqual(['one']);
+    expect(selectionWithTarget(['one', 'two'], 'three', false)).toEqual(['three']);
   });
 });
 

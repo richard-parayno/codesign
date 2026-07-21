@@ -1,76 +1,71 @@
-# Malleable
+# Codesign
 
-Malleable is a local-first interaction prototype for moving from ambiguous greybox marks to working software. The designer draws, selects, connects, promotes, and generalizes; the agent interprets those direct manipulations as typed proposals instead of silently rewriting the canvas or acting as a dominant chat interface.
+Codesign is a local-first visual-autocomplete prototype. You draw and manipulate a design directly, select the exact layers that may change, choose how much surrounding context the generator may reference, and explicitly request a structured candidate. Selection alone never generates or mutates the canvas.
 
-The default experience is genuinely blank. A deterministic demo checkpoint is available as a presentation fallback, and the full critical path works without a network connection, API key, usage credits, or Codex login.
+Candidates are native scene-graph changes rather than screenshots. They remain ghosted above the source until you accept all changes or a dependency-safe subset. Rejected candidates, rerolls, source comparisons, and decisions remain in process history.
 
 ## Setup on NixOS
 
-Install [devenv](https://devenv.sh/), then run:
-
 ```sh
-devenv shell -- node --version
-devenv shell -- pnpm --version
-devenv shell -- codex --version
 devenv shell -- pnpm install
 devenv shell -- pnpm dev --host 0.0.0.0
 ```
 
-Open `http://localhost:5173`. `devenv.nix` pins Node 22, pnpm, git, and a Codex package. The project also pins `@openai/codex` 0.144.1 and puts its executable first on the development-shell path so the generated App Server bindings and runtime remain aligned.
+Open `http://localhost:5173`. `devenv.nix` pins Node 22, pnpm, git, and the Codex package used by the checked-in App Server bindings.
 
-## Agent backends
+## Codesign AI
 
-Copy `.env.example` to `.env` only when you want to change the default. Safe configuration:
+Codex App Server is the only generation path. Codesign never fabricates a candidate when the runtime is unavailable or the user is signed out.
 
 ```dotenv
-MALLEABLE_AGENT_BACKEND=local
-MALLEABLE_CODEX_COMMAND=codex
-MALLEABLE_CODEX_MODEL=
+CODESIGN_CODEX_MODEL=gpt-5.6-luna
+CODESIGN_CODEX_EFFORT=high
 ```
 
-- `local` is the default deterministic adapter. It uses selection, geometry, roles, and registry contracts.
-- `codex` uses a long-lived `codex app-server --stdio` child process on the SvelteKit server. It reuses authentication owned by the local Codex CLI and does not use `OPENAI_API_KEY` or Platform billing.
+Codesign uses the project-pinned Codex App Server and the user's existing ChatGPT/Codex login. If needed, use the visible **Sign in to Codex** action; App Server owns the official browser login, token persistence, and refresh. `CODESIGN_CODEX_COMMAND` remains an advanced explicit runtime override.
 
-Authenticate manually if needed:
+Codesign never reads or forwards `~/.codex/auth.json`. App Server runs read-only with approvals disabled. Each generation gets an isolated ephemeral thread with `gpt-5.6-luna`, high reasoning effort, and no reasoning summary. Codesign supplies a clean raster of the observation root together with a versioned structured scene manifest. Browser image bytes are validated, hashed, written to a process-owned temporary file, and removed after the turn. Output is schema-constrained and semantically revalidated before it can be staged. Provider failures are shown directly and leave the source design unchanged.
 
-```sh
-devenv shell -- codex login
-devenv shell -- codex login status
-```
+## Core flow
 
-Malleable never reads or forwards `~/.codex/auth.json`. App Server runs read-only, without network access, with approvals disabled. Only the selected design-document slice, recent intent, registry contract, and agency envelope are sent. Responses are schema-constrained, parsed defensively, checked against stable IDs and the registry, and staged as proposals. Sign-out, timeout, crash, invalid JSON, or an invalid operation activates the local fallback and a visible diagnostic.
+1. Draw a frame or click **Load demo checkpoint**.
+2. Select the frame or exact layers Codesign may change.
+3. Choose **Scope** beside the selection, then pick **Selection**, **Parent**, **Containing frame**, or **Screen**. The lighter dashed boundary is observational only; the solid boundary marks what may change.
+4. Choose **Complete with Codesign** or press Ctrl/⌘+Enter. Nothing on the source canvas changes while generation runs; use **Cancel** to stop a request.
+5. Switch candidates, highlight evidence, inspect each derivation trace, compare with the source, and select atomic changes.
+6. **Accept all**, accept a dependency-safe subset, **Reject**, or pin a proposed change and **Reroll**.
+7. Open **Process history** to revisit rejected candidates, source comparisons, decisions, and replayable changes.
 
-## Architecture
-
-- `src/lib/model/types.ts` defines the source-of-truth document, nodes, operations, proposal, and Zod schemas.
-- `src/lib/model/operations.ts` validates and deterministically reduces create, move, resize, delete, repeat, semantic bind, transition, promotion, style, generalize, duplicate-screen, and branch operations.
-- `src/lib/model/store.ts` adds per-project snapshot undo/redo and versioned local project persistence.
-- `src/lib/design-system/registry.ts` is the component/token allowlist shared by promotion validation and projection.
-- `src/lib/model/codegen.ts` produces the read-only Svelte projection from the same document used by the canvas.
-- `src/lib/agent/local.ts` provides offline interpretation.
-- `src/lib/agent/codex-client.server.ts` implements JSONL JSON-RPC lifecycle, timeouts, cancellation, denial of approval requests, and streamed output for Codex App Server.
-- `.generated/codex-app-server/` contains bindings generated directly by the pinned CLI.
-- `src/routes/+page.svelte` is the SVG direct-manipulation editor and all inspectable UI surfaces.
-
-The three agency envelopes are deliberately different: Protect always leaves agent operations staged for confirmation; Guide stages focused contextual proposals and is the default; Explore accepts only after creating and switching to an isolated branch.
+Only **Complete with Codesign** is exposed because it is the action implemented end to end. The shared request vocabulary also reserves Refine, Vary, and Resolve; the UI does not present them as dead controls.
 
 ## Editor controls
 
-- Use the labeled **Project** picker in the left sidebar to switch local projects; **New project**, **Rename**, and **Delete** manage them
-- `V` Select, `F` Frame, `R` Rectangle, `T` Text, `C` Connect
-- Shift-click for multi-selection
-- Drag a selected object to move it; drag the lower-right handle to resize
-- Scroll or use a two-finger touchpad gesture to pan in either axis
-- Pinch on a touchpad to zoom around the pointer; middle-drag remains available for mouse panning
-- Right-click an object for relevant element actions, or right-click empty canvas for canvas actions
-- Use **Canvas color** in the canvas toolbar to choose a solid workspace color; the preference persists locally
-- Arrow keys nudge by 1 px; Shift+arrow nudges by 10 px
-- Ctrl/⌘+Z undo; Ctrl/⌘+Shift+Z or Ctrl/⌘+Y redo
-- Delete/Backspace removes selected objects; Escape cancels a proposal or exits Preview
+- Use the labeled **Project** picker to switch local files; **New project**, **Rename**, and **Delete** manage them.
+- `V` Select, `F` Frame, `R` Rectangle, `T` Text.
+- Shift-click for multi-selection.
+- Drag selected objects to move them; drag the lower-right handle to resize.
+- Scroll or two-finger drag to pan. Pinch to zoom around the pointer. Middle-drag also pans.
+- Right-click an object or empty canvas for a relevant text-labelled context menu.
+- **Canvas color** changes the solid workspace background and persists locally.
+- **Settings** manages canvas appearance, viewport recovery, new-frame defaults, local project diagnostics, and the Codesign AI integration. Fidelity is controlled from the selected frame or element in the editor. Model and reasoning-effort choices persist in this browser and apply to new generations and rerolls.
+- Arrow keys nudge by 1 px; Shift+arrow nudges by 10 px.
+- Ctrl/⌘+Z undo; Ctrl/⌘+Shift+Z or Ctrl/⌘+Y redo.
+- Delete/Backspace removes selected objects; Escape exits Preview or dismisses contextual UI.
+
+## Architecture
+
+- `src/lib/model/types.ts` defines the v2 document, stable entities/representations, revisions, generation runs, candidates, atomic changes, and process events.
+- `src/lib/model/operations.ts` validates direct operations and transactional operation batches.
+- `src/lib/model/codesign.ts` stages, views, rejects, compares, accepts, rerolls, replays, pins, and resolves fidelity inheritance.
+- `src/lib/model/migration.ts` recoverably imports v1 documents while retaining the legacy source.
+- `src/lib/model/store.ts` provides per-project undo/redo and versioned v2 local persistence.
+- `src/lib/agent/codex-client.server.ts` provides the constrained App Server transport.
+- `src/lib/codesign/` contains the inline candidate, component-library, fidelity, and process-history surfaces.
+- `src/routes/+page.svelte` remains the direct-manipulation SVG canvas and page controller.
 
 ## Development action logs
 
-While `pnpm dev` is running, meaningful browser actions are forwarded to the SvelteKit terminal as one-line JSON records prefixed with `[malleable:action]`. The stream includes labeled control clicks, project creation lifecycle events, validated operations, proposal lifecycle events, screen navigation, canvas preferences, and debounced viewport changes. Debug logging is disabled in production and does not send the full design document.
+During `pnpm dev`, meaningful browser actions appear in the SvelteKit terminal as one-line JSON records prefixed with `[codesign:action]`. The stream includes labelled controls, project lifecycle events, direct operations, Co-design request/candidate/decision events, navigation, canvas preferences, and debounced viewport changes. Logging is disabled in production and never sends the full design document.
 
 ## Verification
 
@@ -81,10 +76,10 @@ devenv shell -- pnpm test
 devenv shell -- pnpm build
 ```
 
-Tests cover reducer invariants, project migration and persistence, registry rejection, branch isolation, deterministic Svelte compilation, and the App Server lifecycle through a fake JSON-RPC process. Tests never make a real Codex turn or consume credits.
+Fixture and fake-transport tests do not make real Codex turns or consume credits.
 
-## MVP limitations
+## Current limitations
 
-The editor uses bounded axis-aligned objects rather than arbitrary vectors; hierarchy is semantic rather than a complete auto-layout engine; multi-selection resize is intentionally omitted; the projection is deterministic export, not arbitrary bidirectional source editing; projects exist only in the current browser’s local storage; App Server keeps one ephemeral thread per development server and does not yet expose thread/branch management controls. This is a local hackathon prototype, not a hosted multi-user service.
+The canvas uses bounded axis-aligned objects; projects remain in browser local storage; and the Codex transport keeps an ephemeral thread per development server. Simple shadcn controls and validated Card, Alert, Avatar, Table, Tabs, Dialog, Sheet, Select, Dropdown Menu, and Navigation Menu compositions mount the real checked-in source. Context-heavy or headless entries without a validated default tree remain visible, editable manifest-backed fallbacks rather than mounting invalid standalone parts. Legacy v1 operations remain readable and migratable, but old intent hypotheses are archived rather than treated as evidence.
 
-See [docs/demo-script.md](docs/demo-script.md) for the timed demo path.
+See [docs/demo-script.md](docs/demo-script.md) for the demo path and [docs/new-interaction-plan.md](docs/new-interaction-plan.md) for the migration decisions.

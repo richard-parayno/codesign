@@ -1,19 +1,36 @@
 import { get, writable } from 'svelte/store';
-import { applyOperation } from './operations';
+import { compressToUTF16, decompressFromUTF16 } from 'lz-string';
+import { logAction } from '$lib/debug/action-log';
+import {
+  isDesignDocumentV2,
+  isLegacyDesignDocumentV1,
+  isLegacyProjectEnvelopeV1,
+  isProjectEnvelopeV2,
+  migrateDocumentV1,
+  migrateProjectEnvelopeV1,
+  recoverProjectEnvelopeV2,
+  type ProjectEnvelopeV2,
+  type ProjectSummary,
+} from './migration';
+import { appendProcessEvent, applyOperation, applyOperationBatch } from './operations';
 import {
   blankDocument,
-  nodeSchema,
-  operationSchema,
+  defaultStyle,
   type DesignDocument,
+  type DesignNode,
   type DesignOperation,
 } from './types';
 
 export const LEGACY_DOCUMENT_KEY = 'malleable.document.v1';
-export const PROJECT_STORAGE_KEY = 'malleable.projects.v1';
+export const LEGACY_PROJECT_STORAGE_KEY = 'malleable.projects.v1';
+export const PROJECT_STORAGE_KEY = 'codesign.projects.v2';
+export const COMPRESSED_PROJECT_PREFIX = 'codesign-lz-v1:';
 const DEFAULT_PROJECT_ID = 'project-default';
 const DEFAULT_PROJECT_NAME = 'Untitled design';
+const PERSISTENCE_WARNING =
+  'Codesign could not save projects. Changes remain available in this session.';
 
-export type ProjectSummary = { id: string; name: string };
+export type { ProjectSummary } from './migration';
 export type ProjectStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 type History = {
   past: DesignDocument[];
@@ -21,130 +38,66 @@ type History = {
   future: DesignDocument[];
   projects: ProjectSummary[];
   activeProjectId: string;
-};
-type ProjectEnvelope = {
-  version: 1;
-  activeProjectId: string;
-  projects: Array<ProjectSummary & { document: DesignDocument }>;
+  warning: string | null;
 };
 
-function isDesignDocument(value: unknown): value is DesignDocument {
-  if (!value || typeof value !== 'object') return false;
-  const document = value as Partial<DesignDocument>;
-  if (
-    document.version !== 1 ||
-    !Number.isInteger(document.revision) ||
-    document.revision! < 0 ||
-    !Array.isArray(document.screens) ||
-    !document.screens.length ||
-    !document.nodes ||
-    typeof document.nodes !== 'object' ||
-    !Array.isArray(document.transitions) ||
-    !Array.isArray(document.branches) ||
-    !document.branches.length ||
-    typeof document.activeBranchId !== 'string' ||
-    typeof document.activeScreenId !== 'string' ||
-    !Array.isArray(document.hypotheses) ||
-    !Array.isArray(document.operations)
-  )
-    return false;
+const defaultProject = (): ProjectSummary => ({
+  id: DEFAULT_PROJECT_ID,
+  name: DEFAULT_PROJECT_NAME,
+});
 
-  const screensValid = document.screens.every(
-    (screen) =>
-      !!screen &&
-      typeof screen.id === 'string' &&
-      !!screen.id &&
-      typeof screen.name === 'string' &&
-      typeof screen.branchId === 'string' &&
-      Array.isArray(screen.rootIds) &&
-      screen.rootIds.every((id) => typeof id === 'string'),
-  );
-  const branchesValid = document.branches.every(
-    (branch) =>
-      !!branch &&
-      typeof branch.id === 'string' &&
-      !!branch.id &&
-      typeof branch.name === 'string' &&
-      Array.isArray(branch.screenIds) &&
-      branch.screenIds.every((id) => typeof id === 'string'),
-  );
-  if (!screensValid || !branchesValid) return false;
-
-  const screenIds = new Set(document.screens.map((screen) => screen.id));
-  const branchIds = new Set(document.branches.map((branch) => branch.id));
-  if (!screenIds.has(document.activeScreenId) || !branchIds.has(document.activeBranchId))
-    return false;
-  if (
-    document.screens.some(
-      (screen) =>
-        !branchIds.has(screen.branchId) ||
-        !document.branches!.some(
-          (branch) => branch.id === screen.branchId && branch.screenIds.includes(screen.id),
-        ),
-    )
-  )
-    return false;
-
-  const nodes = Object.entries(document.nodes);
-  if (
-    nodes.some(
-      ([id, node]) =>
-        !nodeSchema.safeParse(node).success || node.id !== id || !screenIds.has(node.screenId),
-    )
-  )
-    return false;
-  if (
-    document.screens.some((screen) => screen.rootIds.some((id) => !document.nodes![id])) ||
-    nodes.some(([, node]) => node.childIds.some((id) => !document.nodes![id]))
-  )
-    return false;
-
-  return document.operations.every(
-    (record) =>
-      !!record &&
-      Number.isFinite(record.timestamp) &&
-      typeof record.summary === 'string' &&
-      operationSchema.safeParse(record).success,
-  );
+function initialState(): History {
+  const project = defaultProject();
+  return {
+    past: [],
+    present: blankDocument(),
+    future: [],
+    projects: [project],
+    activeProjectId: project.id,
+    warning: null,
+  };
 }
 
-function isProjectEnvelope(value: unknown): value is ProjectEnvelope {
-  if (!value || typeof value !== 'object') return false;
-  const envelope = value as Partial<ProjectEnvelope>;
-  if (envelope.version !== 1 || !Array.isArray(envelope.projects) || !envelope.projects.length)
-    return false;
-  const ids = new Set<string>();
-  for (const project of envelope.projects) {
-    if (
-      !project ||
-      typeof project.id !== 'string' ||
-      !project.id ||
-      typeof project.name !== 'string' ||
-      !project.name.trim() ||
-      !isDesignDocument(project.document) ||
-      ids.has(project.id)
-    )
-      return false;
-    ids.add(project.id);
-  }
-  return typeof envelope.activeProjectId === 'string' && ids.has(envelope.activeProjectId);
-}
-
-function parseStored<T>(
-  storage: ProjectStorage,
-  key: string,
-  validate: (value: unknown) => value is T,
-) {
+function readJson(storage: ProjectStorage, key: string) {
   const raw = storage.getItem(key);
-  if (!raw) return null;
+  if (!raw) return { present: false as const, value: null, validJson: true as const };
   try {
-    const value: unknown = JSON.parse(raw);
-    if (validate(value)) return value;
+    const serialized = raw.startsWith(COMPRESSED_PROJECT_PREFIX)
+      ? decompressFromUTF16(raw.slice(COMPRESSED_PROJECT_PREFIX.length))
+      : raw;
+    if (!serialized) throw new Error('Stored project payload could not be decompressed');
+    return {
+      present: true as const,
+      value: JSON.parse(serialized) as unknown,
+      validJson: true as const,
+    };
   } catch {
-    // Invalid local data is removed below and replaced with a safe blank document.
+    return { present: true as const, value: null, validJson: false as const };
   }
-  storage.removeItem(key);
-  return null;
+}
+
+function projectEnvelope(
+  state: Pick<History, 'projects' | 'activeProjectId'>,
+  documents: Map<string, DesignDocument>,
+): ProjectEnvelopeV2 {
+  return {
+    version: 2,
+    projects: state.projects.map((project) => ({
+      ...project,
+      document: documents.get(project.id) ?? blankDocument(),
+    })),
+    activeProjectId: state.activeProjectId,
+  };
+}
+
+function serializeEnvelope(envelope: ProjectEnvelopeV2) {
+  const json = JSON.stringify(envelope);
+  const stored = `${COMPRESSED_PROJECT_PREFIX}${compressToUTF16(json)}`;
+  return {
+    stored,
+    jsonCharacters: json.length,
+    storedCharacters: stored.length,
+  };
 }
 
 function saveEnvelope(
@@ -152,15 +105,9 @@ function saveEnvelope(
   state: Pick<History, 'projects' | 'activeProjectId'>,
   documents: Map<string, DesignDocument>,
 ) {
-  const envelope: ProjectEnvelope = {
-    version: 1,
-    projects: state.projects.map((project) => ({
-      ...project,
-      document: documents.get(project.id) ?? blankDocument(),
-    })),
-    activeProjectId: state.activeProjectId,
-  };
-  storage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(envelope));
+  const serialized = serializeEnvelope(projectEnvelope(state, documents));
+  storage.setItem(PROJECT_STORAGE_KEY, serialized.stored);
+  return serialized;
 }
 
 function makeProjectId() {
@@ -173,39 +120,133 @@ function normalizedName(name: string) {
   return name.trim().slice(0, 80);
 }
 
-const defaultProject: ProjectSummary = { id: DEFAULT_PROJECT_ID, name: DEFAULT_PROJECT_NAME };
-const initial: History = {
-  past: [],
-  present: blankDocument(),
-  future: [],
-  projects: [defaultProject],
-  activeProjectId: defaultProject.id,
-};
+function normalizeNodeStyle(node: DesignNode) {
+  node.style = { ...defaultStyle, ...node.style };
+}
+
+function normalizeProjectComponentNames(
+  nodes: DesignDocument['nodes'],
+  projectComponents: DesignDocument['projectComponents'],
+) {
+  for (const node of Object.values(nodes)) {
+    if (node.projectComponent?.role !== 'main') continue;
+    const definition = projectComponents?.[node.projectComponent.componentId];
+    if (!definition) continue;
+    node.name = definition.name;
+    if (definition.nodes[definition.sourceNodeId])
+      definition.nodes[definition.sourceNodeId].name = definition.name;
+  }
+}
+
+/**
+ * v2 style schemas gained editor-facing fields without changing the storage version.
+ * Validation accepts older v2 payloads through schema defaults, so restoration must
+ * materialize those defaults on every canvas snapshot that can become active later.
+ */
+function normalizeRestoredDocument(source: DesignDocument) {
+  const document = structuredClone(source);
+  Object.values(document.nodes).forEach(normalizeNodeStyle);
+  normalizeProjectComponentNames(document.nodes, document.projectComponents);
+  Object.values(document.revisions).forEach((revision) => {
+    Object.values(revision.snapshot.nodes).forEach(normalizeNodeStyle);
+    normalizeProjectComponentNames(revision.snapshot.nodes, revision.snapshot.projectComponents);
+  });
+  return document;
+}
+
+function stateFromEnvelope(envelope: ProjectEnvelopeV2, warning: string | null = null): History {
+  const document =
+    envelope.projects.find((project) => project.id === envelope.activeProjectId)?.document ??
+    blankDocument();
+  return {
+    past: [],
+    present: document,
+    future: [],
+    projects: envelope.projects.map(({ id, name }) => ({ id, name })),
+    activeProjectId: envelope.activeProjectId,
+    warning,
+  };
+}
+
+function carryProcessLedger(target: DesignDocument, source: DesignDocument) {
+  const document = structuredClone(target);
+  document.revisions = {
+    ...structuredClone(source.revisions),
+    ...document.revisions,
+  };
+  document.generationRuns = structuredClone(source.generationRuns);
+  document.candidates = structuredClone(source.candidates);
+  document.atomicChanges = structuredClone(source.atomicChanges);
+  document.processEvents = structuredClone(source.processEvents);
+  document.legacyArchive = structuredClone(source.legacyArchive ?? target.legacyArchive);
+  return document;
+}
 
 export function createDocumentStore(injectedStorage?: ProjectStorage) {
+  const initial = initialState();
   const store = writable<History>(initial);
-  let documents = new Map<string, DesignDocument>([[defaultProject.id, initial.present]]);
+  let documents = new Map<string, DesignDocument>([[initial.activeProjectId, initial.present]]);
   let histories = new Map<string, Pick<History, 'past' | 'present' | 'future'>>();
   const storage = () =>
     injectedStorage ?? (typeof localStorage === 'undefined' ? undefined : localStorage);
 
   function persistState(state: History) {
     const target = storage();
-    if (!target) return;
+    if (!target) return null;
+    let jsonCharacters = 0;
+    let storedCharacters = 0;
     try {
       documents.set(state.activeProjectId, state.present);
-      saveEnvelope(target, state, documents);
-    } catch {
-      // The in-memory editor remains usable when browser storage is unavailable.
+      const serialized = serializeEnvelope(projectEnvelope(state, documents));
+      jsonCharacters = serialized.jsonCharacters;
+      storedCharacters = serialized.storedCharacters;
+      target.setItem(PROJECT_STORAGE_KEY, serialized.stored);
+      return null;
+    } catch (cause) {
+      const error = cause instanceof Error ? cause : new Error(String(cause));
+      const details = {
+        errorName: error.name,
+        errorMessage: error.message,
+        projectCount: state.projects.length,
+        revisionCount: Object.keys(state.present.revisions).length,
+        jsonCharacters,
+        storedCharacters,
+      };
+      console.error('[codesign:storage] Project persistence failed', details, cause);
+      logAction('project.persistence-failed', details);
+      return error.name === 'QuotaExceededError'
+        ? 'Browser project storage is full. Changes remain available in this session.'
+        : PERSISTENCE_WARNING;
     }
   }
 
   function commit(change: (state: History) => History) {
     store.update((state) => {
       const next = change(state);
-      persistState(next);
-      return next;
+      const warning = persistState(next);
+      if (warning) return { ...next, warning };
+      return next.warning === PERSISTENCE_WARNING ||
+        next.warning?.startsWith('Browser project storage is full')
+        ? { ...next, warning: null }
+        : next;
     });
+  }
+
+  function activateEnvelope(envelope: ProjectEnvelopeV2, warning: string | null = null) {
+    const normalizedEnvelope: ProjectEnvelopeV2 = {
+      ...envelope,
+      projects: envelope.projects.map((project) => ({
+        ...project,
+        document: normalizeRestoredDocument(project.document),
+      })),
+    };
+    documents = new Map(
+      normalizedEnvelope.projects.map((project) => [project.id, project.document]),
+    );
+    histories = new Map();
+    const restored = stateFromEnvelope(normalizedEnvelope, warning);
+    store.set(restored);
+    return restored;
   }
 
   return {
@@ -218,42 +259,91 @@ export function createDocumentStore(injectedStorage?: ProjectStorage) {
         future: [],
       }));
     },
+    applyBatch(operations: DesignOperation[], transactionId?: string) {
+      if (!operations.length) return;
+      commit((state) => ({
+        ...state,
+        past: [...state.past.slice(-49), state.present],
+        present: applyOperationBatch(state.present, operations, {
+          transactionId: transactionId ?? `editor-${operations[0].id}`,
+        }),
+        future: [],
+      }));
+    },
     undo() {
       commit((state) =>
         state.past.length
-          ? {
-              ...state,
-              past: state.past.slice(0, -1),
-              present: state.past.at(-1)!,
-              future: [state.present, ...state.future],
-            }
+          ? (() => {
+              const present = carryProcessLedger(state.past.at(-1)!, state.present);
+              appendProcessEvent(present, {
+                type: 'reverted',
+                actor: 'user',
+                timestamp: Date.now(),
+                revisionId: present.currentRevisionId,
+                details: { fromRevisionId: state.present.currentRevisionId },
+              });
+              return {
+                ...state,
+                past: state.past.slice(0, -1),
+                present,
+                future: [state.present, ...state.future],
+              };
+            })()
           : state,
       );
     },
     redo() {
       commit((state) =>
         state.future.length
-          ? {
-              ...state,
-              past: [...state.past, state.present],
-              present: state.future[0],
-              future: state.future.slice(1),
-            }
+          ? (() => {
+              const present = carryProcessLedger(state.future[0], state.present);
+              appendProcessEvent(present, {
+                type: 'revision-activated',
+                actor: 'user',
+                timestamp: Date.now(),
+                revisionId: present.currentRevisionId,
+                details: { source: 'redo' },
+              });
+              return {
+                ...state,
+                past: [...state.past, state.present],
+                present,
+                future: state.future.slice(1),
+              };
+            })()
           : state,
       );
     },
     replace(document: DesignDocument) {
+      if (!isDesignDocumentV2(document)) throw new Error('Replacement document is invalid');
       commit((state) => ({ ...state, past: [], present: document, future: [] }));
     },
-    navigate(screenId: string, branchId?: string) {
+    replaceMetadata(document: DesignDocument) {
+      if (!isDesignDocumentV2(document)) throw new Error('Replacement document is invalid');
+      commit((state) => ({ ...state, present: document }));
+    },
+    commitRevision(document: DesignDocument) {
+      if (!isDesignDocumentV2(document)) throw new Error('Committed document is invalid');
       commit((state) => ({
         ...state,
-        present: {
-          ...state.present,
-          activeScreenId: screenId,
-          activeBranchId: branchId ?? state.present.activeBranchId,
-        },
+        past: [...state.past.slice(-49), state.present],
+        present: document,
+        future: [],
       }));
+    },
+    navigate(screenId: string, branchId?: string) {
+      commit((state) => {
+        if (!state.present.screens.some((screen) => screen.id === screenId)) return state;
+        const activeBranchId = branchId ?? state.present.activeBranchId;
+        if (!state.present.branches.some((branch) => branch.id === activeBranchId)) return state;
+        const present = structuredClone(state.present);
+        present.activeScreenId = screenId;
+        present.activeBranchId = activeBranchId;
+        const snapshot = present.revisions[present.currentRevisionId].snapshot;
+        snapshot.activeScreenId = screenId;
+        snapshot.activeBranchId = activeBranchId;
+        return { ...state, present };
+      });
     },
     reset() {
       commit((state) => ({ ...state, past: [], present: blankDocument(), future: [] }));
@@ -261,36 +351,74 @@ export function createDocumentStore(injectedStorage?: ProjectStorage) {
     restore() {
       const target = storage();
       if (!target) return;
+      let warning: string | null = null;
       try {
-        const envelope = parseStored(target, PROJECT_STORAGE_KEY, isProjectEnvelope);
-        if (envelope) {
-          documents = new Map(envelope.projects.map((project) => [project.id, project.document]));
-          histories = new Map();
-          const restored = {
-            past: [],
-            present: documents.get(envelope.activeProjectId) ?? blankDocument(),
-            future: [],
-            projects: envelope.projects.map(({ id, name }) => ({ id, name })),
-            activeProjectId: envelope.activeProjectId,
-          };
-          store.set(restored);
-          persistState(restored);
+        const v2 = readJson(target, PROJECT_STORAGE_KEY);
+        const recoveredV2 = v2.present ? recoverProjectEnvelopeV2(v2.value) : null;
+        if (recoveredV2 && isProjectEnvelopeV2(recoveredV2)) {
+          activateEnvelope(recoveredV2);
           return;
         }
+        if (v2.present)
+          warning = 'Stored Codesign project data was invalid. Legacy recovery was attempted.';
 
-        const legacy = parseStored(target, LEGACY_DOCUMENT_KEY, isDesignDocument);
-        const migrated = {
-          ...initial,
-          present: legacy ?? blankDocument(),
-          projects: [{ ...defaultProject }],
-        };
-        documents = new Map([[migrated.activeProjectId, migrated.present]]);
+        const v1Projects = readJson(target, LEGACY_PROJECT_STORAGE_KEY);
+        if (v1Projects.present && isLegacyProjectEnvelopeV1(v1Projects.value)) {
+          const migrated = migrateProjectEnvelopeV1(v1Projects.value, LEGACY_PROJECT_STORAGE_KEY);
+          saveEnvelope(
+            target,
+            {
+              projects: migrated.projects.map(({ id, name }) => ({ id, name })),
+              activeProjectId: migrated.activeProjectId,
+            },
+            new Map(migrated.projects.map((project) => [project.id, project.document])),
+          );
+          activateEnvelope(migrated, warning);
+          return;
+        }
+        if (v1Projects.present)
+          warning = 'Legacy project data could not be migrated and was left untouched.';
+
+        const legacyDocument = readJson(target, LEGACY_DOCUMENT_KEY);
+        if (legacyDocument.present && isLegacyDesignDocumentV1(legacyDocument.value)) {
+          const document = migrateDocumentV1(legacyDocument.value, LEGACY_DOCUMENT_KEY);
+          const envelope: ProjectEnvelopeV2 = {
+            version: 2,
+            activeProjectId: DEFAULT_PROJECT_ID,
+            projects: [{ ...defaultProject(), document }],
+          };
+          saveEnvelope(
+            target,
+            { projects: [defaultProject()], activeProjectId: DEFAULT_PROJECT_ID },
+            new Map([[DEFAULT_PROJECT_ID, document]]),
+          );
+          activateEnvelope(envelope, warning);
+          return;
+        }
+        if (legacyDocument.present)
+          warning = 'Legacy design data could not be migrated and was left untouched.';
+
+        const blank = initialState();
+        blank.warning = warning;
+        documents = new Map([[blank.activeProjectId, blank.present]]);
         histories = new Map();
-        saveEnvelope(target, migrated, documents);
-        if (legacy) target.removeItem(LEGACY_DOCUMENT_KEY);
-        store.set(migrated);
+        store.set(blank);
+        if (v2.present) return;
+        try {
+          saveEnvelope(target, blank, documents);
+        } catch {
+          store.set({
+            ...blank,
+            warning: warning ?? 'Codesign could not initialize persistent project storage.',
+          });
+        }
       } catch {
-        // Keep the safe initial state if localStorage cannot be read.
+        // Raw legacy keys are intentionally never removed or overwritten on recovery failure.
+        const blank = initialState();
+        blank.warning = 'Projects could not be restored. Stored legacy data was left untouched.';
+        documents = new Map([[blank.activeProjectId, blank.present]]);
+        histories = new Map();
+        store.set(blank);
       }
     },
     createProject(name: string) {
@@ -311,6 +439,7 @@ export function createDocumentStore(injectedStorage?: ProjectStorage) {
         future: [],
         projects: [...state.projects, project],
         activeProjectId: project.id,
+        warning: state.warning,
       }));
       return project;
     },
@@ -349,8 +478,8 @@ export function createDocumentStore(injectedStorage?: ProjectStorage) {
         future: targetHistory?.future ?? [],
         activeProjectId: projectId,
       };
-      store.set(next);
-      persistState(next);
+      const warning = persistState(next);
+      store.set(warning ? { ...next, warning } : next);
       return true;
     },
     deleteProject(projectId: string) {
@@ -374,9 +503,9 @@ export function createDocumentStore(injectedStorage?: ProjectStorage) {
       documents.delete(projectId);
       histories.delete(projectId);
       documents.set(activeProjectId, present);
-      const next = { past, present, future, projects, activeProjectId };
-      store.set(next);
-      persistState(next);
+      const next = { ...current, past, present, future, projects, activeProjectId };
+      const warning = persistState(next);
+      store.set(warning ? { ...next, warning } : next);
       return { removed, activeProjectId };
     },
   };

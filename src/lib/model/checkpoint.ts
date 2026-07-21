@@ -16,12 +16,14 @@ function node(
   width: number,
   height: number,
   role?: string,
+  parentId?: string,
 ): DesignNode {
   return {
     id,
     name,
     kind,
     screenId: 'screen-1',
+    parentId,
     childIds: [],
     bounds: { x, y, width, height },
     style: { ...defaultStyle, fill: kind === 'frame' ? '#f7f8fa' : '#d9dde3' },
@@ -34,9 +36,9 @@ export function demoCheckpoint(): DesignDocument {
   let document = blankDocument();
   const nodes = [
     node('frame', 'Application frame', 'frame', 80, 60, 760, 560, 'app-shell'),
-    node('sidebar', 'Sidebar', 'rectangle', 100, 80, 150, 520, 'sidebar'),
-    node('header', 'Header', 'rectangle', 270, 80, 550, 70, 'header'),
-    node('content', 'Content region', 'rectangle', 270, 170, 550, 410, 'content-region'),
+    node('sidebar', 'Sidebar', 'rectangle', 100, 80, 150, 520, 'sidebar', 'frame'),
+    node('header', 'Header', 'rectangle', 270, 80, 550, 70, 'header', 'frame'),
+    node('content', 'Content region', 'rectangle', 270, 170, 550, 410, 'content-region', 'frame'),
     ...[0, 1, 2, 3].map((index) =>
       node(
         `row-${index + 1}`,
@@ -47,6 +49,7 @@ export function demoCheckpoint(): DesignDocument {
         500,
         58,
         'record',
+        'frame',
       ),
     ),
   ];

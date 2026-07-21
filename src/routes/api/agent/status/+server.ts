@@ -1,28 +1,22 @@
-import { env } from '$env/dynamic/private';
-import { json } from '@sveltejs/kit';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { createProvider, providerSettings } from '$lib/agent/providers';
+import { privateJson, providerError } from '../provider/_response.server';
 
-const run = promisify(execFile);
 export async function GET() {
-  if ((env.MALLEABLE_AGENT_BACKEND ?? 'local') !== 'codex')
-    return json({ backend: 'local', available: true, message: 'Local deterministic rules ready' });
   try {
-    await run(env.MALLEABLE_CODEX_COMMAND || 'codex', ['login', 'status'], {
-      timeout: 4_000,
-      env: process.env,
+    const settings = providerSettings();
+    const provider = createProvider(settings);
+    const status = await provider.status();
+    return privateJson({
+      provider: 'codex',
+      available: status.available,
+      connected: status.connected,
+      status,
+      descriptor: provider.descriptor,
+      configuration: { model: settings.model, effort: settings.effort, runtime: 'project-pinned' },
+      supportedActions: ['complete'],
+      message: status.message,
     });
-    return json({
-      backend: 'codex',
-      available: true,
-      message: 'Codex CLI signed in through ChatGPT',
-    });
-  } catch {
-    return json({
-      backend: 'codex',
-      available: false,
-      message:
-        'Codex is unavailable or signed out. Run devenv shell -- codex login; local fallback remains available.',
-    });
+  } catch (cause) {
+    return providerError(cause);
   }
 }

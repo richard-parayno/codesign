@@ -31,7 +31,7 @@ export async function POST({ request }) {
   const parsed = actionSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return json({ message: 'Invalid debug action' }, { status: 400 });
   console.info(
-    `[malleable:action] ${JSON.stringify({
+    `[codesign:action] ${JSON.stringify({
       serverTimestamp: new Date().toISOString(),
       ...parsed.data,
     })}`,
